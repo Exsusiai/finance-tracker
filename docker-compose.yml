@@ -1,0 +1,60 @@
+# Finance Tracker — Local Docker Compose
+# 部署: docker compose up -d
+# 数据: 宿主机 ./data/ 卷挂载到容器内 /app/data,SQLite 文件位于此处
+#
+# 注意: P0 阶段为骨架/占位,Dockerfile 与具体启动命令在 P2 阶段细化
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: finance-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:////app/data/finance.db
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: finance-frontend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=http://backend:8000/api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  # MCP server is invoked over stdio by local agents (Cortana / OpenClaw),
+  # so it does not need a long-running HTTP container by default.
+  # Provided here for `docker compose run mcp-server` style invocations.
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    container_name: finance-mcp
+    profiles: ["mcp"]
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite:////app/data/finance.db
+    volumes:
+      - ./data:/app/data
+    stdin_open: true
+    tty: true
