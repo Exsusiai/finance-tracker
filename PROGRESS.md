@@ -19,13 +19,17 @@
 | 2026-05-01 | [P1] Web UI - 总览仪表盘 | Not started | — |
 | 2026-05-01 | [P1] Web UI - 记账与交易管理 | Not started | — |
 | 2026-05-02 | [P1] Web UI - 资产与现金流图表 | Done | Next.js 15 + Recharts, 5 charts, export CSV/PNG, responsive, dark mode. |
+| 2026-05-03 | [P1] Web UI - 记账与交易管理 | Done | Full transaction management UI: sidebar nav, PDF upload (drag & drop + click), parsing preview with confirm/correct, manual transaction form, transaction list with filtering/search/sort, transaction detail/edit panel, category chip filters. Build passes. |
+| 2026-05-02 | [P1] Web UI - 总览仪表盘 | Done | Dashboard page: total assets hero (per-currency), asset distribution donut chart, monthly income/expense/savings rate cards, income vs expense trend area chart, recent transactions list. Sidebar updated with 总览 as first nav. Root redirect → /dashboard. Build passes. |
 | 2026-05-01 | [P2] Agent 接口 - MCP Server | Not started | — |
 | 2026-05-01 | [P2] 银行 API 直连（自动记账） | Not started | — |
-| 2026-05-01 | [P2] Notion 数据同步 | Not started | — |
+| 2026-05-01 | [P2] Notion 数据同步 | Done | NotionSyncService 实现: 交易记录/现金流/资产汇总三路同步到 Notion 数据库。API 端点: /notion/sync, /notion/setup, /notion/status。单向同步 (finance-tracker → Notion), 增量更新, 速率限制。 |
 | 2026-05-01 | [P2] Docker 部署与运维 | Not started | — |
 
 ## 下一步
-- [ ] 启动 [P0] 技术选型与项目架构设计
+- [ ] [P1] 交易智能分类引擎 (categorizer engine skeleton exists, needs full implementation)
+- [ ] [P1] 市场数据集成与资产实时估值 (market_data engine skeleton exists)
+- [ ] [P1] PDF 账单解析引擎 (pdf_parser engine exists, 473 lines, needs testing)
 
 ## 关键决策记录
 （待记录）
