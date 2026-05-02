@@ -1,13 +1,12 @@
 "use client";
 
 import { useState, useMemo, useCallback } from "react";
-import { useCashFlowMonthly, useCashFlowByCategory, usePortfolioBreakdown, usePortfolioSummary } from "@/lib/hooks";
+import { useCashFlowMonthly, useCashFlowByCategory } from "@/lib/hooks";
 import { downloadCsv, downloadBlob } from "@/lib/api";
 import { getTimeRangeDates, type TimeRange } from "@/lib/time-range";
 import { formatCurrency, formatPercent, periodLabel } from "@/lib/utils";
 import {
   AssetTrendChart,
-  AssetDistributionChart,
   MonthlyBarChart,
   SavingsRateChart,
   ExpensePieChart,
@@ -22,11 +21,6 @@ const TIME_RANGE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: "all", label: "全部" },
 ];
 
-const DISTRIBUTION_MODE_OPTIONS = [
-  { value: "class", label: "按类型" },
-  { value: "currency", label: "按币种" },
-];
-
 const CATEGORY_KIND_OPTIONS = [
   { value: "expense", label: "支出" },
   { value: "income", label: "收入" },
@@ -34,7 +28,6 @@ const CATEGORY_KIND_OPTIONS = [
 
 export default function AnalyticsPage() {
   const [timeRange, setTimeRange] = useState<TimeRange>("6m");
-  const [distMode, setDistMode] = useState<"class" | "currency">("class");
   const [categoryKind, setCategoryKind] = useState<"expense" | "income">("expense");
 
   const { from, to } = useMemo(() => getTimeRangeDates(timeRange), [timeRange]);
@@ -56,18 +49,6 @@ export default function AnalyticsPage() {
     isLoading: categoryLoading,
   } = useCashFlowByCategory(currentPeriod);
 
-  const {
-    data: breakdown,
-    error: breakdownError,
-    isLoading: breakdownLoading,
-  } = usePortfolioBreakdown();
-
-  const {
-    data: summary,
-    error: summaryError,
-    isLoading: summaryLoading,
-  } = usePortfolioSummary();
-
   // ─── Export CSV ───────────────────────────────────────────────────────
   const handleExportCsv = useCallback(() => {
     if (!monthlyData || monthlyData.length === 0) return;
@@ -83,8 +64,6 @@ export default function AnalyticsPage() {
 
   // ─── Export PNG (all charts) ──────────────────────────────────────────
   const handleExportPng = useCallback(() => {
-    // Use html2canvas-like approach via SVG serialization
-    // For now, export individual SVGs
     const svgs = document.querySelectorAll("#analytics-page svg.recharts-surface");
     if (svgs.length === 0) return;
 
@@ -114,15 +93,22 @@ export default function AnalyticsPage() {
     });
   }, []);
 
-  // ─── Derived values ───────────────────────────────────────────────────
-  const latestMonth = monthlyData?.[0];
-  const totalIncome = latestMonth ? parseFloat(latestMonth.income) : 0;
-  const totalExpense = latestMonth ? parseFloat(latestMonth.expense) : 0;
-  const latestSavingsRate = totalIncome > 0 ? ((totalIncome - totalExpense) / totalIncome) * 100 : 0;
-  const portfolioTotal = summary ? parseFloat(summary.total_value) : 0;
+  // ─── Derived: aggregate over selected time range ──────────────────────
+  const rangeTotals = useMemo(() => {
+    if (!monthlyData || monthlyData.length === 0) {
+      return { income: 0, expense: 0, savings: 0, savingsRate: 0 };
+    }
+    const income = monthlyData.reduce((s, d) => s + parseFloat(d.income), 0);
+    const expense = monthlyData.reduce((s, d) => s + parseFloat(d.expense), 0);
+    const savings = monthlyData.reduce((s, d) => s + parseFloat(d.savings), 0);
+    const savingsRate = income > 0 ? ((income - expense) / income) * 100 : 0;
+    return { income, expense, savings, savingsRate };
+  }, [monthlyData]);
 
-  const hasAnyError = monthlyError || categoryError || breakdownError || summaryError;
-  const hasAnyLoading = monthlyLoading || categoryLoading || breakdownLoading || summaryLoading;
+  const latestMonth = monthlyData?.[0];
+
+  const hasAnyError = monthlyError || categoryError;
+  const hasAnyLoading = monthlyLoading || categoryLoading;
 
   return (
     <div id="analytics-page" className="min-h-screen bg-background text-foreground">
@@ -130,7 +116,7 @@ export default function AnalyticsPage() {
         {/* ─── Header ──────────────────────────────────────────────── */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">📊 资产分析 & 现金流</h1>
+            <h1 className="text-2xl font-bold tracking-tight">📊 现金流分析</h1>
             <p className="text-sm text-muted-foreground mt-1">
               {latestMonth ? `最近数据：${periodLabel(latestMonth.period)}` : "加载中…"}
             </p>
@@ -145,35 +131,32 @@ export default function AnalyticsPage() {
           </div>
         </div>
 
-        {/* ─── Summary Cards ───────────────────────────────────────── */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4 mb-6">
+        {/* ─── Summary Cards (time-range scoped) ──────────────────── */}
+        <div className="grid grid-cols-3 gap-3 md:gap-4 mb-6">
           <SummaryCard
-            label="投资组合总值"
-            value={portfolioTotal > 0 ? formatCurrency(portfolioTotal, summary?.base_currency) : "—"}
-            loading={summaryLoading}
+            label={`${TIME_RANGE_OPTIONS.find(o => o.value === timeRange)?.label || ""}收入`}
+            value={rangeTotals.income > 0 ? formatCurrency(rangeTotals.income) : "—"}
+            loading={monthlyLoading}
+            color="text-green-500"
           />
           <SummaryCard
-            label="本月收入"
-            value={totalIncome > 0 ? formatCurrency(totalIncome) : "—"}
+            label={`${TIME_RANGE_OPTIONS.find(o => o.value === timeRange)?.label || ""}支出`}
+            value={rangeTotals.expense > 0 ? formatCurrency(rangeTotals.expense) : "—"}
             loading={monthlyLoading}
+            color="text-red-500"
           />
           <SummaryCard
-            label="本月支出"
-            value={totalExpense > 0 ? formatCurrency(totalExpense) : "—"}
+            label="平均储蓄率"
+            value={monthlyData && monthlyData.length > 0 ? formatPercent(rangeTotals.savingsRate) : "—"}
             loading={monthlyLoading}
-          />
-          <SummaryCard
-            label="储蓄率"
-            value={monthlyData && monthlyData.length > 0 ? formatPercent(latestSavingsRate) : "—"}
-            loading={monthlyLoading}
-            color={latestSavingsRate >= 0 ? "text-green-500" : "text-red-500"}
+            color={rangeTotals.savingsRate >= 0 ? "text-green-500" : "text-red-500"}
           />
         </div>
 
         {/* ─── Error state ─────────────────────────────────────────── */}
         {hasAnyError && !hasAnyLoading && (
           <ErrorDisplay
-            message={monthlyError?.message || categoryError?.message || breakdownError?.message || summaryError?.message || "加载失败"}
+            message={monthlyError?.message || categoryError?.message || "加载失败"}
             onRetry={() => refreshMonthly()}
           />
         )}
@@ -186,24 +169,8 @@ export default function AnalyticsPage() {
         {/* ─── Charts ──────────────────────────────────────────────── */}
         {!hasAnyLoading && !hasAnyError && (
           <div className="space-y-6">
-            {/* Row 1: Asset Trend + Asset Distribution */}
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-              <AssetTrendChart data={monthlyData || []} range={timeRange} />
-              <div>
-                <div className="mb-4">
-                  <TabSelector
-                    value={distMode}
-                    onChange={(v) => setDistMode(v as "class" | "currency")}
-                    options={DISTRIBUTION_MODE_OPTIONS}
-                  />
-                </div>
-                <AssetDistributionChart
-                  byClass={breakdown?.by_class || {}}
-                  byCurrency={breakdown?.by_currency || {}}
-                  mode={distMode}
-                />
-              </div>
-            </div>
+            {/* Row 1: Asset Trend */}
+            <AssetTrendChart data={monthlyData || []} range={timeRange} />
 
             {/* Row 2: Monthly Bar + Savings Rate */}
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -211,7 +178,7 @@ export default function AnalyticsPage() {
               <SavingsRateChart data={monthlyData || []} />
             </div>
 
-            {/* Row 3: Expense Category Pie */}
+            {/* Row 3: Expense/Income Category Pie */}
             <div>
               <div className="mb-4">
                 <TabSelector

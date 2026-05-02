@@ -2,30 +2,17 @@
 
 import { useMemo } from "react";
 import Link from "next/link";
-import {
-  AreaChart,
-  Area,
-  PieChart,
-  Pie,
-  Cell,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
+import { useRouter } from "next/navigation";
 import {
   useBalances,
   usePortfolioBreakdown,
   useCashFlowMonthly,
   useTransactions,
-  useCashFlowTimeseries,
 } from "@/lib/hooks";
 import {
   formatCurrency,
   formatDate,
   periodLabel,
-  CHART_COLORS,
   ASSET_CLASS_LABELS,
   ASSET_CLASS_COLORS,
 } from "@/lib/utils";
@@ -38,14 +25,14 @@ function currentYearMonth(): string {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const period = currentYearMonth();
 
-  // ─── Data fetching ────────────────────────────────────────────────────
+  // ─── Data fetching (minimal set for fast load) ───────────────────────
   const { data: balances, error: balancesError, isLoading: balancesLoading, mutate: refreshBalances } = useBalances();
   const { data: breakdown, error: breakdownError, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
   const { data: monthlyData, error: monthlyError, isLoading: monthlyLoading, mutate: refreshMonthly } = useCashFlowMonthly(period);
-  const { data: txResp, error: txError, isLoading: txLoading, mutate: refreshTx } = useTransactions({ limit: 5 });
-  const { data: timeseries, error: tsError, isLoading: tsLoading, mutate: refreshTs } = useCashFlowTimeseries();
+  const { data: txResp, error: txError, isLoading: txLoading, mutate: refreshTx } = useTransactions({ limit: 8 });
 
   // ─── Derived: Total Assets by currency ────────────────────────────────
   const currencyTotals = useMemo(() => {
@@ -68,39 +55,33 @@ export default function DashboardPage() {
   const monthExpense = thisMonth ? parseFloat(thisMonth.expense) : 0;
   const savingsRate = monthIncome > 0 ? ((monthIncome - monthExpense) / monthIncome) * 100 : 0;
 
-  // ─── Derived: Pie chart data ──────────────────────────────────────────
-  const pieData = useMemo(() => {
+  // ─── Derived: Asset class mini-cards ──────────────────────────────────
+  const assetClassCards = useMemo(() => {
     if (!breakdown?.by_class) return [];
     const entries = Object.entries(breakdown.by_class);
     const total = entries.reduce((s, [, v]) => s + parseFloat(v.value || "0"), 0);
-    return entries.map(([key, val], i) => ({
-      name: ASSET_CLASS_LABELS[key] || key,
-      value: parseFloat(val.value || "0"),
-      fill: ASSET_CLASS_COLORS[key] || CHART_COLORS[i % CHART_COLORS.length],
-      percent: total > 0 ? (parseFloat(val.value || "0") / total) * 100 : 0,
-    }));
+    if (total <= 0) return [];
+    return entries
+      .map(([key, val]) => ({
+        key,
+        label: ASSET_CLASS_LABELS[key] || key,
+        value: parseFloat(val.value || "0"),
+        percent: (parseFloat(val.value || "0") / total) * 100,
+        color: ASSET_CLASS_COLORS[key] || "hsl(0, 0%, 50%)",
+      }))
+      .sort((a, b) => b.value - a.value);
   }, [breakdown]);
 
-  // ─── Derived: Timeseries chart data ───────────────────────────────────
-  const trendData = useMemo(() => {
-    if (!timeseries) return [];
-    return timeseries.periods.map((p, i) => ({
-      period: periodLabel(p),
-      收入: parseFloat(timeseries.income[i] || "0"),
-      支出: Math.abs(parseFloat(timeseries.expense[i] || "0")),
-    }));
-  }, [timeseries]);
-
   // ─── Error / Loading ──────────────────────────────────────────────────
-  const hasError = balancesError || breakdownError || monthlyError || txError || tsError;
-  const hasLoading = balancesLoading || breakdownLoading || monthlyLoading || txLoading || tsLoading;
-  const refreshAll = () => { refreshBalances(); refreshBreakdown(); refreshMonthly(); refreshTx(); refreshTs(); };
+  const hasError = balancesError || breakdownError || monthlyError || txError;
+  const hasLoading = balancesLoading || breakdownLoading || monthlyLoading || txLoading;
+  const refreshAll = () => { refreshBalances(); refreshBreakdown(); refreshMonthly(); refreshTx(); };
 
   if (hasLoading) return <LoadingSpinner className="min-h-[60vh]" />;
   if (hasError) {
     return (
       <ErrorDisplay
-        message={balancesError?.message || breakdownError?.message || monthlyError?.message || txError?.message || tsError?.message || "加载失败"}
+        message={balancesError?.message || breakdownError?.message || monthlyError?.message || txError?.message || "加载失败"}
         onRetry={refreshAll}
       />
     );
@@ -117,87 +98,52 @@ export default function DashboardPage() {
           </p>
         </div>
 
-        {/* ─── Row 1: Hero Card + Asset Distribution ──────────────── */}
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 md:gap-6 mb-6">
-          {/* Total Assets Hero */}
-          <div className="lg:col-span-3 rounded-xl border border-border bg-card p-6">
-            <p className="text-sm text-muted-foreground mb-1">总资产</p>
-            <p className="text-3xl md:text-4xl font-bold text-card-foreground mb-4">
-              {grandTotal > 0 ? formatCurrency(grandTotal) : "—"}
-            </p>
-            <div className="flex flex-wrap gap-3">
-              {currencyTotals.map((c) => (
+        {/* ─── Total Assets Hero Card ──────────────────────────────── */}
+        <div className="rounded-xl border border-border bg-card p-6 mb-6">
+          <p className="text-sm text-muted-foreground mb-1">总资产</p>
+          <p className="text-3xl md:text-4xl font-bold text-card-foreground mb-4">
+            {grandTotal > 0 ? formatCurrency(grandTotal) : "—"}
+          </p>
+          <div className="flex flex-wrap gap-3 mb-4">
+            {currencyTotals.map((c) => (
+              <div
+                key={c.currency}
+                className="rounded-lg bg-muted/50 px-3 py-2 text-sm"
+              >
+                <span className="text-muted-foreground">{c.currency}</span>
+                <span className="ml-2 font-semibold text-foreground">
+                  {formatCurrency(c.total, c.currency)}
+                </span>
+              </div>
+            ))}
+            {currencyTotals.length === 0 && (
+              <span className="text-sm text-muted-foreground">暂无账户数据</span>
+            )}
+          </div>
+
+          {/* Asset class distribution mini-cards */}
+          {assetClassCards.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {assetClassCards.map((ac) => (
                 <div
-                  key={c.currency}
-                  className="rounded-lg bg-muted/50 px-3 py-2 text-sm"
+                  key={ac.key}
+                  className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 px-3 py-1.5 text-sm"
                 >
-                  <span className="text-muted-foreground">{c.currency}</span>
-                  <span className="ml-2 font-semibold text-foreground">
-                    {formatCurrency(c.total, c.currency)}
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: ac.color }} />
+                  <span className="text-muted-foreground">{ac.label}</span>
+                  <span className="font-medium text-foreground">
+                    {formatCurrency(ac.value)}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {ac.percent.toFixed(1)}%
                   </span>
                 </div>
               ))}
-              {currencyTotals.length === 0 && (
-                <span className="text-sm text-muted-foreground">暂无账户数据</span>
-              )}
             </div>
-          </div>
-
-          {/* Asset Distribution Pie */}
-          <div className="lg:col-span-2 rounded-xl border border-border bg-card p-6">
-            <h3 className="text-base font-semibold text-card-foreground mb-3">资产分布</h3>
-            {pieData.length > 0 ? (
-              <div className="flex flex-col items-center gap-4">
-                <ResponsiveContainer width="100%" height={200}>
-                  <PieChart>
-                    <Pie
-                      data={pieData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={50}
-                      outerRadius={85}
-                      paddingAngle={2}
-                      dataKey="value"
-                      stroke="none"
-                    >
-                      {pieData.map((entry, i) => (
-                        <Cell key={i} fill={entry.fill} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      content={({ active, payload }) => {
-                        if (!active || !payload?.length) return null;
-                        const d = payload[0];
-                        return (
-                          <div className="rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-sm">
-                            <span className="font-medium text-foreground">{d.name}</span>
-                            <span className="text-muted-foreground ml-2">
-                              {formatCurrency(Number(d.value ?? 0))} ({d.payload.percent?.toFixed(1) ?? "0"}%)
-                            </span>
-                          </div>
-                        );
-                      }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs">
-                  {pieData.map((d) => (
-                    <div key={d.name} className="flex items-center gap-1.5">
-                      <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: d.fill }} />
-                      <span className="text-muted-foreground">{d.name}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-center h-[200px] text-sm text-muted-foreground">
-                暂无持仓数据
-              </div>
-            )}
-          </div>
+          )}
         </div>
 
-        {/* ─── Row 2: Monthly Summary Cards ───────────────────────── */}
+        {/* ─── Monthly Summary Cards ───────────────────────────────── */}
         <div className="grid grid-cols-3 gap-3 md:gap-4 mb-6">
           {/* Income */}
           <div className="rounded-xl border border-border bg-card p-4">
@@ -245,102 +191,83 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* ─── Row 3: Trend Chart + Recent Transactions ───────────── */}
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 md:gap-6">
-          {/* Trend Chart */}
-          <div className="rounded-xl border border-border bg-card p-4 md:p-6">
-            <h3 className="text-base font-semibold text-card-foreground mb-4">收支趋势</h3>
-            {trendData.length > 0 ? (
-              <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={trendData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                  <defs>
-                    <linearGradient id="dashGradIncome" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="hsl(160, 60%, 45%)" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="hsl(160, 60%, 45%)" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="dashGradExpense" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="hsl(340, 70%, 55%)" stopOpacity={0.3} />
-                      <stop offset="95%" stopColor="hsl(340, 70%, 55%)" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-                  <XAxis dataKey="period" tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} />
-                  <YAxis tick={{ fontSize: 12, fill: "hsl(var(--muted-foreground))" }} tickLine={false} axisLine={false} tickFormatter={(v) => { if (Math.abs(v) >= 1000) return `${(v / 1000).toFixed(0)}K`; return v.toFixed(0); }} />
-                  <Tooltip
-                    content={({ active, payload, label }) => {
-                      if (!active || !payload?.length) return null;
-                      return (
-                        <div className="rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-sm">
-                          <p className="text-muted-foreground mb-1">{label}</p>
-                          {payload.map((entry, i) => (
-                            <div key={i} className="flex items-center gap-2">
-                              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: entry.color }} />
-                              <span className="text-muted-foreground">{entry.name}:</span>
-                              <span className="font-medium text-foreground">{formatCurrency(entry.value as number)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    }}
-                  />
-                  <Area type="monotone" dataKey="收入" stroke="hsl(160, 60%, 45%)" fill="url(#dashGradIncome)" strokeWidth={2} />
-                  <Area type="monotone" dataKey="支出" stroke="hsl(340, 70%, 55%)" fill="url(#dashGradExpense)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="flex items-center justify-center h-[200px] text-sm text-muted-foreground">
-                暂无趋势数据
-              </div>
-            )}
-          </div>
+        {/* ─── Quick Actions ───────────────────────────────────────── */}
+        <div className="grid grid-cols-3 gap-3 md:gap-4 mb-6">
+          <button
+            onClick={() => router.push("/transactions?action=add")}
+            className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card p-4 text-sm font-medium text-foreground hover:bg-muted/50 transition-colors cursor-pointer"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            添加交易
+          </button>
+          <button
+            onClick={() => router.push("/transactions?action=import")}
+            className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card p-4 text-sm font-medium text-foreground hover:bg-muted/50 transition-colors cursor-pointer"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+            </svg>
+            导入PDF
+          </button>
+          <button
+            onClick={() => router.push("/assets?action=add")}
+            className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card p-4 text-sm font-medium text-foreground hover:bg-muted/50 transition-colors cursor-pointer"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+            </svg>
+            添加资产
+          </button>
+        </div>
 
-          {/* Recent Transactions */}
-          <div className="rounded-xl border border-border bg-card p-4 md:p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold text-card-foreground">最近交易</h3>
-              <Link href="/transactions" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
-                查看全部 →
-              </Link>
-            </div>
-            {txResp && txResp.data.length > 0 ? (
-              <div className="space-y-3">
-                {txResp.data.map((tx) => (
-                  <div
-                    key={tx.id}
-                    className="flex items-center justify-between gap-3 py-2 border-b border-border last:border-0"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-foreground truncate">
-                          {tx.description || tx.raw_description || "—"}
-                        </span>
-                        {tx.category_name && (
-                          <span className="inline-flex shrink-0 items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                            {tx.category_name}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {formatDate(tx.occurred_at)}
-                        {tx.account_name && ` · ${tx.account_name}`}
-                      </p>
-                    </div>
-                    <span
-                      className={`text-sm font-semibold whitespace-nowrap ${
-                        tx.type === "income" ? "text-green-500" : "text-red-500"
-                      }`}
-                    >
-                      {tx.type === "income" ? "+" : "-"}{formatCurrency(Math.abs(parseFloat(tx.amount)), tx.currency)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="flex items-center justify-center h-[200px] text-sm text-muted-foreground">
-                暂无交易记录
-              </div>
-            )}
+        {/* ─── Recent Transactions ────────────────────────────────── */}
+        <div className="rounded-xl border border-border bg-card p-4 md:p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-base font-semibold text-card-foreground">最近交易</h3>
+            <Link href="/transactions" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+              查看全部 →
+            </Link>
           </div>
+          {txResp && txResp.data.length > 0 ? (
+            <div className="space-y-1">
+              {txResp.data.map((tx) => (
+                <div
+                  key={tx.id}
+                  className="flex items-center justify-between gap-3 py-2.5 border-b border-border last:border-0"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-foreground truncate">
+                        {tx.description || tx.raw_description || "—"}
+                      </span>
+                      {tx.category_name && (
+                        <span className="inline-flex shrink-0 items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          {tx.category_name}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {formatDate(tx.occurred_at)}
+                      {tx.account_name && ` · ${tx.account_name}`}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-sm font-semibold whitespace-nowrap ${
+                      tx.type === "income" ? "text-green-500" : "text-red-500"
+                    }`}
+                  >
+                    {tx.type === "income" ? "+" : "-"}{formatCurrency(Math.abs(parseFloat(tx.amount)), tx.currency)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-[200px] text-sm text-muted-foreground">
+              暂无交易记录
+            </div>
+          )}
         </div>
       </div>
     </div>
