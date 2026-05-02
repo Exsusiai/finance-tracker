@@ -18,7 +18,7 @@
 | 2026-05-01 | [P1] 现金流分析引擎 | Not started | — |
 | 2026-05-01 | [P1] Web UI - 总览仪表盘 | Not started | — |
 | 2026-05-01 | [P1] Web UI - 记账与交易管理 | Not started | — |
-| 2026-05-01 | [P1] Web UI - 资产与现金流图表 | Not started | — |
+| 2026-05-02 | [P1] Web UI - 资产与现金流图表 | Done | Next.js 15 + Recharts, 5 charts, export CSV/PNG, responsive, dark mode. |
 | 2026-05-01 | [P2] Agent 接口 - MCP Server | Not started | — |
 | 2026-05-01 | [P2] 银行 API 直连（自动记账） | Not started | — |
 | 2026-05-01 | [P2] Notion 数据同步 | Not started | — |
