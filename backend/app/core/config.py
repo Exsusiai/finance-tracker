@@ -43,6 +43,25 @@ class Settings(BaseSettings):
     market_refresh_fx_sec: int = 3600
     market_refresh_gold_sec: int = 3600
 
+    # --- Notion sync ---
+    notion_token: str = ""
+    notion_transactions_db_id: str = ""
+    notion_cashflow_db_id: str = ""
+    notion_asset_page_id: str = ""
+    notion_sync_enabled: bool = False
+
+    # --- Bank sync (GoCardless / Nordigen) ---
+    # Encrypted credentials are stored per-connection in DB.
+    # This key encrypts/decrypts them. Generate once and keep safe!
+    # python -c "import os; print(os.urandom(32).hex())"
+    finance_bank_encryption_key: str = ""
+    bank_sync_enabled: bool = False
+    bank_sync_interval_hours: int = 24
+    bank_sync_callback_base_url: str = "http://localhost:3000/settings/bank-sync/callback"
+    # GoCardless API credentials (for initial setup; stored encrypted in DB per-connection)
+    gocardless_secret_id: str = ""
+    gocardless_secret_key: str = ""
+
     @field_validator("finance_tracker_api_token", mode="after")
     @classmethod
     def _ensure_token(cls, v: str) -> str:

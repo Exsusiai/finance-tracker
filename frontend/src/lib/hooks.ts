@@ -1,6 +1,7 @@
 "use client";
 
 import useSWR from "swr";
+import useSWRInfinite from "swr/infinite";
 import {
   fetchCashFlowMonthly,
   fetchCashFlowByCategory,
@@ -9,7 +10,14 @@ import {
   fetchPortfolioBreakdown,
   fetchHoldings,
   fetchBalances,
+  fetchTransactions,
+  fetchTransaction,
+  fetchCategories,
+  fetchAccounts,
+  fetchStatements,
+  fetchAssets,
 } from "@/lib/api";
+import type { TransactionFilters, TransactionOut } from "@/lib/api";
 
 // Generic fetcher for SWR
 async function swrFetcher<T>(fn: () => Promise<T>): Promise<T> {
@@ -62,4 +70,62 @@ export function useBalances() {
   return useSWR("balances", () => fetchBalances(), {
     revalidateOnFocus: false,
   });
+}
+
+// ─── Transactions ──────────────────────────────────────────────────────
+
+export function useTransactions(filters?: TransactionFilters) {
+  const key = filters ? `transactions-${JSON.stringify(filters)}` : "transactions";
+
+  return useSWR(key, () => fetchTransactions(filters), {
+    revalidateOnFocus: false,
+  });
+}
+
+export function useTransaction(id: number | null) {
+  return useSWR(
+    id ? `transaction-${id}` : null,
+    () => fetchTransaction(id!),
+    { revalidateOnFocus: false },
+  );
+}
+
+// ─── Categories ────────────────────────────────────────────────────────
+
+export function useCategories(kind?: string) {
+  return useSWR(
+    kind ? `categories-${kind}` : "categories",
+    () => fetchCategories(kind),
+    { revalidateOnFocus: false },
+  );
+}
+
+// ─── Accounts ──────────────────────────────────────────────────────────
+
+export function useAccounts(activeOnly?: boolean) {
+  return useSWR(
+    activeOnly ? "accounts-active" : "accounts",
+    () => fetchAccounts(activeOnly),
+    { revalidateOnFocus: false },
+  );
+}
+
+// ─── Assets ────────────────────────────────────────────────────────────
+
+export function useAssets(assetClass?: string) {
+  return useSWR(
+    assetClass ? `assets-${assetClass}` : "assets",
+    () => fetchAssets(assetClass),
+    { revalidateOnFocus: false },
+  );
+}
+
+// ─── PDF Statements ────────────────────────────────────────────────────
+
+export function useStatements(limit?: number, status?: string) {
+  return useSWR(
+    `statements-${limit || "all"}-${status || "all"}`,
+    () => fetchStatements(limit, status),
+    { revalidateOnFocus: false },
+  );
 }

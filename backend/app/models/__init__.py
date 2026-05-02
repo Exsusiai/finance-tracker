@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Import all models so Alembic / Base.metadata.create_all discovers them
+from app.models.bank_connection import BankConnection
+
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal

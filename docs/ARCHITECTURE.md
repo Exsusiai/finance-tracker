@@ -19,8 +19,8 @@
 │                         │   │   - PDF parsers                │
 └────────┬────────────────┘   │   - market data poller         │
          │                    │   - categorization engine      │
-         ▼                    └─────────────┬──────────────────┘
-┌─────────────────────────┐                 │
+         ▼                    │   - Notion sync (P2)           │
+┌─────────────────────────┐   └─────────────┬──────────────────┘
 │  MCP Server (Python)    │                 │
 │  shared SQLAlchemy      │─────────────────┤
 │  models / services      │                 │
@@ -99,6 +99,23 @@
 
 - 写入: 每次 transaction CRUD 后,异步触发对应月度 snapshot 重算 (debounce 2s)
 - 读取: 仪表盘直接读 `cash_flow_snapshots` (O(months))
+
+### 4. Notion 数据同步 (P2)
+
+```
+[API / Cron] → POST /api/v1/notion/sync
+       → NotionSyncService.sync_all(db_session)
+       ├─ sync_transactions: 按更新时间增量同步到 Notion 交易数据库
+       ├─ sync_cashflow: 月度现金流快照同步到 Notion 现金流数据库
+       └─ sync_asset_summary: 资产持仓汇总写入 Notion 资产页面
+
+特性:
+- 单向同步: finance-tracker → Notion (只读镜像)
+- 增量更新: 通过 internal Tx ID 匹配已有 Notion 条目,避免重复
+- 速率限制: 内置 0.4s 请求间隔 + 429 Retry-After 处理
+- 一键建库: POST /api/v1/notion/setup 自动创建 Notion 数据库
+- 分模块触发: 支持 /sync/transactions、/sync/cashflow、/sync/assets 单独调用
+```
 
 ## 数据流原则
 

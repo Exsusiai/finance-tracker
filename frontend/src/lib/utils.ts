@@ -29,6 +29,27 @@ export function formatNumber(value: string | number): string {
   return new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 }).format(num);
 }
 
+export function formatDate(dateStr: string): string {
+  if (!dateStr) return "—";
+  try {
+    const d = new Date(dateStr.includes("T") ? dateStr : dateStr + "T00:00:00");
+    if (isNaN(d.getTime())) return dateStr;
+    return d.toLocaleDateString("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+  } catch {
+    return dateStr;
+  }
+}
+
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function periodLabel(period: string): string {
   const [year, month] = period.split("-");
   const date = new Date(parseInt(year), parseInt(month) - 1);

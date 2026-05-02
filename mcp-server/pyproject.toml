@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finance-tracker-mcp"
+version = "0.1.0"
+description = "MCP Server for Finance Tracker — exposes finance tools to AI agents"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0",
+]
+
+[project.scripts]
+finance-mcp = "finance_mcp.server:mcp.run"
+
+[tool.setuptools.packages.find]
+where = ["src"]

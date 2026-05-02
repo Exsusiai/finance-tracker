@@ -13,6 +13,8 @@ from app.api.v1 import (
     cashflow,
     rules,
     system,
+    notion,
+    bank_sync,
 )
 
 api_router = APIRouter()
@@ -27,3 +29,5 @@ api_router.include_router(market.router, prefix="/market", tags=["Market Data"])
 api_router.include_router(cashflow.router, prefix="/cashflow", tags=["Cash Flow"])
 api_router.include_router(rules.router, prefix="/rules", tags=["Categorization Rules"])
 api_router.include_router(system.router, prefix="/system", tags=["System"])
+api_router.include_router(notion.router, prefix="/notion", tags=["Notion Sync"])
+api_router.include_router(bank_sync.router, prefix="/bank-sync", tags=["Bank Sync"])
