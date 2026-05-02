@@ -15,6 +15,7 @@ from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import AssetHolding, Asset, MarketPrice, FxRate
+from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
     HoldingCreate,
@@ -69,7 +70,12 @@ async def list_holdings(
     account_id: int | None = Query(None),
     asset_id: int | None = Query(None),
 ):
-    stmt = select(AssetHolding).order_by(AssetHolding.id)
+    from sqlalchemy.orm import selectinload
+    stmt = (
+        select(AssetHolding)
+        .options(selectinload(AssetHolding.account), selectinload(AssetHolding.asset))
+        .order_by(AssetHolding.id)
+    )
     if account_id is not None:
         stmt = stmt.where(AssetHolding.account_id == account_id)
     if asset_id is not None:
@@ -79,17 +85,10 @@ async def list_holdings(
 
     out = []
     for h in holdings:
-        asset = None
         latest_price = None
         price_currency = None
 
-        # Get asset info
-        asset_stmt = select(Asset).where(Asset.id == h.asset_id)
-        asset_result = await db.execute(asset_stmt)
-        asset = asset_result.scalar_one_or_none()
-
-        # Get latest price
-        if asset:
+        if h.asset:
             price_stmt = (
                 select(MarketPrice)
                 .where(MarketPrice.asset_id == h.asset_id)
@@ -102,9 +101,45 @@ async def list_holdings(
                 latest_price = latest_mp.price
                 price_currency = latest_mp.currency
 
-        out.append(_holding_to_out(h, asset, latest_price, price_currency))
+        out.append(_holding_to_out(h, h.asset, latest_price, price_currency))
 
     return ApiSuccess(data=out)
+
+
+@router.get("/{holding_id}", response_model=ApiSuccess[HoldingOut])
+async def get_holding(
+    holding_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    from sqlalchemy.orm import selectinload
+    stmt = (
+        select(AssetHolding)
+        .options(selectinload(AssetHolding.account), selectinload(AssetHolding.asset))
+        .where(AssetHolding.id == holding_id)
+    )
+    result = await db.execute(stmt)
+    holding = result.scalar_one_or_none()
+    if not holding:
+        raise NotFoundError("AssetHolding", holding_id)
+
+    latest_price = None
+    price_currency = None
+
+    if holding.asset:
+        price_stmt = (
+            select(MarketPrice)
+            .where(MarketPrice.asset_id == holding.asset_id)
+            .order_by(MarketPrice.quoted_at.desc())
+            .limit(1)
+        )
+        price_result = await db.execute(price_stmt)
+        latest_mp = price_result.scalar_one_or_none()
+        if latest_mp:
+            latest_price = latest_mp.price
+            price_currency = latest_mp.currency
+
+    return ApiSuccess(data=_holding_to_out(holding, holding.asset, latest_price, price_currency))
 
 
 @router.post("", response_model=ApiSuccess[HoldingOut], status_code=status.HTTP_201_CREATED)
@@ -152,6 +187,7 @@ async def update_holding(
     for key, value in update_data.items():
         setattr(holding, key, value)
 
+    touch_updated_at(holding)
     await db.flush()
     await db.refresh(holding, ["account", "asset"])
 

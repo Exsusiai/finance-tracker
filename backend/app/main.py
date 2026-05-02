@@ -124,9 +124,7 @@ async def version_info():
 
 # ─── Authenticated API routes ─────────────────────────────────────────────
 
-from app.api.v1.system import router as system_router
 app.include_router(api_router, prefix="/api/v1")
-app.include_router(system_router, prefix="/api/v1")
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────

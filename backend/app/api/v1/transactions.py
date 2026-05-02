@@ -16,6 +16,7 @@ from app.core.auth import require_auth
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Transaction, Account, Category
+from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
     PaginationMeta,
@@ -27,6 +28,18 @@ from app.schemas import (
 
 router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
+
+
+def _normalize_amount(val) -> str:
+    """Normalize Decimal to clean string (no trailing zeros, no scientific notation)."""
+    if val is None:
+        return "0"
+    d = val if isinstance(val, Decimal) else Decimal(str(val))
+    n = d.normalize()
+    sign, digits, exponent = n.as_tuple()
+    if exponent >= 0:
+        return str(int(n))
+    return format(n, 'f')
 
 
 def _tx_to_out(t: Transaction) -> TransactionOut:
@@ -45,10 +58,10 @@ def _tx_to_out(t: Transaction) -> TransactionOut:
         category_name=t.category.name if t.category else None,
         occurred_at=t.occurred_at,
         posted_at=t.posted_at,
-        amount=str(t.amount),
+        amount=_normalize_amount(t.amount),
         currency=t.currency,
-        fx_rate_to_base=str(t.fx_rate_to_base) if t.fx_rate_to_base else None,
-        base_amount=str(t.base_amount) if t.base_amount else None,
+        fx_rate_to_base=_normalize_amount(t.fx_rate_to_base) if t.fx_rate_to_base else None,
+        base_amount=_normalize_amount(t.base_amount) if t.base_amount else None,
         type=t.type,
         description=t.description,
         raw_description=t.raw_description,
@@ -192,8 +205,10 @@ async def create_transaction(
     )
     db.add(tx)
     await db.flush()
-    # Refresh to get account/category names
-    await db.refresh(tx, ["account", "category"])
+    # Re-fetch with relationships loaded
+    fetch = select(Transaction).options(selectinload(Transaction.account), selectinload(Transaction.category)).where(Transaction.id == tx.id)
+    result = await db.execute(fetch)
+    tx = result.scalar_one()
     return ApiSuccess(data=_tx_to_out(tx))
 
 
@@ -229,8 +244,16 @@ async def batch_create_transactions(
         db.add(tx)
         created.append(tx)
     await db.flush()
-    for tx in created:
-        await db.refresh(tx, ["account", "category"])
+    # Batch re-fetch with relationships
+    if created:
+        ids = [tx.id for tx in created]
+        fetch = (
+            select(Transaction)
+            .options(selectinload(Transaction.account), selectinload(Transaction.category))
+            .where(Transaction.id.in_(ids))
+        )
+        result = await db.execute(fetch)
+        created = list(result.scalars().all())
     return ApiSuccess(data=[_tx_to_out(tx) for tx in created])
 
 
@@ -282,6 +305,7 @@ async def update_transaction(
     for key, value in update_data.items():
         setattr(tx, key, value)
 
+    touch_updated_at(tx)
     await db.flush()
     return ApiSuccess(data=_tx_to_out(tx))
 

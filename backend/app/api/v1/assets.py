@@ -13,6 +13,7 @@ from app.core.auth import require_auth
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Asset, MarketPrice
+from app.models import touch_updated_at
 from app.schemas import ApiSuccess, AssetCreate, AssetOut, AssetUpdate
 
 router = APIRouter()
@@ -115,5 +116,23 @@ async def update_asset(
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(asset, key, value)
 
+    touch_updated_at(asset)
     await db.flush()
     return ApiSuccess(data=_asset_to_out(asset))
+
+
+@router.delete("/{asset_id}", response_model=ApiSuccess[dict])
+async def delete_asset(
+    asset_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Asset).where(Asset.id == asset_id)
+    result = await db.execute(stmt)
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise NotFoundError("Asset", asset_id)
+
+    await db.delete(asset)
+    await db.flush()
+    return ApiSuccess(data={"id": asset_id, "deleted": True})

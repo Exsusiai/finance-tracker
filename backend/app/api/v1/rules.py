@@ -15,6 +15,7 @@ from app.core.auth import require_auth
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import CategorizationRule, Transaction, Category
+from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
     RuleCreate,
@@ -68,7 +69,7 @@ async def list_rules(
     category_id: int | None = Query(None),
     enabled_only: bool = Query(False),
 ):
-    stmt = select(CategorizationRule).order_by(CategorizationRule.priority.desc(), CategorizationRule.id)
+    stmt = select(CategorizationRule).options(selectinload(CategorizationRule.category)).order_by(CategorizationRule.priority.desc(), CategorizationRule.id)
     if category_id is not None:
         stmt = stmt.where(CategorizationRule.category_id == category_id)
     if enabled_only:
@@ -94,7 +95,10 @@ async def create_rule(
     )
     db.add(rule)
     await db.flush()
-    await db.refresh(rule, ["category"])
+    # Re-fetch with category loaded for async safety
+    stmt = select(CategorizationRule).options(selectinload(CategorizationRule.category)).where(CategorizationRule.id == rule.id)
+    result = await db.execute(stmt)
+    rule = result.scalar_one()
     return ApiSuccess(data=_rule_to_out(rule))
 
 
@@ -105,7 +109,11 @@ async def update_rule(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(CategorizationRule).where(CategorizationRule.id == rule_id)
+    stmt = (
+        select(CategorizationRule)
+        .options(selectinload(CategorizationRule.category))
+        .where(CategorizationRule.id == rule_id)
+    )
     result = await db.execute(stmt)
     rule = result.scalar_one_or_none()
     if not rule:
@@ -114,8 +122,8 @@ async def update_rule(
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(rule, key, value)
 
+    touch_updated_at(rule)
     await db.flush()
-    await db.refresh(rule, ["category"])
     return ApiSuccess(data=_rule_to_out(rule))
 
 

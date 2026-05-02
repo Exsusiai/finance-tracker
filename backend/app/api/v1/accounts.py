@@ -7,13 +7,14 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Account
+from app.models import touch_updated_at
 from app.schemas import (
     AccountCreate,
     AccountOut,
@@ -27,6 +28,21 @@ router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
 
 
+def _normalize_amount(val) -> str:
+    """Normalize Decimal amount to clean string representation."""
+    if val is None:
+        return "0"
+    d = val if isinstance(val, Decimal) else Decimal(str(val))
+    # normalize() can produce scientific notation (1E+3), so format manually
+    n = d.normalize()
+    sign, digits, exponent = n.as_tuple()
+    if exponent >= 0:
+        # Integer: no decimal point needed
+        return str(int(n))
+    # Has decimal part
+    return format(n, 'f')
+
+
 def _account_to_out(a: Account) -> AccountOut:
     return AccountOut(
         id=a.id,
@@ -35,7 +51,7 @@ def _account_to_out(a: Account) -> AccountOut:
         institution=a.institution,
         account_number=a.account_number,
         currency=a.currency,
-        initial_balance=str(a.initial_balance),
+        initial_balance=_normalize_amount(a.initial_balance),
         is_active=a.is_active,
         notes=a.notes,
         metadata_json=a.metadata_json,
@@ -93,7 +109,7 @@ async def list_all_balances(
     result = await db.execute(stmt)
     rows = result.all()
     balances = [
-        BalanceOut(account_id=r[0], account_name=r[1], currency=r[2], balance=str(r[3]))
+        BalanceOut(account_id=r[0], account_name=r[1], currency=r[2], balance=_normalize_amount(r[3]))
         for r in rows
     ]
     return ApiSuccess(data=balances)
@@ -129,7 +145,7 @@ async def get_account_balance(
     if not row:
         raise NotFoundError("Account", account_id)
     return ApiSuccess(data=BalanceOut(
-        account_id=row[0], account_name=row[1], currency=row[2], balance=str(row[3])
+        account_id=row[0], account_name=row[1], currency=row[2], balance=_normalize_amount(row[3])
     ))
 
 
@@ -152,6 +168,7 @@ async def update_account(
             value = Decimal(value)
         setattr(account, key, value)
 
+    touch_updated_at(account)
     await db.flush()
     return ApiSuccess(data=_account_to_out(account))
 

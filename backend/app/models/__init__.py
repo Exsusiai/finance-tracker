@@ -32,6 +32,12 @@ def _utcnow_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def touch_updated_at(instance) -> None:
+    """Manually set updated_at on a model instance (required for async SQLAlchemy)."""
+    if hasattr(instance, "updated_at"):
+        instance.updated_at = _utcnow_str()
+
+
 # ─── Account ────────────────────────────────────────────────────────────────
 
 class AccountType(StrEnum):
@@ -45,9 +51,6 @@ class AccountType(StrEnum):
 
 class Account(Base):
     __tablename__ = "accounts"
-    __table_args__ = (
-        Index("idx_accounts_active", "is_active", postgresql_where=None),
-    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -60,7 +63,7 @@ class Account(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     deleted_at: Mapped[str | None] = mapped_column(String(30))
 
     transactions: Mapped[list["Transaction"]] = relationship(
@@ -97,7 +100,7 @@ class Category(Base):
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
     parent: Mapped["Category | None"] = relationship(remote_side="Category.id")
     children: Mapped[list["Category"]] = relationship(back_populates="parent")
@@ -136,7 +139,7 @@ class PdfImport(Base):
     raw_text: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="pdf_import")
 
@@ -189,7 +192,7 @@ class Transaction(Base):
     is_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     deleted_at: Mapped[str | None] = mapped_column(String(30))
 
     account: Mapped["Account"] = relationship(foreign_keys=[account_id], back_populates="transactions")
@@ -237,7 +240,7 @@ class Asset(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
     holdings: Mapped[list["AssetHolding"]] = relationship(back_populates="asset")
     prices: Mapped[list["MarketPrice"]] = relationship(back_populates="asset")
@@ -265,7 +268,7 @@ class AssetHolding(Base):
     last_synced_at: Mapped[str | None] = mapped_column(String(30))
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
     account: Mapped["Account"] = relationship(back_populates="holdings")
     asset: Mapped["Asset"] = relationship(back_populates="holdings")
@@ -351,7 +354,7 @@ class CategorizationRule(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
-    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str, onupdate=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
     category: Mapped["Category"] = relationship()
 

@@ -9,8 +9,8 @@
 
 | 日期 | Task | 状态 | 备注 |
 |------|------|------|------|
-| 2026-05-01 | [P0] 技术选型与项目架构设计 | Not started | — |
-| 2026-05-01 | [P0] 数据库设计与实现 | Not started | — |
+| 2026-05-01 | [P0] 技术选型与项目架构设计 | Done | FastAPI + SQLite WAL + Next.js + Recharts + pdfplumber. 45 files, 5043 lines committed. |
+| 2026-05-01 | [P0] 数据库设计与实现 | Done (merged into P0-1) | Schema included in above commit. |
 | 2026-05-01 | [P0] 核心 API 层开发 | Not started | — |
 | 2026-05-01 | [P1] PDF 账单解析引擎 | Not started | — |
 | 2026-05-01 | [P1] 交易智能分类引擎 | Not started | — |

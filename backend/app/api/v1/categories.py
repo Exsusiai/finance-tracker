@@ -12,6 +12,7 @@ from app.core.auth import require_auth
 from app.core.errors import NotFoundError, AppError
 from app.db import get_db
 from app.models import Category, CategorizationRule
+from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
     CategoryCreate,
@@ -120,6 +121,7 @@ async def update_category(
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(cat, key, value)
 
+    touch_updated_at(cat)
     await db.flush()
     return ApiSuccess(data=_cat_to_out(cat))
 
