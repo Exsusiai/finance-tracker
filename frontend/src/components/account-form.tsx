@@ -7,7 +7,7 @@ import {
   createAccount,
   updateAccount,
 } from "@/lib/api";
-import { cn } from "@/lib/utils";
+import { cn, CURRENCY_GROUPS } from "@/lib/utils";
 
 export const ACCOUNT_TYPE_OPTIONS: Array<{
   value: string;
@@ -16,7 +16,7 @@ export const ACCOUNT_TYPE_OPTIONS: Array<{
 }> = [
   { value: "bank", label: "银行账户", icon: "🏦" },
   { value: "credit_card", label: "信用卡", icon: "💳" },
-  { value: "brokerage", label: "证券账户", icon: "📈" },
+  { value: "brokerage", label: "证券账户/交易所", icon: "📈" },
   { value: "crypto_wallet", label: "加密钱包", icon: "₿" },
   { value: "cash", label: "现金", icon: "💵" },
   { value: "other", label: "其他", icon: "📋" },
@@ -34,7 +34,6 @@ export const ACCOUNT_TYPE_ICONS: Record<string, string> =
     {} as Record<string, string>,
   );
 
-const CURRENCY_OPTIONS = ["EUR", "USD", "CNY", "GBP", "JPY", "HKD"];
 
 interface AccountFormProps {
   initial?: AccountOut;
@@ -191,10 +190,14 @@ export function AccountForm({
                 disabled={isEdit}
                 className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {CURRENCY_OPTIONS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
+                {CURRENCY_GROUPS.map((g) => (
+                  <optgroup key={g.label} label={g.label}>
+                    {g.values.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>

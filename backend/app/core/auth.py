@@ -15,6 +15,8 @@ async def require_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:
     """Validate Bearer token. Returns the token string on success."""
+    if settings.auth_disabled:
+        return "auth-disabled"
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

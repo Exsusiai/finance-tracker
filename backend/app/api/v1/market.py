@@ -128,7 +128,7 @@ async def get_fx_rates(
     db: AsyncSession = Depends(get_db),
     base: str = Query("CNY"),
     quote: str | None = Query(None),
-    limit: int = Query(10, ge=1, le=100),
+    limit: int = Query(10, ge=1, le=500),
 ):
     """Get FX rate snapshots."""
     stmt = select(FxRate).where(FxRate.base_currency == base)

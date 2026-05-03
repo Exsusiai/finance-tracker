@@ -13,7 +13,7 @@ import {
   updateHolding,
 } from "@/lib/api";
 import { mutate } from "swr";
-import { ASSET_CLASS_LABELS, cn } from "@/lib/utils";
+import { ASSET_CLASS_LABELS, cn, CURRENCY_GROUPS } from "@/lib/utils";
 import { AccountForm } from "@/components/account-form";
 
 interface HoldingFormProps {
@@ -23,13 +23,14 @@ interface HoldingFormProps {
   onSuccess: () => void;
   initialHolding?: HoldingOut;
   isEdit?: boolean;
+  /** 预选账户 ID（用于"在某账户内添加持仓"快捷入口） */
+  defaultAccountId?: number;
 }
 
 const ASSET_CLASS_OPTIONS: Array<{ value: string; label: string }> = Object.entries(
   ASSET_CLASS_LABELS,
 ).map(([value, label]) => ({ value, label }));
 
-const CURRENCY_OPTIONS = ["EUR", "USD", "CNY", "GBP", "JPY", "HKD"];
 
 export function HoldingForm({
   accounts,
@@ -38,6 +39,7 @@ export function HoldingForm({
   onSuccess,
   initialHolding,
   isEdit = false,
+  defaultAccountId,
 }: HoldingFormProps) {
   const [mode, setMode] = useState<"existing" | "new">("existing");
 
@@ -59,7 +61,7 @@ export function HoldingForm({
   const [hasSearched, setHasSearched] = useState(false);
 
   const [accountId, setAccountId] = useState<number>(
-    initialHolding?.account_id ?? (accounts[0]?.id ?? 0),
+    initialHolding?.account_id ?? defaultAccountId ?? (accounts[0]?.id ?? 0),
   );
   const [quantity, setQuantity] = useState(initialHolding?.quantity ?? "");
   const [avgCost, setAvgCost] = useState(initialHolding?.avg_cost ?? "");
@@ -386,10 +388,14 @@ export function HoldingForm({
                       onChange={(e) => setNewCurrency(e.target.value)}
                       className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     >
-                      {CURRENCY_OPTIONS.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
+                      {CURRENCY_GROUPS.map((g) => (
+                        <optgroup key={g.label} label={g.label}>
+                          {g.values.map((c) => (
+                            <option key={c} value={c}>
+                              {c}
+                            </option>
+                          ))}
+                        </optgroup>
                       ))}
                     </select>
                   </div>
@@ -471,10 +477,14 @@ export function HoldingForm({
                   onChange={(e) => setCostCurrency(e.target.value)}
                   className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 >
-                  {CURRENCY_OPTIONS.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
+                  {CURRENCY_GROUPS.map((g) => (
+                    <optgroup key={g.label} label={g.label}>
+                      {g.values.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
               </div>

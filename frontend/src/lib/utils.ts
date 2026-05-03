@@ -1,20 +1,52 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import type { FxRateOut } from "@/lib/api";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/** Crypto / pseudo-currencies that are not ISO-4217 — render with a manual symbol. */
+const NON_ISO_CURRENCY_SYMBOLS: Record<string, string> = {
+  USDT: "₮",
+  USDC: "$",
+  DAI: "DAI ",
+  BUSD: "BUSD ",
+  TUSD: "TUSD ",
+  BTC: "₿",
+  ETH: "Ξ",
+  SOL: "SOL ",
+};
+
 export function formatCurrency(value: string | number, currency: string = "EUR"): string {
   const num = typeof value === "string" ? parseFloat(value) : value;
   if (isNaN(num)) return "—";
 
-  return new Intl.NumberFormat("de-DE", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(num);
+  const code = (currency || "EUR").toUpperCase();
+  const sym = NON_ISO_CURRENCY_SYMBOLS[code];
+  if (sym !== undefined) {
+    const formatted = new Intl.NumberFormat("de-DE", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(num);
+    return `${sym}${formatted}`;
+  }
+
+  try {
+    return new Intl.NumberFormat("de-DE", {
+      style: "currency",
+      currency: code,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(num);
+  } catch {
+    // Unknown ISO code — fall back to plain number with the code suffix.
+    const formatted = new Intl.NumberFormat("de-DE", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(num);
+    return `${formatted} ${code}`;
+  }
 }
 
 export function formatPercent(value: string | number): string {
@@ -81,6 +113,93 @@ export const ASSET_CLASS_LABELS: Record<string, string> = {
   fund: "基金",
   other: "其他",
 };
+
+// ─── Currency conversion ───────────────────────────────────────────────
+
+/** Stablecoins that we map 1:1 to USD when no direct quote is available. */
+const USD_STABLECOINS = new Set(["USDT", "USDC", "DAI", "BUSD", "TUSD"]);
+
+function normalizeForFx(c: string): string {
+  return USD_STABLECOINS.has(c) ? "USD" : c;
+}
+
+/** Build a (base→quote) → latest rate map, picking the newest `quoted_at`. */
+export function latestFxMap(rates: FxRateOut[] | undefined): Map<string, number> {
+  if (!rates) return new Map();
+  const tmp = new Map<string, { rate: number; ts: string }>();
+  for (const r of rates) {
+    const rate = parseFloat(r.rate);
+    if (!isFinite(rate) || rate <= 0) continue;
+    const key = `${r.base_currency}→${r.quote_currency}`;
+    const prev = tmp.get(key);
+    if (!prev || r.quoted_at > prev.ts) tmp.set(key, { rate, ts: r.quoted_at });
+  }
+  const out = new Map<string, number>();
+  tmp.forEach((v, k) => out.set(k, v.rate));
+  return out;
+}
+
+/**
+ * Convert `amount` from currency `from` → `to` using `fxMap`.
+ * Returns null when no path is available.
+ *
+ * Strategy: same-currency (with stablecoin folding) → direct → inverse → triangulate via CNY/USD/EUR.
+ */
+export function convertAmount(
+  amount: number | string,
+  from: string,
+  to: string,
+  fxMap: Map<string, number>,
+): number | null {
+  const num = typeof amount === "string" ? parseFloat(amount) : amount;
+  if (!isFinite(num)) return null;
+
+  const f = normalizeForFx(from.toUpperCase());
+  const t = normalizeForFx(to.toUpperCase());
+  if (f === t) return num;
+
+  const direct = fxMap.get(`${f}→${t}`);
+  if (direct) return num * direct;
+  const inverse = fxMap.get(`${t}→${f}`);
+  if (inverse) return num / inverse;
+
+  for (const pivot of ["CNY", "USD", "EUR"]) {
+    if (pivot === f || pivot === t) continue;
+    const aDirect = fxMap.get(`${f}→${pivot}`);
+    const aInverse = fxMap.get(`${pivot}→${f}`);
+    const a = aDirect ?? (aInverse ? 1 / aInverse : null);
+    const bDirect = fxMap.get(`${pivot}→${t}`);
+    const bInverse = fxMap.get(`${t}→${pivot}`);
+    const b = bDirect ?? (bInverse ? 1 / bInverse : null);
+    if (a && b) return num * a * b;
+  }
+  return null;
+}
+
+/**
+ * Currency choices for account/holding forms, grouped for `<optgroup>`.
+ * Keep ISO-4217 codes for fiat; stablecoins / crypto use ad-hoc codes that the
+ * formatter falls back to via `NON_ISO_CURRENCY_SYMBOLS`.
+ */
+export const CURRENCY_GROUPS: Array<{ label: string; values: string[] }> = [
+  { label: "法币", values: ["EUR", "USD", "CNY", "GBP", "JPY", "HKD", "CHF"] },
+  { label: "稳定币", values: ["USDT", "USDC", "DAI", "BUSD", "TUSD"] },
+  { label: "加密货币", values: ["BTC", "ETH", "SOL"] },
+];
+
+/** Flat list (preserves group order) — handy for default-pick logic. */
+export const ALL_CURRENCIES: string[] = CURRENCY_GROUPS.flatMap((g) => g.values);
+
+/** Display currency choices in the resource selector. */
+export const DISPLAY_CURRENCIES = [
+  { value: "CNY", label: "¥ CNY" },
+  { value: "USD", label: "$ USD" },
+  { value: "EUR", label: "€ EUR" },
+  { value: "USDT", label: "₮ USDT" },
+  { value: "HKD", label: "HK$ HKD" },
+  { value: "JPY", label: "¥ JPY" },
+  { value: "GBP", label: "£ GBP" },
+];
 
 export const ASSET_CLASS_COLORS: Record<string, string> = {
   cash: "hsl(220, 70%, 55%)",

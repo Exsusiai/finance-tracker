@@ -6,6 +6,7 @@ import {
   ACCOUNT_TYPE_ICONS,
   ACCOUNT_TYPE_LABELS,
 } from "@/components/account-form";
+import { mutate as swrMutate } from "swr";
 import { useAccounts, useBalances } from "@/lib/hooks";
 import { ApiError, deleteAccount, type AccountOut } from "@/lib/api";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
@@ -41,6 +42,7 @@ export default function SettingsPage() {
       setPendingDelete(null);
       refreshAccounts();
       refreshBalances();
+      swrMutate((k) => typeof k === "string" && k.startsWith("accounts"), undefined, { revalidate: true });
     } catch (e) {
       setDeleteError(e instanceof ApiError ? e.message : "删除失败，请重试");
     } finally {
@@ -73,7 +75,15 @@ export default function SettingsPage() {
         </div>
 
         <section>
-          <h2 className="text-base font-semibold mb-3">账户管理</h2>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="text-base font-semibold">账户管理</h2>
+            <a
+              href="/assets"
+              className="text-xs text-primary hover:underline"
+            >
+              也可在「资产」页管理 →
+            </a>
+          </div>
           {accountsLoading ? (
             <LoadingSpinner />
           ) : accountsError ? (
@@ -189,6 +199,7 @@ export default function SettingsPage() {
             setEditing(null);
             refreshAccounts();
             refreshBalances();
+            swrMutate((k) => typeof k === "string" && k.startsWith("accounts"), undefined, { revalidate: true });
           }}
         />
       )}

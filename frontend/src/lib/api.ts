@@ -553,6 +553,31 @@ export async function adjustAccountBalance(
 
 // ─── PDF Import ────────────────────────────────────────────────────────
 
+// ─── FX rates ──────────────────────────────────────────────────────────
+
+export interface FxRateOut {
+  base_currency: string;
+  quote_currency: string;
+  quoted_at: string;
+  rate: string;
+  source: string;
+}
+
+export async function fetchFxRates(
+  base: string = "CNY",
+  limit: number = 50,
+): Promise<FxRateOut[]> {
+  return request(`/api/v1/market/fx?base=${encodeURIComponent(base)}&limit=${limit}`);
+}
+
+export async function triggerMarketRefresh(): Promise<{
+  prices_updated: number;
+  fx_updated: number;
+  errors: string[];
+}> {
+  return request(`/api/v1/market/refresh`, { method: "POST" });
+}
+
 export interface PdfImportOut {
   id: number;
   filename: string;

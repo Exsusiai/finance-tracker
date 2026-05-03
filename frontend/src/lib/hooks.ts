@@ -17,6 +17,7 @@ import {
   fetchAccounts,
   fetchStatements,
   fetchAssets,
+  fetchFxRates,
 } from "@/lib/api";
 import type { TransactionFilters, TransactionOut } from "@/lib/api";
 
@@ -124,6 +125,21 @@ export function useAssets(assetClass?: string) {
     assetClass ? `assets-${assetClass}` : "assets",
     () => fetchAssets(assetClass),
     { revalidateOnFocus: false },
+  );
+}
+
+// ─── FX Rates ──────────────────────────────────────────────────────────
+
+/**
+ * Fetch latest FX rates with `base` as the source currency.
+ * Returns up to `limit` recent snapshots; the consumer should pick the latest
+ * per (base, quote) pair via `latestFxMap`.
+ */
+export function useFxRates(base: string = "CNY") {
+  return useSWR(
+    `fx-rates-${base}`,
+    () => fetchFxRates(base, 300),
+    { revalidateOnFocus: false, refreshInterval: 5 * 60 * 1000 },
   );
 }
 

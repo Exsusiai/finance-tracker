@@ -25,6 +25,10 @@ class Settings(BaseSettings):
         default="",
         description="Bearer token for API auth. MUST be set in production.",
     )
+    auth_disabled: bool = Field(
+        default=False,
+        description="Disable Bearer token check entirely. Local dev only — never enable in production.",
+    )
 
     # --- Base ---
     base_currency: str = "CNY"

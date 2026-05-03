@@ -171,30 +171,62 @@ async def _fetch_stock_price(asset: Asset) -> dict | None:
 
 
 async def _fetch_fx_rates() -> list[dict]:
-    """Fetch FX rates from exchangerate.host."""
-    try:
-        import httpx
+    """Fetch FX rates from a free provider.
 
+    open.er-api.com (free, no key) returns rates with USD as the implicit base,
+    so we query base=CNY and re-emit each (CNY → quote) directly.
+    """
+    import httpx
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rates: list[dict] = []
+
+    # Primary: open.er-api.com (free, no key)
+    try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                "https://api.exchangerate.host/latest",
-                params={"base": "CNY", "symbols": "EUR,USD,GBP,JPY"},
-            )
+            resp = await client.get("https://open.er-api.com/v6/latest/CNY")
             resp.raise_for_status()
             data = resp.json()
 
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            rates = []
-            if "rates" in data:
-                for currency, rate in data["rates"].items():
+        if data.get("result") == "success" and isinstance(data.get("rates"), dict):
+            for currency, rate in data["rates"].items():
+                if currency == "CNY":
+                    continue
+                try:
                     rates.append({
                         "base": "CNY",
                         "quote": currency,
                         "quoted_at": now,
                         "rate": Decimal(str(rate)),
-                        "source": "exchangerate.host",
+                        "source": "open.er-api.com",
                     })
-            return rates
+                except Exception:
+                    continue
+            if rates:
+                return rates
     except Exception as e:
-        logger.warning(f"Failed to fetch FX rates: {e}")
-        return []
+        logger.warning(f"open.er-api FX fetch failed: {e}")
+
+    # Fallback: frankfurter.app (free, ECB data, limited list)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://api.frankfurter.app/latest",
+                params={"from": "CNY", "to": "EUR,USD,GBP,JPY,HKD,CHF"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        if isinstance(data.get("rates"), dict):
+            for currency, rate in data["rates"].items():
+                rates.append({
+                    "base": "CNY",
+                    "quote": currency,
+                    "quoted_at": now,
+                    "rate": Decimal(str(rate)),
+                    "source": "frankfurter.app",
+                })
+    except Exception as e:
+        logger.warning(f"frankfurter FX fetch failed: {e}")
+
+    return rates

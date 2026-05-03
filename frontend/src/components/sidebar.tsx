@@ -15,7 +15,7 @@ const NAV_ITEMS = [
     ),
   },
   {
-    label: "投资组合",
+    label: "资产",
     href: "/assets",
     icon: (
       <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

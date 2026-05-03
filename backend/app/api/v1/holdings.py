@@ -268,23 +268,10 @@ async def portfolio_summary(
         value = holding.quantity * latest.price
 
         # Convert to base currency if needed
-        if latest.currency != base_currency:
-            fx_stmt = (
-                select(FxRate)
-                .where(
-                    FxRate.base_currency == base_currency,
-                    FxRate.quote_currency == latest.currency,
-                )
-                .order_by(FxRate.quoted_at.desc())
-                .limit(1)
-            )
-            fx_result = await db.execute(fx_stmt)
-            fx = fx_result.scalar_one_or_none()
-            if fx:
-                value = value * fx.rate
-            else:
-                # Can't convert — skip
-                continue
+        converted = await _convert_to_base(db, value, latest.currency, base_currency)
+        if converted is None:
+            continue
+        value = converted
 
         total += value
         by_class[asset.asset_class] = by_class.get(asset.asset_class, Decimal("0")) + value
@@ -328,22 +315,10 @@ async def portfolio_breakdown(
             continue
 
         value = holding.quantity * latest.price
-        if latest.currency != base_currency:
-            fx_stmt = (
-                select(FxRate)
-                .where(
-                    FxRate.base_currency == base_currency,
-                    FxRate.quote_currency == latest.currency,
-                )
-                .order_by(FxRate.quoted_at.desc())
-                .limit(1)
-            )
-            fx_result = await db.execute(fx_stmt)
-            fx = fx_result.scalar_one_or_none()
-            if fx:
-                value = value * fx.rate
-            else:
-                continue
+        converted = await _convert_to_base(db, value, latest.currency, base_currency)
+        if converted is None:
+            continue
+        value = converted
 
         # By class
         if asset.asset_class not in class_data:
@@ -374,29 +349,72 @@ async def portfolio_breakdown(
     ))
 
 
+async def _latest_fx_rate(
+    db: AsyncSession, base: str, quote: str
+) -> Decimal | None:
+    """Return the newest FxRate.rate for (base → quote), or None."""
+    stmt = (
+        select(FxRate)
+        .where(FxRate.base_currency == base, FxRate.quote_currency == quote)
+        .order_by(FxRate.quoted_at.desc())
+        .limit(1)
+    )
+    fx = (await db.execute(stmt)).scalar_one_or_none()
+    return fx.rate if fx else None
+
+
 async def _convert_to_base(
     db: AsyncSession,
     amount: Decimal,
     src_currency: str,
     base_currency: str,
 ) -> Decimal | None:
-    """Convert amount from src_currency to base_currency. Returns None if no FX rate available."""
+    """Convert amount from src_currency → base_currency.
+
+    Strategy:
+      1. Same currency → return amount
+      2. Direct rate (src → base) → amount * rate
+      3. Inverse rate (base → src) → amount / rate
+      4. Triangulate via USD pivot
+      Returns None when no path is available.
+    """
     if src_currency == base_currency:
         return amount
-    fx_stmt = (
-        select(FxRate)
-        .where(
-            FxRate.base_currency == base_currency,
-            FxRate.quote_currency == src_currency,
+
+    direct = await _latest_fx_rate(db, src_currency, base_currency)
+    if direct is not None and direct > 0:
+        return amount * direct
+
+    inverse = await _latest_fx_rate(db, base_currency, src_currency)
+    if inverse is not None and inverse > 0:
+        return amount / inverse
+
+    # Triangulate via USD
+    for pivot in ("USD", "EUR"):
+        if pivot in (src_currency, base_currency):
+            continue
+        a_direct = await _latest_fx_rate(db, src_currency, pivot)
+        a_inverse = (
+            await _latest_fx_rate(db, pivot, src_currency)
+            if a_direct is None
+            else None
         )
-        .order_by(FxRate.quoted_at.desc())
-        .limit(1)
-    )
-    fx_result = await db.execute(fx_stmt)
-    fx = fx_result.scalar_one_or_none()
-    if fx is None:
-        return None
-    return amount * fx.rate
+        a = a_direct if a_direct is not None else (
+            (Decimal(1) / a_inverse) if (a_inverse is not None and a_inverse > 0) else None
+        )
+        b_direct = await _latest_fx_rate(db, pivot, base_currency)
+        b_inverse = (
+            await _latest_fx_rate(db, base_currency, pivot)
+            if b_direct is None
+            else None
+        )
+        b = b_direct if b_direct is not None else (
+            (Decimal(1) / b_inverse) if (b_inverse is not None and b_inverse > 0) else None
+        )
+        if a is not None and b is not None:
+            return amount * a * b
+
+    return None
 
 
 @router.get("/portfolio/net-worth", response_model=ApiSuccess[NetWorthOut])
