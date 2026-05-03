@@ -270,6 +270,17 @@ class AssetOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AssetSearchResult(BaseModel):
+    symbol: str
+    name: str
+    asset_class: str
+    currency: str
+    data_source: str
+    data_source_id: str
+    market: str | None = None
+    thumb: str | None = None
+
+
 # ─── Asset Holding ──────────────────────────────────────────────────────────
 
 class HoldingCreate(BaseModel):

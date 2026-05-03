@@ -1,13 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   type AccountOut,
   type AssetOut,
+  type AssetSearchResult,
   type HoldingOut,
   ApiError,
   createAsset,
   createHolding,
+  searchAssets,
   updateHolding,
 } from "@/lib/api";
 import { ASSET_CLASS_LABELS, cn } from "@/lib/utils";
@@ -45,6 +47,14 @@ export function HoldingForm({
   const [newName, setNewName] = useState("");
   const [newAssetClass, setNewAssetClass] = useState("cash");
   const [newCurrency, setNewCurrency] = useState("EUR");
+  const [newDataSource, setNewDataSource] = useState<string | null>(null);
+  const [newDataSourceId, setNewDataSourceId] = useState<string | null>(null);
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<AssetSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [hasSearched, setHasSearched] = useState(false);
 
   const [accountId, setAccountId] = useState<number>(
     initialHolding?.account_id ?? (accounts[0]?.id ?? 0),
@@ -57,6 +67,53 @@ export function HoldingForm({
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mode !== "new") return;
+    const q = searchQuery.trim();
+    if (q.length < 2) {
+      setSearchResults([]);
+      setHasSearched(false);
+      setSearchError(null);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    setSearchError(null);
+    const handle = setTimeout(async () => {
+      try {
+        const results = await searchAssets(q);
+        if (!cancelled) {
+          setSearchResults(results);
+          setHasSearched(true);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setSearchResults([]);
+          setHasSearched(true);
+          setSearchError(e instanceof ApiError ? e.message : "搜索失败");
+        }
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [searchQuery, mode]);
+
+  const applySearchResult = (r: AssetSearchResult) => {
+    setNewSymbol(r.symbol);
+    setNewName(r.name);
+    setNewAssetClass(r.asset_class);
+    setNewCurrency(r.currency);
+    setNewDataSource(r.data_source);
+    setNewDataSourceId(r.data_source_id);
+    setSearchResults([]);
+    setHasSearched(false);
+    setSearchQuery("");
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -95,6 +152,8 @@ export function HoldingForm({
             name: newName.trim(),
             asset_class: newAssetClass,
             currency: newCurrency,
+            data_source: newDataSource ?? undefined,
+            data_source_id: newDataSourceId ?? undefined,
           });
           resolvedAssetId = asset.id;
         }
@@ -209,6 +268,67 @@ export function HoldingForm({
               <div className="space-y-4 p-4 rounded-lg border border-border bg-muted/30">
                 <div>
                   <label className="block text-sm font-medium mb-2">
+                    搜索资产
+                  </label>
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="输入代码或名称，如：BTC、AAPL、Moutai"
+                    className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  {searchLoading && (
+                    <p className="text-xs text-muted-foreground mt-1.5">搜索中…</p>
+                  )}
+                  {searchError && (
+                    <p className="text-xs text-destructive mt-1.5">{searchError}</p>
+                  )}
+                  {!searchLoading && hasSearched && searchResults.length === 0 && !searchError && (
+                    <p className="text-xs text-muted-foreground mt-1.5">暂无结果</p>
+                  )}
+                  {searchResults.length > 0 && (
+                    <ul className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-border bg-card divide-y divide-border">
+                      {searchResults.map((r) => (
+                        <li key={`${r.data_source}:${r.data_source_id}`}>
+                          <button
+                            type="button"
+                            onClick={() => applySearchResult(r)}
+                            className="w-full text-left px-3 py-2.5 hover:bg-muted/60 transition-colors flex items-center gap-3"
+                          >
+                            {r.thumb ? (
+                              <img
+                                src={r.thumb}
+                                alt=""
+                                className="h-7 w-7 rounded-full bg-muted shrink-0"
+                              />
+                            ) : (
+                              <div className="h-7 w-7 rounded-full bg-muted shrink-0 flex items-center justify-center text-[10px] font-semibold text-muted-foreground">
+                                {(r.symbol || "?").slice(0, 2)}
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium text-foreground truncate">
+                                {r.symbol}
+                                <span className="ml-2 text-xs text-muted-foreground font-normal">
+                                  {r.name}
+                                </span>
+                              </div>
+                              <div className="text-xs text-muted-foreground truncate">
+                                {r.currency}
+                                {r.market ? ` · ${r.market}` : ""}
+                              </div>
+                            </div>
+                            <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary shrink-0">
+                              {ASSET_CLASS_LABELS[r.asset_class] || r.asset_class}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2">
                     资产代码 <span className="text-destructive">*</span>
                   </label>
                   <input
@@ -219,6 +339,11 @@ export function HoldingForm({
                     required
                     className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   />
+                  {newDataSource && newDataSourceId && (
+                    <p className="text-xs text-muted-foreground mt-1.5">
+                      已绑定行情源 · {newDataSource}:{newDataSourceId}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium mb-2">

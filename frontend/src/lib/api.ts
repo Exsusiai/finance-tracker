@@ -199,6 +199,26 @@ export async function deleteAsset(id: number): Promise<{ id: number; deleted: bo
   return request(`/api/v1/assets/${id}`, { method: "DELETE" });
 }
 
+export interface AssetSearchResult {
+  symbol: string;
+  name: string;
+  asset_class: string;
+  currency: string;
+  data_source: string;
+  data_source_id: string;
+  market?: string | null;
+  thumb?: string | null;
+}
+
+export async function searchAssets(
+  query: string,
+  assetClass?: string,
+): Promise<AssetSearchResult[]> {
+  const params = new URLSearchParams({ query });
+  if (assetClass) params.set("asset_class", assetClass);
+  return request(`/api/v1/assets/search?${params}`);
+}
+
 // ─── Holdings (CRUD) ───────────────────────────────────────────────────
 
 export interface HoldingCreateInput {

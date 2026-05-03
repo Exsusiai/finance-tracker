@@ -14,7 +14,8 @@ from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Asset, MarketPrice
 from app.models import touch_updated_at
-from app.schemas import ApiSuccess, AssetCreate, AssetOut, AssetUpdate
+from app.schemas import ApiSuccess, AssetCreate, AssetOut, AssetSearchResult, AssetUpdate
+from app.services.asset_search import search_assets as _search_assets
 
 router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
@@ -51,6 +52,21 @@ async def list_assets(
     result = await db.execute(stmt)
     assets = result.scalars().all()
     return ApiSuccess(data=[_asset_to_out(a) for a in assets])
+
+
+@router.get("/search", response_model=ApiSuccess[list[AssetSearchResult]])
+async def search_assets_endpoint(
+    _token: _auth,
+    query: str = Query(..., min_length=2, description="搜索关键词"),
+    asset_class: str | None = Query(
+        None,
+        description="可选过滤 (crypto / stock / us_stock / eu_stock / a_share)",
+    ),
+):
+    """Search external market data sources (CoinGecko + Yahoo Finance) and
+    return matches that can be used to auto-fill a new asset record."""
+    results = await _search_assets(query, asset_class=asset_class)
+    return ApiSuccess(data=[AssetSearchResult(**r) for r in results])
 
 
 @router.post("", response_model=ApiSuccess[AssetOut], status_code=status.HTTP_201_CREATED)
