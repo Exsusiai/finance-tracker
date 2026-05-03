@@ -18,7 +18,7 @@ import httpx
 # ---------------------------------------------------------------------------
 
 BASE_URL = "http://127.0.0.1:8199/api/v1"
-TOKEN = os.environ.get("FINANCE_TRACKER_API_TOKEN", "test-token-123")
+TOKEN = os.environ.get("FINANCE_TRACKER_API_TOKEN", os.environ.get("TEST_API_TOKEN", ""))
 
 
 @pytest.fixture(scope="session")

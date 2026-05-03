@@ -9,8 +9,12 @@ export const metadata: Metadata = {
 
 function DevTokenBootstrap() {
   // In dev mode, auto-set the API token so the frontend works out of the box
+  // In production, replace with proper auth flow or env-based injection
   if (typeof window !== "undefined" && !localStorage.getItem("finance_api_token")) {
-    localStorage.setItem("finance_api_token", "dev-token-123");
+    const token = process.env.NEXT_PUBLIC_API_TOKEN || "";
+    if (token) {
+      localStorage.setItem("finance_api_token", token);
+    }
   }
   return null;
 }
@@ -21,7 +25,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `if(!localStorage.getItem("finance_api_token"))localStorage.setItem("finance_api_token","dev-token-123");`,
+            __html: `if(!localStorage.getItem("finance_api_token")){var t=process.env.NEXT_PUBLIC_API_TOKEN||"";if(t)localStorage.setItem("finance_api_token",t);}`,
           }}
         />
       </head>
