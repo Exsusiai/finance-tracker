@@ -12,7 +12,9 @@ import {
   searchAssets,
   updateHolding,
 } from "@/lib/api";
+import { mutate } from "swr";
 import { ASSET_CLASS_LABELS, cn } from "@/lib/utils";
+import { AccountForm } from "@/components/account-form";
 
 interface HoldingFormProps {
   accounts: AccountOut[];
@@ -67,6 +69,7 @@ export function HoldingForm({
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAccountForm, setShowAccountForm] = useState(false);
 
   useEffect(() => {
     if (mode !== "new") return;
@@ -235,6 +238,9 @@ export function HoldingForm({
                     新建资产
                   </button>
                 </div>
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  选择已有投资标的或搜索创建新资产
+                </p>
               </div>
             )}
 
@@ -395,20 +401,38 @@ export function HoldingForm({
               <label className="block text-sm font-medium mb-2">
                 关联账户 <span className="text-destructive">*</span>
               </label>
-              <select
-                value={accountId}
-                onChange={(e) => setAccountId(Number(e.target.value))}
-                required
-                disabled={isEdit}
-                className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                <option value="">选择账户</option>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({a.currency})
-                  </option>
-                ))}
-              </select>
+              <div className="flex gap-2">
+                <select
+                  value={accountId}
+                  onChange={(e) => setAccountId(Number(e.target.value))}
+                  required
+                  disabled={isEdit}
+                  className="flex-1 px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  <option value="">选择账户</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name} ({a.currency})
+                    </option>
+                  ))}
+                </select>
+                {!isEdit && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAccountForm(true)}
+                    className="shrink-0 px-3 rounded-lg border border-border hover:border-primary/40 hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                    aria-label="新建账户"
+                    title="新建账户"
+                  >
+                    <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1.5">
+                选择持有该资产的账户
+              </p>
             </div>
 
             <div>
@@ -481,6 +505,18 @@ export function HoldingForm({
           </form>
         </div>
       </div>
+
+      {showAccountForm && (
+        <AccountForm
+          onClose={() => setShowAccountForm(false)}
+          onSuccess={(account) => {
+            setShowAccountForm(false);
+            setAccountId(account.id);
+            mutate("accounts-active");
+            mutate("accounts");
+          }}
+        />
+      )}
     </div>
   );
 }

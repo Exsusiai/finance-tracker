@@ -10,6 +10,7 @@ import {
   fetchPortfolioBreakdown,
   fetchHoldings,
   fetchBalances,
+  fetchNetWorth,
   fetchTransactions,
   fetchTransaction,
   fetchCategories,
@@ -68,6 +69,12 @@ export function useHoldings() {
 
 export function useBalances() {
   return useSWR("balances", () => fetchBalances(), {
+    revalidateOnFocus: false,
+  });
+}
+
+export function useNetWorth() {
+  return useSWR("net-worth", () => fetchNetWorth(), {
     revalidateOnFocus: false,
   });
 }

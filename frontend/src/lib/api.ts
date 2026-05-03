@@ -125,6 +125,20 @@ export async function fetchPortfolioSummary(): Promise<PortfolioSummary> {
   return request("/api/v1/holdings/portfolio/summary");
 }
 
+export interface NetWorthData {
+  base_currency: string;
+  cash_total: string;
+  investment_total: string;
+  net_worth: string;
+  cash_by_currency: Record<string, { original: string; converted: string }>;
+  investment_by_currency: Record<string, string>;
+  as_of: string;
+}
+
+export async function fetchNetWorth(): Promise<NetWorthData> {
+  return request("/api/v1/holdings/portfolio/net-worth");
+}
+
 export async function fetchPortfolioBreakdown(): Promise<PortfolioBreakdown> {
   return request("/api/v1/holdings/portfolio/breakdown");
 }
@@ -481,6 +495,60 @@ export interface AccountOut {
 export async function fetchAccounts(activeOnly?: boolean): Promise<AccountOut[]> {
   const params = activeOnly ? "?active_only=true" : "";
   return request(`/api/v1/accounts${params}`);
+}
+
+export interface AccountCreateInput {
+  name: string;
+  type: string;
+  institution?: string;
+  account_number?: string;
+  currency: string;
+  initial_balance?: string;
+  notes?: string;
+}
+
+export interface AccountUpdateInput {
+  name?: string;
+  type?: string;
+  institution?: string;
+  account_number?: string;
+  currency?: string;
+  is_active?: boolean;
+  notes?: string;
+}
+
+export async function createAccount(data: AccountCreateInput): Promise<AccountOut> {
+  return request("/api/v1/accounts", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateAccount(id: number, data: AccountUpdateInput): Promise<AccountOut> {
+  return request(`/api/v1/accounts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteAccount(id: number): Promise<{ id: number; deleted: boolean }> {
+  return request(`/api/v1/accounts/${id}`, { method: "DELETE" });
+}
+
+export interface BalanceAdjustmentInput {
+  target_balance: string;
+  note?: string;
+  occurred_at?: string;
+}
+
+export async function adjustAccountBalance(
+  accountId: number,
+  data: BalanceAdjustmentInput,
+): Promise<BalanceOut> {
+  return request(`/api/v1/accounts/${accountId}/adjust-balance`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
 }
 
 // ─── PDF Import ────────────────────────────────────────────────────────

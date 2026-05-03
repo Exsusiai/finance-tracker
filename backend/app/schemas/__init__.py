@@ -335,6 +335,22 @@ class PortfolioBreakdown(BaseModel):
     by_currency: dict[str, dict[str, Any]] = {}
 
 
+class NetWorthOut(BaseModel):
+    base_currency: str
+    cash_total: str
+    investment_total: str
+    net_worth: str
+    cash_by_currency: dict[str, dict[str, str]] = {}
+    investment_by_currency: dict[str, str] = {}
+    as_of: str
+
+
+class BalanceAdjustmentIn(BaseModel):
+    target_balance: str
+    note: str | None = None
+    occurred_at: str | None = None
+
+
 # ─── Market Data ────────────────────────────────────────────────────────────
 
 class MarketPriceOut(BaseModel):

@@ -13,13 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_auth
 from app.core.errors import NotFoundError
 from app.db import get_db
-from app.models import Account
+from app.models import Account, Transaction
 from app.models import touch_updated_at
 from app.schemas import (
     AccountCreate,
     AccountOut,
     AccountUpdate,
     ApiSuccess,
+    BalanceAdjustmentIn,
     BalanceOut,
     PaginationMeta,
 )
@@ -189,3 +190,63 @@ async def delete_account(
     account.deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     await db.flush()
     return ApiSuccess(data={"id": account_id, "deleted": True})
+
+
+@router.post(
+    "/{account_id}/adjust-balance",
+    response_model=ApiSuccess[BalanceOut],
+    status_code=status.HTTP_201_CREATED,
+)
+async def adjust_balance(
+    account_id: int,
+    body: BalanceAdjustmentIn,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create an `adjustment` transaction equal to (target_balance - current_balance)."""
+    from datetime import datetime, timezone
+
+    acct_stmt = select(Account).where(
+        Account.id == account_id, Account.deleted_at.is_(None)
+    )
+    acct_result = await db.execute(acct_stmt)
+    account = acct_result.scalar_one_or_none()
+    if not account:
+        raise NotFoundError("Account", account_id)
+
+    bal_stmt = text(
+        "SELECT balance FROM v_account_balance WHERE account_id = :aid"
+    )
+    bal_row = (await db.execute(bal_stmt, {"aid": account_id})).first()
+    current_balance = Decimal(str(bal_row[0])) if bal_row and bal_row[0] is not None else Decimal("0")
+
+    target = Decimal(body.target_balance)
+    delta = target - current_balance
+
+    occurred_at = body.occurred_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    description = body.note or "手动调整余额"
+
+    if delta != 0:
+        tx = Transaction(
+            account_id=account_id,
+            occurred_at=occurred_at,
+            amount=delta,
+            currency=account.currency,
+            type="adjustment",
+            description=description,
+            source="manual",
+            is_pending=False,
+        )
+        db.add(tx)
+        await db.flush()
+
+    new_row = (await db.execute(text(
+        "SELECT account_id, account_name, currency, balance FROM v_account_balance WHERE account_id = :aid"
+    ), {"aid": account_id})).first()
+
+    return ApiSuccess(data=BalanceOut(
+        account_id=new_row[0],
+        account_name=new_row[1],
+        currency=new_row[2],
+        balance=_normalize_amount(new_row[3]),
+    ))

@@ -15,6 +15,7 @@ import {
   useBalances,
   useAccounts,
   useAssets,
+  useNetWorth,
 } from "@/lib/hooks";
 import {
   ASSET_CLASS_LABELS,
@@ -24,7 +25,13 @@ import {
   formatCurrency,
   formatNumber,
 } from "@/lib/utils";
-import { ApiError, deleteHolding, type HoldingOut } from "@/lib/api";
+import {
+  adjustAccountBalance,
+  ApiError,
+  deleteHolding,
+  type BalanceOut,
+  type HoldingOut,
+} from "@/lib/api";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { HoldingForm } from "@/components/holding-form";
 
@@ -69,8 +76,10 @@ export default function AssetsPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [distMode, setDistMode] = useState<"class" | "currency">("class");
+  const [adjustTarget, setAdjustTarget] = useState<BalanceOut | null>(null);
 
-  const { data: summary, isLoading: summaryLoading, mutate: refreshSummary } = usePortfolioSummary();
+  const { data: summary, mutate: refreshSummary } = usePortfolioSummary();
+  const { data: netWorth, isLoading: netWorthLoading, mutate: refreshNetWorth } = useNetWorth();
   const { data: holdings, error: holdingsError, isLoading: holdingsLoading, mutate: refreshHoldings } = useHoldings();
   const { data: breakdown, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
   const { data: balances, isLoading: balancesLoading, mutate: refreshBalances } = useBalances();
@@ -79,6 +88,7 @@ export default function AssetsPage() {
 
   const refreshAll = () => {
     refreshSummary();
+    refreshNetWorth();
     refreshHoldings();
     refreshBreakdown();
     refreshBalances();
@@ -191,24 +201,44 @@ export default function AssetsPage() {
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-6">
-          <div className="rounded-xl border border-border bg-card p-5 sm:col-span-2 lg:col-span-2">
-            <p className="text-xs text-muted-foreground mb-1.5">总资产价值</p>
-            {summaryLoading ? (
+          <div className="rounded-xl border border-border bg-card p-5">
+            <p className="text-xs text-muted-foreground mb-1.5">现金总额</p>
+            {netWorthLoading ? (
+              <div className="h-7 w-32 animate-pulse rounded bg-muted" />
+            ) : (
+              <p className="text-2xl font-semibold tabular-nums">
+                {formatCurrency(netWorth?.cash_total ?? "0", netWorth?.base_currency ?? "EUR")}
+              </p>
+            )}
+          </div>
+          <div className="rounded-xl border border-border bg-card p-5">
+            <p className="text-xs text-muted-foreground mb-1.5">投资总额</p>
+            {netWorthLoading ? (
+              <div className="h-7 w-32 animate-pulse rounded bg-muted" />
+            ) : (
+              <p className="text-2xl font-semibold tabular-nums">
+                {formatCurrency(netWorth?.investment_total ?? "0", netWorth?.base_currency ?? "EUR")}
+              </p>
+            )}
+          </div>
+          <div className="rounded-xl border-2 border-primary/40 bg-gradient-to-br from-primary/10 to-primary/[0.02] p-5 sm:col-span-2 lg:col-span-2">
+            <p className="text-xs text-primary/80 mb-1.5 font-medium">总净值</p>
+            {netWorthLoading ? (
               <div className="h-9 w-40 animate-pulse rounded bg-muted" />
             ) : (
               <p className="text-3xl font-bold tracking-tight tabular-nums">
-                {formatCurrency(summary?.total_value ?? "0", summary?.base_currency ?? "EUR")}
+                {formatCurrency(netWorth?.net_worth ?? "0", netWorth?.base_currency ?? "EUR")}
               </p>
             )}
-            {summary?.as_of && (
+            {netWorth?.as_of && (
               <p className="text-xs text-muted-foreground mt-2">
-                截至 {new Date(summary.as_of).toLocaleString("zh-CN")}
+                截至 {new Date(netWorth.as_of).toLocaleString("zh-CN")}
               </p>
             )}
           </div>
           <StatCard label="持仓数" value={holdings ? String(holdings.length) : "—"} loading={holdingsLoading} />
           <StatCard label="资产类型" value={holdings ? String(distinctClasses) : "—"} loading={holdingsLoading} />
-          <div className="rounded-xl border border-border bg-card p-5 sm:col-span-2 lg:col-span-4">
+          <div className="rounded-xl border border-border bg-card p-5 sm:col-span-2 lg:col-span-2">
             <p className="text-xs text-muted-foreground mb-1.5">未实现盈亏</p>
             {holdingsLoading ? (
               <div className="h-7 w-32 animate-pulse rounded bg-muted" />
@@ -439,16 +469,24 @@ export default function AssetsPage() {
                       key={b.account_id}
                       className="rounded-xl border border-border bg-card p-5 hover:border-primary/40 transition-colors"
                     >
-                      <div className="flex items-start justify-between mb-4">
-                        <div>
-                          <p className="text-sm font-medium text-foreground">{b.account_name}</p>
+                      <div className="flex items-start justify-between mb-4 gap-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground truncate">{b.account_name}</p>
                           {account?.institution && (
-                            <p className="text-xs text-muted-foreground mt-0.5">{account.institution}</p>
+                            <p className="text-xs text-muted-foreground mt-0.5 truncate">{account.institution}</p>
                           )}
                         </div>
-                        <span className="text-xs px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium">
-                          {b.currency}
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() => setAdjustTarget(b)}
+                            className="text-xs px-2 py-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                          >
+                            调整
+                          </button>
+                          <span className="text-xs px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium">
+                            {b.currency}
+                          </span>
+                        </div>
                       </div>
                       <p className="text-2xl font-bold tabular-nums">
                         {formatCurrency(b.balance, b.currency)}
@@ -478,6 +516,17 @@ export default function AssetsPage() {
           onSuccess={() => {
             setShowForm(false);
             setEditing(null);
+            refreshAll();
+          }}
+        />
+      )}
+
+      {adjustTarget && (
+        <BalanceAdjustDialog
+          balance={adjustTarget}
+          onClose={() => setAdjustTarget(null)}
+          onSuccess={() => {
+            setAdjustTarget(null);
             refreshAll();
           }}
         />
@@ -661,6 +710,128 @@ function DistributionPanel({ mode, breakdown, baseCurrency }: DistPanelProps) {
             <span className="font-bold">{formatCurrency(total, baseCurrency)}</span>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+interface BalanceAdjustDialogProps {
+  balance: BalanceOut;
+  onClose: () => void;
+  onSuccess: () => void;
+}
+
+function BalanceAdjustDialog({ balance, onClose, onSuccess }: BalanceAdjustDialogProps) {
+  const [target, setTarget] = useState(balance.balance);
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const num = parseFloat(target);
+    if (isNaN(num)) {
+      setError("请输入有效金额");
+      return;
+    }
+    try {
+      setSubmitting(true);
+      await adjustAccountBalance(balance.account_id, {
+        target_balance: target,
+        note: note.trim() || undefined,
+      });
+      onSuccess();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "调整失败，请重试");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div
+        className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={() => !submitting && onClose()}
+      />
+      <div className="relative w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-lg font-semibold">调整余额</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 rounded-lg hover:bg-muted transition-colors text-muted-foreground"
+            aria-label="关闭"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="mb-4 p-3 rounded-lg bg-muted/40 border border-border">
+          <p className="text-xs text-muted-foreground mb-0.5">{balance.account_name}</p>
+          <p className="text-sm font-medium tabular-nums">
+            当前余额：{formatCurrency(balance.balance, balance.currency)}
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium mb-2">
+              目标余额 <span className="text-destructive">*</span>
+            </label>
+            <input
+              type="number"
+              step="any"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              placeholder="0.00"
+              required
+              autoFocus
+              className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <p className="text-xs text-muted-foreground mt-1.5">
+              将创建一笔差额调整交易，使账户余额等于此值（{balance.currency}）
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2">备注</label>
+            <input
+              type="text"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="选填，如：月末对账"
+              className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
+          <div className="flex gap-3 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={submitting}
+              className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg border border-border hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="flex-1 px-4 py-2.5 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              {submitting ? "保存中…" : "确认调整"}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

@@ -21,6 +21,7 @@ from app.schemas import (
     HoldingCreate,
     HoldingOut,
     HoldingUpdate,
+    NetWorthOut,
     PortfolioBreakdown,
     PortfolioSummary,
 )
@@ -370,4 +371,99 @@ async def portfolio_breakdown(
     return ApiSuccess(data=PortfolioBreakdown(
         by_class=class_data,
         by_currency=currency_data,
+    ))
+
+
+async def _convert_to_base(
+    db: AsyncSession,
+    amount: Decimal,
+    src_currency: str,
+    base_currency: str,
+) -> Decimal | None:
+    """Convert amount from src_currency to base_currency. Returns None if no FX rate available."""
+    if src_currency == base_currency:
+        return amount
+    fx_stmt = (
+        select(FxRate)
+        .where(
+            FxRate.base_currency == base_currency,
+            FxRate.quote_currency == src_currency,
+        )
+        .order_by(FxRate.quoted_at.desc())
+        .limit(1)
+    )
+    fx_result = await db.execute(fx_stmt)
+    fx = fx_result.scalar_one_or_none()
+    if fx is None:
+        return None
+    return amount * fx.rate
+
+
+@router.get("/portfolio/net-worth", response_model=ApiSuccess[NetWorthOut])
+async def net_worth(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate cash (account balances) + investments (holdings market value) into total net worth."""
+    base_currency = settings.base_currency
+
+    # 1. Cash: account balances grouped by currency
+    balances_stmt = text("""
+        SELECT currency, SUM(balance) AS total
+        FROM v_account_balance
+        GROUP BY currency
+    """)
+    balances_result = await db.execute(balances_stmt)
+    cash_total = Decimal("0")
+    cash_details: dict[str, dict[str, str]] = {}
+    for currency, total in balances_result.all():
+        original = total if isinstance(total, Decimal) else Decimal(str(total or 0))
+        converted = await _convert_to_base(db, original, currency, base_currency)
+        if converted is not None:
+            cash_total += converted
+            cash_details[currency] = {
+                "original": str(original),
+                "converted": str(converted),
+            }
+        else:
+            # No FX rate — record original but cannot include in total
+            cash_details[currency] = {
+                "original": str(original),
+                "converted": "",
+            }
+
+    # 2. Investments: reuse portfolio_summary logic (skip rows missing price/FX)
+    inv_stmt = select(AssetHolding, Asset).join(Asset, AssetHolding.asset_id == Asset.id)
+    inv_result = await db.execute(inv_stmt)
+    investment_total = Decimal("0")
+    investment_by_currency: dict[str, Decimal] = {}
+    for holding, asset in inv_result.all():
+        price_stmt = (
+            select(MarketPrice)
+            .where(MarketPrice.asset_id == asset.id)
+            .order_by(MarketPrice.quoted_at.desc())
+            .limit(1)
+        )
+        price_result = await db.execute(price_stmt)
+        latest = price_result.scalar_one_or_none()
+        if latest is None:
+            continue
+        value = holding.quantity * latest.price
+        converted = await _convert_to_base(db, value, latest.currency, base_currency)
+        if converted is None:
+            continue
+        investment_total += converted
+        investment_by_currency[latest.currency] = (
+            investment_by_currency.get(latest.currency, Decimal("0")) + converted
+        )
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ApiSuccess(data=NetWorthOut(
+        base_currency=base_currency,
+        cash_total=str(cash_total),
+        investment_total=str(investment_total),
+        net_worth=str(cash_total + investment_total),
+        cash_by_currency=cash_details,
+        investment_by_currency={k: str(v) for k, v in investment_by_currency.items()},
+        as_of=now,
     ))
