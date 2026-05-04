@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
-from app.db import Base, engine
+from app.db import Base, async_session_factory, engine
 from app.api.v1 import api_router
 
 settings = get_settings()
@@ -44,13 +44,26 @@ logger = structlog.get_logger(__name__)
 
 # ─── Lifespan ───────────────────────────────────────────────────────────────
 
+_BALANCE_VIEW_DROP_SQL = "DROP VIEW IF EXISTS v_account_balance"
+# `transactions.amount` is stored as a positive magnitude across PDF imports,
+# but historically also accepted signed values for `manual` rows. We derive the
+# direction from `type` so all writers behave consistently and the view stays
+# correct regardless of sign convention.
 _BALANCE_VIEW_SQL = """
-CREATE VIEW IF NOT EXISTS v_account_balance AS
+CREATE VIEW v_account_balance AS
 SELECT
     a.id              AS account_id,
     a.name            AS account_name,
     a.currency        AS currency,
-    a.initial_balance + COALESCE(SUM(t.amount), 0) AS balance
+    a.initial_balance + COALESCE(SUM(
+        CASE t.type
+            WHEN 'expense'    THEN -ABS(t.amount)
+            WHEN 'income'     THEN  ABS(t.amount)
+            WHEN 'transfer'   THEN -ABS(t.amount)  -- single-row outflow; reverse leg adds back
+            WHEN 'adjustment' THEN  t.amount       -- adjustment carries its own sign
+            ELSE 0
+        END
+    ), 0) AS balance
 FROM accounts a
 LEFT JOIN transactions t
     ON t.account_id = a.id
@@ -72,15 +85,27 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Create the balance view
+    # Create the balance view (drop first so updated definitions actually take effect)
     async with engine.begin() as conn:
         from sqlalchemy import text
+        await conn.execute(text(_BALANCE_VIEW_DROP_SQL))
         await conn.execute(text(_BALANCE_VIEW_SQL))
+
+    # Seed default expense categories + starter matching rules (idempotent)
+    from app.services.categorizer.seed import seed_categories
+    async with async_session_factory() as seed_db:
+        await seed_categories(seed_db)
+        await seed_db.commit()
+
+    # Start background market-data scheduler
+    from app.services.market_data.scheduler import start_scheduler, shutdown_scheduler
+    start_scheduler()
 
     logger.info("finance_tracker_started", version="0.1.0")
 
     yield
 
+    shutdown_scheduler()
     await engine.dispose()
     logger.info("finance_tracker_stopped")
 

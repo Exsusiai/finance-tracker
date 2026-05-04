@@ -475,6 +475,41 @@ export async function fetchCategoryTree(): Promise<CategoryTree[]> {
   return request("/api/v1/categories/tree");
 }
 
+export interface CategoryCreateInput {
+  name: string;
+  kind: string;
+  parent_id?: number | null;
+  icon?: string | null;
+  color?: string | null;
+  sort_order?: number;
+}
+
+export interface CategoryUpdateInput {
+  name?: string;
+  parent_id?: number | null;
+  icon?: string | null;
+  color?: string | null;
+  sort_order?: number;
+}
+
+export async function createCategory(data: CategoryCreateInput): Promise<CategoryOut> {
+  return request("/api/v1/categories", {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateCategory(id: number, data: CategoryUpdateInput): Promise<CategoryOut> {
+  return request(`/api/v1/categories/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteCategory(id: number): Promise<{ id: number; deleted: boolean }> {
+  return request(`/api/v1/categories/${id}`, { method: "DELETE" });
+}
+
 // ─── Accounts ──────────────────────────────────────────────────────────
 
 export interface AccountOut {
@@ -552,6 +587,22 @@ export async function adjustAccountBalance(
 }
 
 // ─── PDF Import ────────────────────────────────────────────────────────
+
+// ─── Inbox (pending transactions awaiting user confirmation) ──────────
+
+export async function fetchInbox(limit: number = 100): Promise<TransactionOut[]> {
+  return request(`/api/v1/transactions/inbox/list?limit=${limit}`);
+}
+
+export async function confirmInboxItem(
+  id: number,
+  data: { category_id?: number | null; description?: string | null },
+): Promise<TransactionOut> {
+  return request(`/api/v1/transactions/inbox/${id}/confirm`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
 
 // ─── FX rates ──────────────────────────────────────────────────────────
 

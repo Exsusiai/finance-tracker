@@ -15,91 +15,93 @@ from app.models import Asset, MarketPrice, FxRate
 logger = logging.getLogger(__name__)
 
 
-async def refresh_all_market_data(db: AsyncSession) -> dict[str, Any]:
-    """Refresh market data for all assets that have a data_source configured.
-    
-    Returns summary of what was refreshed.
-    """
-    result = {
-        "prices_updated": 0,
-        "fx_updated": 0,
-        "errors": [],
-    }
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # Refresh crypto prices (CoinGecko)
+async def refresh_crypto_prices(db: AsyncSession) -> dict[str, Any]:
+    """Refresh crypto prices (CoinGecko) for all crypto assets with data_source set."""
+    result = {"prices_updated": 0, "errors": []}
     try:
-        crypto_stmt = select(Asset).where(
+        stmt = select(Asset).where(
             Asset.asset_class == "crypto",
             Asset.data_source.is_not(None),
         )
-        crypto_result = await db.execute(crypto_stmt)
-        crypto_assets = crypto_result.scalars().all()
-
-        for asset in crypto_assets:
+        assets = (await db.execute(stmt)).scalars().all()
+        for asset in assets:
             try:
-                price_data = await _fetch_crypto_price(asset)
-                if price_data:
-                    mp = MarketPrice(
+                data = await _fetch_crypto_price(asset)
+                if data:
+                    db.add(MarketPrice(
                         asset_id=asset.id,
-                        quoted_at=price_data["quoted_at"],
-                        price=price_data["price"],
-                        currency=price_data["currency"],
-                        source=price_data["source"],
-                    )
-                    db.add(mp)
+                        quoted_at=data["quoted_at"],
+                        price=data["price"],
+                        currency=data["currency"],
+                        source=data["source"],
+                    ))
                     result["prices_updated"] += 1
             except Exception as e:
                 result["errors"].append(f"{asset.symbol}: {e}")
     except Exception as e:
         result["errors"].append(f"crypto: {e}")
+    await db.flush()
+    return result
 
-    # Refresh stock prices (yfinance)
+
+async def refresh_stock_prices(db: AsyncSession) -> dict[str, Any]:
+    """Refresh stock prices (yfinance) for a-share / eu_stock / us_stock assets."""
+    result = {"prices_updated": 0, "errors": []}
     try:
-        stock_stmt = select(Asset).where(
+        stmt = select(Asset).where(
             Asset.asset_class.in_(["a_share", "eu_stock", "us_stock"]),
             Asset.data_source_id.is_not(None),
         )
-        stock_result = await db.execute(stock_stmt)
-        stock_assets = stock_result.scalars().all()
-
-        for asset in stock_assets:
+        assets = (await db.execute(stmt)).scalars().all()
+        for asset in assets:
             try:
-                price_data = await _fetch_stock_price(asset)
-                if price_data:
-                    mp = MarketPrice(
+                data = await _fetch_stock_price(asset)
+                if data:
+                    db.add(MarketPrice(
                         asset_id=asset.id,
-                        quoted_at=price_data["quoted_at"],
-                        price=price_data["price"],
-                        currency=price_data["currency"],
-                        source=price_data["source"],
-                    )
-                    db.add(mp)
+                        quoted_at=data["quoted_at"],
+                        price=data["price"],
+                        currency=data["currency"],
+                        source=data["source"],
+                    ))
                     result["prices_updated"] += 1
             except Exception as e:
                 result["errors"].append(f"{asset.symbol}: {e}")
     except Exception as e:
         result["errors"].append(f"stocks: {e}")
+    await db.flush()
+    return result
 
-    # Refresh FX rates
+
+async def refresh_fx(db: AsyncSession) -> dict[str, Any]:
+    """Refresh FX rates from open.er-api.com (with frankfurter fallback)."""
+    result = {"fx_updated": 0, "errors": []}
     try:
-        fx_data = await _fetch_fx_rates()
-        for fx in fx_data:
-            rate = FxRate(
+        for fx in await _fetch_fx_rates():
+            db.add(FxRate(
                 base_currency=fx["base"],
                 quote_currency=fx["quote"],
                 quoted_at=fx["quoted_at"],
                 rate=fx["rate"],
                 source=fx["source"],
-            )
-            db.add(rate)
+            ))
             result["fx_updated"] += 1
     except Exception as e:
         result["errors"].append(f"fx: {e}")
-
     await db.flush()
     return result
+
+
+async def refresh_all_market_data(db: AsyncSession) -> dict[str, Any]:
+    """Run all refreshers in sequence and merge their results."""
+    crypto = await refresh_crypto_prices(db)
+    stocks = await refresh_stock_prices(db)
+    fx = await refresh_fx(db)
+    return {
+        "prices_updated": crypto["prices_updated"] + stocks["prices_updated"],
+        "fx_updated": fx["fx_updated"],
+        "errors": crypto["errors"] + stocks["errors"] + fx["errors"],
+    }
 
 
 async def _fetch_crypto_price(asset: Asset) -> dict | None:

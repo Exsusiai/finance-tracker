@@ -93,6 +93,13 @@ async def trigger_backup(
     ))
 
 
+@router.get("/scheduler/status", response_model=ApiSuccess[dict])
+async def get_scheduler_status(_token: _auth):
+    """Snapshot of registered background jobs and their last-run outcome."""
+    from app.services.market_data.scheduler import scheduler_status
+    return ApiSuccess(data=scheduler_status())
+
+
 @router.get("/backups", response_model=ApiSuccess[list[BackupInfo]])
 async def list_backups(
     _token: _auth,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -8,6 +8,8 @@ import {
   usePortfolioBreakdown,
   useCashFlowMonthly,
   useTransactions,
+  useNetWorth,
+  useFxRates,
 } from "@/lib/hooks";
 import {
   formatCurrency,
@@ -15,6 +17,10 @@ import {
   periodLabel,
   ASSET_CLASS_LABELS,
   ASSET_CLASS_COLORS,
+  DISPLAY_CURRENCIES,
+  cn,
+  convertAmount,
+  latestFxMap,
 } from "@/lib/utils";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 
@@ -33,8 +39,23 @@ export default function DashboardPage() {
   const { data: breakdown, error: breakdownError, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
   const { data: monthlyData, error: monthlyError, isLoading: monthlyLoading, mutate: refreshMonthly } = useCashFlowMonthly(period);
   const { data: txResp, error: txError, isLoading: txLoading, mutate: refreshTx } = useTransactions({ limit: 8 });
+  const { data: netWorth } = useNetWorth();
+  const { data: fxRatesRaw } = useFxRates("CNY");
+  const fxMap = useMemo(() => latestFxMap(fxRatesRaw), [fxRatesRaw]);
 
-  // ─── Derived: Total Assets by currency ────────────────────────────────
+  // ─── Display currency (shared with /assets via localStorage) ──────────
+  const [displayCurrency, setDisplayCurrency] = useState<string>("CNY");
+  useEffect(() => {
+    const saved = typeof window !== "undefined" ? window.localStorage.getItem("display_currency") : null;
+    if (saved) setDisplayCurrency(saved);
+  }, []);
+  const handleDisplayCurrencyChange = (c: string) => {
+    setDisplayCurrency(c);
+    if (typeof window !== "undefined") window.localStorage.setItem("display_currency", c);
+  };
+  const baseCurrency = netWorth?.base_currency ?? "CNY";
+
+  // ─── Derived: Total Assets by currency (raw, in each account's own currency) ─
   const currencyTotals = useMemo(() => {
     if (!balances || balances.length === 0) return [];
     const map = new Map<string, number>();
@@ -44,33 +65,62 @@ export default function DashboardPage() {
     return Array.from(map.entries()).map(([currency, total]) => ({ currency, total }));
   }, [balances]);
 
-  const grandTotal = useMemo(
-    () => currencyTotals.reduce((sum, c) => sum + c.total, 0),
-    [currencyTotals],
-  );
+  // grandTotal: sum each currency converted into displayCurrency.
+  // Mixing currencies via direct addition is meaningless; this is the previous bug.
+  const grandTotal = useMemo(() => {
+    let sum = 0;
+    let allConverted = true;
+    for (const c of currencyTotals) {
+      if (c.currency === displayCurrency) { sum += c.total; continue; }
+      const v = convertAmount(c.total, c.currency, displayCurrency, fxMap);
+      if (v == null) { allConverted = false; continue; }
+      sum += v;
+    }
+    return { value: sum, allConverted };
+  }, [currencyTotals, displayCurrency, fxMap]);
 
   // ─── Derived: This month income / expense / savings rate ──────────────
   const thisMonth = monthlyData?.[0];
-  const monthIncome = thisMonth ? parseFloat(thisMonth.income) : 0;
-  const monthExpense = thisMonth ? parseFloat(thisMonth.expense) : 0;
-  const savingsRate = monthIncome > 0 ? ((monthIncome - monthExpense) / monthIncome) * 100 : 0;
+  const monthIncomeRaw = thisMonth ? parseFloat(thisMonth.income) : 0;
+  const monthExpenseRaw = thisMonth ? parseFloat(thisMonth.expense) : 0;
+  const cashflowCurrency = (thisMonth as { base_currency?: string } | undefined)?.base_currency ?? baseCurrency;
+  const convertCashflow = (raw: number) => {
+    if (displayCurrency === cashflowCurrency) return { value: raw, currency: cashflowCurrency };
+    const v = convertAmount(raw, cashflowCurrency, displayCurrency, fxMap);
+    return v == null ? { value: raw, currency: cashflowCurrency } : { value: v, currency: displayCurrency };
+  };
+  const monthIncome = convertCashflow(monthIncomeRaw);
+  const monthExpense = convertCashflow(monthExpenseRaw);
+  const savingsRate = monthIncomeRaw > 0 ? ((monthIncomeRaw - monthExpenseRaw) / monthIncomeRaw) * 100 : 0;
 
-  // ─── Derived: Asset class mini-cards ──────────────────────────────────
+  // ─── Derived: Asset class mini-cards (converted to displayCurrency) ───
   const assetClassCards = useMemo(() => {
     if (!breakdown?.by_class) return [];
     const entries = Object.entries(breakdown.by_class);
-    const total = entries.reduce((s, [, v]) => s + parseFloat(v.value || "0"), 0);
-    if (total <= 0) return [];
+    const totalRaw = entries.reduce((s, [, v]) => s + parseFloat(v.value || "0"), 0);
+    if (totalRaw <= 0) return [];
     return entries
-      .map(([key, val]) => ({
-        key,
-        label: ASSET_CLASS_LABELS[key] || key,
-        value: parseFloat(val.value || "0"),
-        percent: (parseFloat(val.value || "0") / total) * 100,
-        color: ASSET_CLASS_COLORS[key] || "hsl(0, 0%, 50%)",
-      }))
+      .map(([key, val]) => {
+        const raw = parseFloat(val.value || "0");
+        const converted =
+          displayCurrency === baseCurrency
+            ? raw
+            : convertAmount(raw, baseCurrency, displayCurrency, fxMap) ?? raw;
+        const currency =
+          displayCurrency === baseCurrency || convertAmount(raw, baseCurrency, displayCurrency, fxMap) != null
+            ? displayCurrency
+            : baseCurrency;
+        return {
+          key,
+          label: ASSET_CLASS_LABELS[key] || key,
+          value: converted,
+          currency,
+          percent: (raw / totalRaw) * 100,
+          color: ASSET_CLASS_COLORS[key] || "hsl(0, 0%, 50%)",
+        };
+      })
       .sort((a, b) => b.value - a.value);
-  }, [breakdown]);
+  }, [breakdown, displayCurrency, baseCurrency, fxMap]);
 
   // ─── Error / Loading ──────────────────────────────────────────────────
   const hasError = balancesError || breakdownError || monthlyError || txError;
@@ -91,18 +141,47 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-background text-foreground">
       <div className="mx-auto max-w-7xl px-4 py-6 md:px-6 lg:px-8">
         {/* ─── Header ──────────────────────────────────────────────── */}
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight">总览</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            {period ? `数据截至 ${periodLabel(period)}` : "加载中…"}
-          </p>
+        <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">总览</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              {period ? `数据截至 ${periodLabel(period)}` : "加载中…"}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">显示币种：</span>
+            <div className="inline-flex flex-wrap rounded-lg border border-border bg-card p-1">
+              {DISPLAY_CURRENCIES.map((c) => (
+                <button
+                  key={c.value}
+                  onClick={() => handleDisplayCurrencyChange(c.value)}
+                  className={cn(
+                    "px-2.5 py-1 text-xs font-medium rounded-md transition-colors",
+                    displayCurrency === c.value
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* ─── Total Assets Hero Card ──────────────────────────────── */}
         <div className="rounded-xl border border-border bg-card p-6 mb-6">
           <p className="text-sm text-muted-foreground mb-1">总资产</p>
-          <p className="text-3xl md:text-4xl font-bold text-card-foreground mb-4">
-            {grandTotal > 0 ? formatCurrency(grandTotal) : "—"}
+          <p className="text-3xl md:text-4xl font-bold text-card-foreground mb-1">
+            {grandTotal.value > 0 ? formatCurrency(grandTotal.value, displayCurrency) : "—"}
+          </p>
+          {!grandTotal.allConverted && (
+            <p className="text-[10px] text-amber-600 dark:text-amber-400 mb-3">
+              ⚠ 部分币种缺少汇率，未计入合计
+            </p>
+          )}
+          <p className="text-[10px] text-muted-foreground mb-4">
+            按所选显示币种合计；下方按账户原币展示
           </p>
           <div className="flex flex-wrap gap-3 mb-4">
             {currencyTotals.map((c) => (
@@ -132,7 +211,7 @@ export default function DashboardPage() {
                   <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: ac.color }} />
                   <span className="text-muted-foreground">{ac.label}</span>
                   <span className="font-medium text-foreground">
-                    {formatCurrency(ac.value)}
+                    {formatCurrency(ac.value, ac.currency)}
                   </span>
                   <span className="text-xs text-muted-foreground">
                     {ac.percent.toFixed(1)}%
@@ -156,7 +235,7 @@ export default function DashboardPage() {
               <span className="text-xs text-muted-foreground">本月收入</span>
             </div>
             <p className="text-lg md:text-xl font-bold text-green-500">
-              {monthIncome > 0 ? formatCurrency(monthIncome) : "—"}
+              {monthIncome.value > 0 ? formatCurrency(monthIncome.value, monthIncome.currency) : "—"}
             </p>
           </div>
 
@@ -171,7 +250,7 @@ export default function DashboardPage() {
               <span className="text-xs text-muted-foreground">本月支出</span>
             </div>
             <p className="text-lg md:text-xl font-bold text-red-500">
-              {monthExpense > 0 ? formatCurrency(monthExpense) : "—"}
+              {monthExpense.value > 0 ? formatCurrency(monthExpense.value, monthExpense.currency) : "—"}
             </p>
           </div>
 
@@ -186,7 +265,7 @@ export default function DashboardPage() {
               <span className="text-xs text-muted-foreground">储蓄率</span>
             </div>
             <p className="text-lg md:text-xl font-bold text-blue-500">
-              {monthIncome > 0 ? `${savingsRate >= 0 ? "+" : ""}${savingsRate.toFixed(1)}%` : "—"}
+              {monthIncomeRaw > 0 ? `${savingsRate >= 0 ? "+" : ""}${savingsRate.toFixed(1)}%` : "—"}
             </p>
           </div>
         </div>

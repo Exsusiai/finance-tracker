@@ -168,19 +168,25 @@ export default function AssetsPage() {
 
   const baseCurrency = netWorth?.base_currency ?? summary?.base_currency ?? "CNY";
 
-  /** Convert a base-denominated amount to the user's displayCurrency. Falls back to base value if no FX path. */
-  const display = (val: string | number | null | undefined): { value: number; currency: string; degraded: boolean } => {
+  /** Convert `val` from `from` currency to displayCurrency. Falls back to original currency if no FX path. */
+  const displayFrom = (
+    val: string | number | null | undefined,
+    from: string,
+  ): { value: number; currency: string; degraded: boolean } => {
     const num = typeof val === "string" ? parseFloat(val) : (val ?? 0);
     const safe = isFinite(num) ? num : 0;
-    if (displayCurrency === baseCurrency) {
-      return { value: safe, currency: baseCurrency, degraded: false };
+    if (displayCurrency === from) {
+      return { value: safe, currency: from, degraded: false };
     }
-    const converted = convertAmount(safe, baseCurrency, displayCurrency, fxMap);
+    const converted = convertAmount(safe, from, displayCurrency, fxMap);
     if (converted == null) {
-      return { value: safe, currency: baseCurrency, degraded: true };
+      return { value: safe, currency: from, degraded: true };
     }
     return { value: converted, currency: displayCurrency, degraded: false };
   };
+
+  /** Shorthand for amounts already denominated in baseCurrency (net_worth API). */
+  const display = (val: string | number | null | undefined) => displayFrom(val, baseCurrency);
 
   const distinctClasses = useMemo(() => {
     if (!holdings) return 0;
@@ -475,6 +481,8 @@ export default function AssetsPage() {
             }}
             onAddHolding={(accountId) => openAddHolding(accountId)}
             onAdjust={(b) => setAdjustTarget(b)}
+            displayCurrency={displayCurrency}
+            fxMap={fxMap}
           />
         )}
 
@@ -559,13 +567,28 @@ export default function AssetsPage() {
                             <td className="px-4 py-3 text-muted-foreground">{h.account_name || "—"}</td>
                             <td className="px-4 py-3 text-right tabular-nums">{formatNumber(h.quantity)}</td>
                             <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
-                              {h.avg_cost ? formatCurrency(h.avg_cost, h.cost_currency || "EUR") : "—"}
+                              {h.avg_cost
+                                ? (() => {
+                                    const d = displayFrom(h.avg_cost, h.cost_currency || "EUR");
+                                    return formatCurrency(d.value, d.currency);
+                                  })()
+                                : "—"}
                             </td>
                             <td className="px-4 py-3 text-right tabular-nums">
-                              {h.current_price ? formatCurrency(h.current_price, h.cost_currency || "EUR") : "—"}
+                              {h.current_price
+                                ? (() => {
+                                    const d = displayFrom(h.current_price, h.cost_currency || "EUR");
+                                    return formatCurrency(d.value, d.currency);
+                                  })()
+                                : "—"}
                             </td>
                             <td className="px-4 py-3 text-right font-medium tabular-nums">
-                              {h.market_value ? formatCurrency(h.market_value, h.cost_currency || "EUR") : "—"}
+                              {h.market_value
+                                ? (() => {
+                                    const d = displayFrom(h.market_value, h.cost_currency || "EUR");
+                                    return formatCurrency(d.value, d.currency);
+                                  })()
+                                : "—"}
                             </td>
                             <td
                               className={cn(
@@ -643,7 +666,9 @@ export default function AssetsPage() {
               <DistributionPanel
                 mode={distMode}
                 breakdown={breakdown}
-                baseCurrency={summary?.base_currency ?? "EUR"}
+                baseCurrency={summary?.base_currency ?? baseCurrency}
+                displayCurrency={displayCurrency}
+                fxMap={fxMap}
               />
             )}
           </div>
@@ -688,6 +713,16 @@ export default function AssetsPage() {
                       <p className="text-2xl font-bold tabular-nums">
                         {formatCurrency(b.balance, b.currency)}
                       </p>
+                      {(() => {
+                        if (displayCurrency === b.currency) return null;
+                        const d = displayFrom(b.balance, b.currency);
+                        if (d.currency === b.currency) return null;
+                        return (
+                          <p className="text-xs text-muted-foreground tabular-nums mt-0.5">
+                            ≈ {formatCurrency(d.value, d.currency)}
+                          </p>
+                        );
+                      })()}
                       <div className="mt-3 flex items-center justify-between gap-2">
                         {account?.type && (
                           <p className="text-xs text-muted-foreground capitalize">{account.type}</p>
@@ -880,9 +915,11 @@ interface DistPanelProps {
       }
     | undefined;
   baseCurrency: string;
+  displayCurrency: string;
+  fxMap: Map<string, number>;
 }
 
-function DistributionPanel({ mode, breakdown, baseCurrency }: DistPanelProps) {
+function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxMap }: DistPanelProps) {
   const source = mode === "class" ? breakdown?.by_class : breakdown?.by_currency;
   const entries = source ? Object.entries(source) : [];
 
@@ -894,18 +931,33 @@ function DistributionPanel({ mode, breakdown, baseCurrency }: DistPanelProps) {
     );
   }
 
-  const total = entries.reduce((s, [, v]) => s + parseFloat(v.value || "0"), 0);
+  const convertVal = (raw: string): { value: number; currency: string } => {
+    const v = parseFloat(raw || "0");
+    if (!isFinite(v)) return { value: 0, currency: baseCurrency };
+    if (displayCurrency === baseCurrency) return { value: v, currency: baseCurrency };
+    const converted = convertAmount(v, baseCurrency, displayCurrency, fxMap);
+    return converted == null
+      ? { value: v, currency: baseCurrency }
+      : { value: converted, currency: displayCurrency };
+  };
 
-  const pieData = entries.map(([key, val], i) => ({
-    name: mode === "class" ? (ASSET_CLASS_LABELS[key] || key) : key,
-    value: parseFloat(val.value || "0"),
-    count: val.count,
-    fill:
-      mode === "class"
-        ? ASSET_CLASS_COLORS[key] || CHART_COLORS[i % CHART_COLORS.length]
-        : CHART_COLORS[i % CHART_COLORS.length],
-    percent: total > 0 ? (parseFloat(val.value || "0") / total) * 100 : 0,
-  }));
+  const totalRaw = entries.reduce((s, [, v]) => s + parseFloat(v.value || "0"), 0);
+  const total = convertVal(String(totalRaw));
+
+  const pieData = entries.map(([key, val], i) => {
+    const d = convertVal(val.value);
+    return {
+      name: mode === "class" ? (ASSET_CLASS_LABELS[key] || key) : key,
+      value: d.value,
+      currency: d.currency,
+      count: val.count,
+      fill:
+        mode === "class"
+          ? ASSET_CLASS_COLORS[key] || CHART_COLORS[i % CHART_COLORS.length]
+          : CHART_COLORS[i % CHART_COLORS.length],
+      percent: totalRaw > 0 ? (parseFloat(val.value || "0") / totalRaw) * 100 : 0,
+    };
+  });
 
   return (
     <div className="rounded-xl border border-border bg-card p-4 md:p-6">
@@ -941,7 +993,7 @@ function DistributionPanel({ mode, breakdown, baseCurrency }: DistPanelProps) {
                       <span className="font-medium text-foreground">{d.name}</span>
                     </div>
                     <p className="text-muted-foreground">
-                      {formatCurrency(Number(d.value ?? 0), baseCurrency)} ({(p.percent ?? 0).toFixed(1)}%)
+                      {formatCurrency(Number(d.value ?? 0), (d.payload as { currency: string }).currency || baseCurrency)} ({(p.percent ?? 0).toFixed(1)}%)
                     </p>
                   </div>
                 );
@@ -959,7 +1011,7 @@ function DistributionPanel({ mode, breakdown, baseCurrency }: DistPanelProps) {
               </div>
               <div className="text-right">
                 <span className="font-medium text-foreground">
-                  {formatCurrency(d.value, baseCurrency)}
+                  {formatCurrency(d.value, d.currency)}
                 </span>
                 <span className="text-muted-foreground ml-2">({d.percent.toFixed(1)}%)</span>
               </div>
@@ -967,7 +1019,7 @@ function DistributionPanel({ mode, breakdown, baseCurrency }: DistPanelProps) {
           ))}
           <div className="border-t border-border pt-2 flex items-center justify-between gap-4">
             <span className="font-medium">总计</span>
-            <span className="font-bold">{formatCurrency(total, baseCurrency)}</span>
+            <span className="font-bold">{formatCurrency(total.value, total.currency)}</span>
           </div>
         </div>
       </div>
@@ -1203,6 +1255,8 @@ interface AccountsPanelProps {
   onDelete: (a: AccountOut) => void;
   onAddHolding: (accountId: number) => void;
   onAdjust: (b: BalanceOut) => void;
+  displayCurrency: string;
+  fxMap: Map<string, number>;
 }
 
 function AccountsPanel({
@@ -1215,6 +1269,8 @@ function AccountsPanel({
   onDelete,
   onAddHolding,
   onAdjust,
+  displayCurrency,
+  fxMap,
 }: AccountsPanelProps) {
   if (loading) return <LoadingSpinner />;
   if (accounts.length === 0) {
@@ -1285,6 +1341,18 @@ function AccountsPanel({
               <p className="text-xl font-bold tabular-nums">
                 {formatCurrency(balanceVal, a.currency)}
               </p>
+              {(() => {
+                if (displayCurrency === a.currency) return null;
+                const num = parseFloat(balanceVal);
+                if (!isFinite(num)) return null;
+                const conv = convertAmount(num, a.currency, displayCurrency, fxMap);
+                if (conv == null) return null;
+                return (
+                  <p className="text-xs text-muted-foreground tabular-nums mt-0.5">
+                    ≈ {formatCurrency(conv, displayCurrency)}
+                  </p>
+                );
+              })()}
               <p className="text-xs text-muted-foreground mt-1">
                 持仓数 {hCount}
               </p>

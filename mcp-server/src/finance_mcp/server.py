@@ -71,6 +71,63 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _fx_rate_lookup(conn, base: str, quote: str):
+    """Latest fx_rates row for (base→quote) or None."""
+    return conn.execute(
+        "SELECT rate FROM fx_rates WHERE base_currency = ? AND quote_currency = ? "
+        "ORDER BY quoted_at DESC LIMIT 1",
+        (base, quote),
+    ).fetchone()
+
+
+def _convert_fx(conn, amount: Decimal, src: str, base: str) -> Decimal | None:
+    """Convert `amount` from `src` currency → `base` currency.
+
+    Strategy:
+      1. Same currency → identity
+      2. Direct rate (src → base) → amount * rate
+      3. Inverse rate (base → src) → amount / rate
+      4. Triangulate via USD / EUR pivot
+      Returns None when no path exists.
+    """
+    if not src or src == base:
+        return amount
+
+    direct = _fx_rate_lookup(conn, src, base)
+    if direct and direct["rate"]:
+        return amount * Decimal(str(direct["rate"]))
+
+    inverse = _fx_rate_lookup(conn, base, src)
+    if inverse and inverse["rate"]:
+        r = Decimal(str(inverse["rate"]))
+        if r > 0:
+            return amount / r
+
+    # CNY first because the DB anchors fx_rates with base=CNY (open.er-api source).
+    # USD/EUR as fallback pivots when CNY is itself one of (src, base).
+    for pivot in ("CNY", "USD", "EUR"):
+        if pivot in (src, base):
+            continue
+        a_direct = _fx_rate_lookup(conn, src, pivot)
+        a_inv = _fx_rate_lookup(conn, pivot, src) if not a_direct else None
+        a = (
+            Decimal(str(a_direct["rate"])) if a_direct
+            else (Decimal(1) / Decimal(str(a_inv["rate"]))) if (a_inv and Decimal(str(a_inv["rate"])) > 0)
+            else None
+        )
+        b_direct = _fx_rate_lookup(conn, pivot, base)
+        b_inv = _fx_rate_lookup(conn, base, pivot) if not b_direct else None
+        b = (
+            Decimal(str(b_direct["rate"])) if b_direct
+            else (Decimal(1) / Decimal(str(b_inv["rate"]))) if (b_inv and Decimal(str(b_inv["rate"])) > 0)
+            else None
+        )
+        if a and b:
+            return amount * a * b
+
+    return None
+
+
 # ─── MCP Server ─────────────────────────────────────────────────────────────
 
 mcp = FastMCP(
@@ -136,15 +193,10 @@ async def get_total_assets(
 
             # Convert to base currency if needed
             if price_cur and price_cur != base_currency:
-                fx = conn.execute("""
-                    SELECT rate FROM fx_rates
-                    WHERE base_currency = ? AND quote_currency = ?
-                    ORDER BY quoted_at DESC LIMIT 1
-                """, (base_currency, price_cur)).fetchone()
-                if fx:
-                    value = value * Decimal(str(fx["rate"]))
-                else:
-                    continue  # skip if no FX rate
+                converted = _convert_fx(conn, value, price_cur, base_currency)
+                if converted is None:
+                    continue  # skip if no FX path
+                value = converted
 
             total_portfolio += value
             ac = h["asset_class"] or "other"
@@ -157,19 +209,8 @@ async def get_total_assets(
         for a in accounts:
             amt = Decimal(a["balance"])
             cur = a["currency"]
-            if cur == base_currency:
-                total_cash += amt
-            else:
-                fx = conn.execute("""
-                    SELECT rate FROM fx_rates
-                    WHERE base_currency = ? AND quote_currency = ?
-                    ORDER BY quoted_at DESC LIMIT 1
-                """, (base_currency, cur)).fetchone()
-                if fx:
-                    converted = amt * Decimal(str(fx["rate"]))
-                    total_cash += converted
-                else:
-                    total_cash += amt  # keep original
+            converted = _convert_fx(conn, amt, cur, base_currency)
+            total_cash += converted if converted is not None else amt
             cash_by_currency[cur] = cash_by_currency.get(cur, Decimal("0")) + amt
 
         total_assets = total_cash + total_portfolio
@@ -398,6 +439,28 @@ async def parse_bank_statement(
         if not content:
             return {"success": False, "error": "Empty file"}
 
+        # Resolve account_id: if not provided, auto-pick when there's exactly one
+        # active account; otherwise require the caller to choose explicitly.
+        if not account_id:
+            active = conn.execute(
+                "SELECT id, name, type, currency FROM accounts "
+                "WHERE deleted_at IS NULL AND is_active = 1"
+            ).fetchall()
+            if len(active) == 1:
+                account_id = active[0]["id"]
+            elif len(active) == 0:
+                return {"success": False, "error":
+                        "No active account exists. Create one first via add_account / Web UI."}
+            else:
+                return {
+                    "success": False,
+                    "error": "account_id is required when more than one active account exists.",
+                    "available_accounts": [
+                        {"id": a["id"], "name": a["name"], "type": a["type"], "currency": a["currency"]}
+                        for a in active
+                    ],
+                }
+
         file_hash = hashlib.sha256(content).hexdigest()
 
         # Check duplicate
@@ -416,34 +479,33 @@ async def parse_bank_statement(
 
         now = _now_iso()
 
-        # Create import record
+        # Create import record (transactions_count is NOT NULL with no default → must include)
         cur = conn.execute("""
             INSERT INTO pdf_imports
-                (filename, file_hash, file_size, storage_path, account_id, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'parsing', ?, ?)
+                (filename, file_hash, file_size, storage_path, account_id,
+                 transactions_count, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 0, 'parsing', ?, ?)
         """, (path.name, file_hash, len(content), str(storage_path), account_id, now, now))
         import_id = cur.lastrowid
 
-        # Parse using backend engine (sync wrapper)
+        # Parse using the canonical backend engine (no more drift between MCP and HTTP paths).
+        # `parse_pdf_statement` is async; this MCP tool already runs inside FastMCP's event
+        # loop so we just `await` it (NOT asyncio.run, which would deadlock).
         try:
-            import pdfplumber
+            from app.services.pdf_parser.engine import parse_pdf_statement as _backend_parse
 
-            raw_text = ""
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        raw_text += page_text + "\n"
-
-            # Detect bank
-            detected_bank = _detect_bank(raw_text)
-            statement_period = _detect_period(raw_text)
-
-            # Parse transactions
-            if detected_bank:
-                transactions = _parse_for_bank(detected_bank, raw_text)
-            else:
-                transactions = _parse_generic(raw_text)
+            parse_result = await _backend_parse(None, None, content)  # type: ignore[arg-type]
+            raw_text = parse_result.get("raw_text") or ""
+            detected_bank = parse_result.get("detected_bank")
+            statement_period = parse_result.get("statement_period")
+            transactions = parse_result.get("transactions") or []
+            if parse_result.get("error"):
+                conn.execute(
+                    "UPDATE pdf_imports SET status='failed', error_message=?, updated_at=? WHERE id=?",
+                    (parse_result["error"], now, import_id),
+                )
+                conn.commit()
+                return {"success": False, "error": parse_result["error"], "import_id": import_id}
 
             # Insert transactions
             tx_ids = []
@@ -455,7 +517,7 @@ async def parse_bank_statement(
                          is_pending, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pdf_import', ?, ?, ?, ?, ?)
                 """, (
-                    account_id or 0,
+                    account_id,
                     tx_data.get("occurred_at", now),
                     str(Decimal(str(tx_data.get("amount", 0)))),
                     tx_data.get("currency", "CNY"),
@@ -518,193 +580,6 @@ async def parse_bank_statement(
         conn.close()
 
 
-# ─── PDF parsing helpers (mirrored from backend, sync) ─────────────────────
-
-def _detect_bank(text: str) -> str | None:
-    text_lower = text.lower()
-    markers = {
-        "icbc": ["工商银行", "中国工商银行", "icbc"],
-        "cmb": ["招商银行", "china merchants bank", "cmb"],
-        "ccb": ["建设银行", "中国建设银行", "ccb"],
-        "boc": ["中国银行", "bank of china", "boc"],
-        "n26": ["n26", "n26 bank"],
-        "revolut": ["revolut"],
-    }
-    for bank, bank_markers in markers.items():
-        for m in bank_markers:
-            if m.lower() in text_lower:
-                return bank
-    return None
-
-
-def _detect_period(text: str) -> str | None:
-    import re
-    for pat in [r"(\d{4})年(\d{2})月", r"(\d{4})-(\d{2})"]:
-        m = re.search(pat, text)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
-    return None
-
-
-def _parse_for_bank(bank: str, text: str) -> list[dict]:
-    import re
-    parsers = {"icbc": _parse_icbc, "cmb": _parse_cmb, "ccb": _parse_ccb,
-               "boc": _parse_boc, "n26": _parse_n26, "revolut": _parse_revolut}
-    fn = parsers.get(bank)
-    return fn(text) if fn else _parse_generic(text)
-
-
-def _parse_generic(text: str) -> list[dict]:
-    import re
-    transactions = []
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        dm = re.search(r"(\d{4}[/-]\d{2}[/-]\d{2})", line)
-        if not dm:
-            continue
-        date = dm.group(1).replace("/", "-")
-        rest = line[dm.end():].strip()
-        am = re.search(r"([+-]?\d+\.?\d*)", rest)
-        if not am:
-            continue
-        try:
-            amt = float(am.group(1).replace(",", ""))
-            if amt == 0:
-                continue
-            desc = rest[am.end():].strip()
-            if not desc:
-                continue
-            tx_type = "income" if amt > 0 else "expense"
-            transactions.append({
-                "occurred_at": f"{date}T00:00:00Z",
-                "amount": abs(amt),
-                "currency": "CNY",
-                "type": tx_type,
-                "description": desc,
-                "raw_description": desc,
-                "counterparty": None,
-                "external_id": f"pdf_gen_{len(transactions) + 1}",
-            })
-        except (ValueError, IndexError):
-            continue
-    return transactions
-
-
-def _parse_icbc(text: str) -> list[dict]:
-    import re
-    txs = []
-    for m in re.finditer(r"(\d{4}/\d{2}/\d{2})\s*[收支]\s*([+-]?\d+\.?\d*)\s*([^\n]+)", text):
-        try:
-            amt = float(m.group(2).replace(",", ""))
-            if amt == 0:
-                continue
-            tx_type = "income" if amt > 0 else "expense"
-            txs.append({"occurred_at": f"{m.group(1).replace('/', '-')}T00:00:00Z",
-                        "amount": abs(amt), "currency": "CNY", "type": tx_type,
-                        "description": m.group(3).strip(), "raw_description": m.group(3).strip(),
-                        "counterparty": "ICBC", "external_id": f"icbc_{len(txs) + 1}"})
-        except (ValueError, IndexError):
-            continue
-    return txs
-
-
-def _parse_cmb(text: str) -> list[dict]:
-    import re
-    txs = []
-    for m in re.finditer(r"(\d{4}-\d{2}-\d{2})\s*[存取收付]\s*([+-]?\d+\.?\d*)\s*([^\n]+)", text):
-        try:
-            amt = float(m.group(2).replace(",", ""))
-            if amt == 0:
-                continue
-            tx_type = "income" if amt > 0 else "expense"
-            txs.append({"occurred_at": f"{m.group(1)}T00:00:00Z",
-                        "amount": abs(amt), "currency": "CNY", "type": tx_type,
-                        "description": m.group(3).strip(), "raw_description": m.group(3).strip(),
-                        "counterparty": "CMB", "external_id": f"cmb_{len(txs) + 1}"})
-        except (ValueError, IndexError):
-            continue
-    return txs
-
-
-def _parse_ccb(text: str) -> list[dict]:
-    import re
-    txs = []
-    for m in re.finditer(r"(\d{8})\s*[收支]\s*(\d+\.?\d*)\s*([^\n]+)", text):
-        try:
-            ds = m.group(1)
-            date = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
-            amt = float(m.group(2).replace(",", ""))
-            if amt == 0:
-                continue
-            tx_type = "income" if "收" in text[m.start():m.start()+30] else "expense"
-            txs.append({"occurred_at": f"{date}T00:00:00Z",
-                        "amount": abs(amt), "currency": "CNY", "type": tx_type,
-                        "description": m.group(3).strip(), "raw_description": m.group(3).strip(),
-                        "counterparty": "CCB", "external_id": f"ccb_{len(txs) + 1}"})
-        except (ValueError, IndexError):
-            continue
-    return txs
-
-
-def _parse_boc(text: str) -> list[dict]:
-    import re
-    txs = []
-    for m in re.finditer(r"(\d{4}-\d{2}-\d{2})\s*[收入支出]\s*(\d+\.?\d*)\s*([^\n]+)", text):
-        try:
-            amt = float(m.group(2).replace(",", ""))
-            if amt == 0:
-                continue
-            tx_type = "income" if "收入" in text[m.start():m.start()+30] else "expense"
-            txs.append({"occurred_at": f"{m.group(1)}T00:00:00Z",
-                        "amount": abs(amt), "currency": "CNY", "type": tx_type,
-                        "description": m.group(3).strip(), "raw_description": m.group(3).strip(),
-                        "counterparty": "BOC", "external_id": f"boc_{len(txs) + 1}"})
-        except (ValueError, IndexError):
-            continue
-    return txs
-
-
-def _parse_n26(text: str) -> list[dict]:
-    import re
-    txs = []
-    for m in re.finditer(r"(\d{4}[/-]\d{2}[/-]\d{2})\s*(DEPOSIT|SPENDING|TRANSFER|PENDING)?\s*([+-]?\d+\.?\d*)\s*([^\n]+)", text):
-        try:
-            action = m.group(2) or ""
-            amt = float(m.group(3).replace(",", ""))
-            if amt == 0:
-                continue
-            tx_type = "income" if action == "DEPOSIT" or (not action and amt > 0) else "expense"
-            txs.append({"occurred_at": f"{m.group(1).replace('/', '-')}T00:00:00Z",
-                        "amount": abs(amt), "currency": "EUR", "type": tx_type,
-                        "description": m.group(4).strip(), "raw_description": m.group(4).strip(),
-                        "counterparty": "N26", "external_id": f"n26_{len(txs) + 1}"})
-        except (ValueError, IndexError):
-            continue
-    return txs
-
-
-def _parse_revolut(text: str) -> list[dict]:
-    import re
-    txs = []
-    for m in re.finditer(r"(\d{4}[/-]\d{2}[/-]\d{2})\s*(Card Payment|Top-Up|Exchange|Transfer|ATM Withdrawal)?\s*([+-]?\d+\.?\d*)\s*([^\n]+)", text):
-        try:
-            action = m.group(2) or ""
-            amt = float(m.group(3).replace(",", ""))
-            if amt == 0:
-                continue
-            tx_type = "income" if action in ("Top-Up",) or (not action and amt > 0) else "expense"
-            txs.append({"occurred_at": f"{m.group(1).replace('/', '-')}T00:00:00Z",
-                        "amount": abs(amt), "currency": "EUR", "type": tx_type,
-                        "description": m.group(4).strip(), "raw_description": m.group(4).strip(),
-                        "counterparty": "Revolut", "external_id": f"revolut_{len(txs) + 1}"})
-        except (ValueError, IndexError):
-            continue
-    return txs
-
-
-# ─── Tool 5: get_cashflow ──────────────────────────────────────────────────
 
 @mcp.tool(
     name="get_cashflow",
@@ -820,15 +695,10 @@ async def get_asset_allocation(
 
             # FX conversion
             if price_cur and price_cur != bc:
-                fx = conn.execute("""
-                    SELECT rate FROM fx_rates
-                    WHERE base_currency = ? AND quote_currency = ?
-                    ORDER BY quoted_at DESC LIMIT 1
-                """, (bc, price_cur)).fetchone()
-                if fx:
-                    value = value * Decimal(str(fx["rate"]))
-                else:
+                converted = _convert_fx(conn, value, price_cur, bc)
+                if converted is None:
                     continue
+                value = converted
 
             total_value += value
             ac = h["asset_class"] or "other"
@@ -868,19 +738,13 @@ async def get_asset_allocation(
         cash_total = Decimal("0")
         cash_by_cur = {}
         for cr in cash_rows:
-            amt = Decimal(str(cr["total"]))
+            raw_amt = Decimal(str(cr["total"]))
             cur = cr["currency"]
-            if cur != bc:
-                fx = conn.execute("""
-                    SELECT rate FROM fx_rates WHERE base_currency = ? AND quote_currency = ?
-                    ORDER BY quoted_at DESC LIMIT 1
-                """, (bc, cur)).fetchone()
-                if fx:
-                    amt = amt * Decimal(str(fx["rate"]))
-                else:
-                    continue
-            cash_total += amt
-            cash_by_cur[cur] = _dec(Decimal(str(cr["total"])))
+            converted = _convert_fx(conn, raw_amt, cur, bc)
+            if converted is None:
+                continue
+            cash_total += converted
+            cash_by_cur[cur] = _dec(raw_amt)
 
         grand_total = total_value + cash_total
 

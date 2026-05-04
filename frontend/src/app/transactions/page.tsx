@@ -18,7 +18,10 @@ import { TransactionForm } from "@/components/transaction-form";
 import { TransactionDetail } from "@/components/transaction-detail";
 import { CategoryFilter } from "@/components/category-filter";
 import { PdfImportPanel } from "@/components/pdf-import-panel";
+import { InboxPanel } from "@/components/inbox-panel";
+import { CategoryBreakdownView } from "@/components/category-breakdown-view";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { useInbox } from "@/lib/hooks";
 
 type SortField = "occurred_at" | "amount" | "category";
 type SortDir = "asc" | "desc";
@@ -81,6 +84,8 @@ export default function TransactionsPage() {
 
   const { data: categories } = useCategories();
   const { data: accounts } = useAccounts(true);
+  const { data: inboxItems } = useInbox(200);
+  const inboxCount = inboxItems?.length ?? 0;
 
   // ─── Derived data ─────────────────────────────────────────────────────
   const transactions = useMemo(() => {
@@ -178,11 +183,28 @@ export default function TransactionsPage() {
         </div>
 
         {/* ─── Tabs ────────────────────────────────────────────────── */}
-        <Tabs defaultValue="list" className="w-full">
+        <Tabs defaultValue={inboxCount > 0 ? "inbox" : "breakdown"} className="w-full">
           <TabsList>
+            <TabsTrigger value="breakdown">分类视图</TabsTrigger>
             <TabsTrigger value="list">交易记录</TabsTrigger>
+            <TabsTrigger value="inbox">
+              待确认
+              {inboxCount > 0 && (
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded-full bg-amber-500 text-white">
+                  {inboxCount}
+                </span>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="import">PDF 导入</TabsTrigger>
           </TabsList>
+
+          <TabsContent value="breakdown">
+            <CategoryBreakdownView />
+          </TabsContent>
+
+          <TabsContent value="inbox">
+            <InboxPanel />
+          </TabsContent>
 
           <TabsContent value="list">
         {/* ─── Filters ─────────────────────────────────────────────── */}

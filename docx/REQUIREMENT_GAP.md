@@ -19,8 +19,7 @@
 |---|---|---|
 | 上传入口 + SHA-256 去重 | ✅ A | `frontend/src/components/pdf-import-panel.tsx`, `pdf_imports.file_hash` UNIQUE |
 | 银行自动检测 (`_detect_bank`) | ✅ A | `pdf_parser/engine.py` 文本特征匹配 |
-| ICBC/CMB/CCB/BOC/N26/Revolut 解析器 | ⚠️ B | 代码到位、有单测，但**未用真实样本回归**——上次跑 `tests/test_pdf_parser.py` 距今未知 |
-| Amex / Advanzia 解析器 | ❌ D | PROGRESS Task #14 未启动 |
+| **本人需要的 5 家**（AMEX-DE / N26 / Revolut / TFBank / Advanzia）解析器 | ✅ A | 2026-05-03 全部用 `data/inputpdf_reference/` 真实样本回归通过：识别 + 期间 + 交易数 + 收支方向都对得上 PDF 抬头汇总。ICBC/CMB/CCB/BOC 已从 detector 移除（非需求） |
 | 扫描件 OCR 兜底 | ❌ D | TECH_STACK 列为 P1，未实现 |
 | 上传后预览 → 用户确认入库 | ⚠️ B | `is_pending` 字段在，但前端"待确认"工作流是否完整未核 |
 
@@ -35,10 +34,14 @@
 |---|---|---|
 | 多级分类树 + 用户 CRUD | ✅ A | `categories.parent_id`, settings 页 |
 | 关键字 / 正则规则匹配 | ✅ A | `categorization_rules` 表 + `categorizer/engine.py` |
-| **LLM 兜底分类** | ⏸️ C | PROGRESS Task #7 等待许可，代码内零 LLM 调用 |
-| **不确定收件箱（pending）** | ❌ D | `is_pending` 字段存在但 categorizer **不写**，前端**没有专栏**。PRD 原话"不确定的内容放进不确定列表"完全未落地 |
+| **LLM 兜底分类** | ❌ D | 用户 2026-05-04 重新强调并升级为三层管道（关键词 → LLM → 用户）。详见 `docx/CLASSIFICATION_PLAN.md`，已升级为 **P1-1a** |
+| **不确定收件箱（pending）** | ✅ A | 2026-05-04 P0-4 完成：后端 inbox API + 前端 InboxPanel + 数量徽章 + 一键确认 |
 | 用户改正分类 | ✅ A | `PATCH /api/v1/transactions/{id}` |
-| **自动学习 / 记忆** | ❌ D | PRD 原话"软件需要记住，下次不要放错"完全未落地。修正分类**不会**反向新建/调整规则；`hit_count` 只统计已有规则命中，无反向管道 |
+| **自动学习 / 记忆** | ✅ A | 2026-05-04 P0-3 完成：`learn_from_user_assignment` 反向写规则；keyword 提取去噪；E2E 验证 1 次手动归类 → 同 PDF 内 5 笔 ESPRESSO 全部自动归并 |
+| **用户备注作为 LLM 线索**（2026-05-04 新增） | ❌ D | inbox 确认时可写备注，作为下次 LLM 推理的上下文。需扩展 `transactions.user_note`。**P1-1b** |
+| **分类知识库注入 LLM**（2026-05-04 新增） | ❌ D | 调 LLM 时把 rules + 关键词 + 用户备注作为 prompt 上下文。**P1-1c** |
+| **知识库管理 UI**（2026-05-04 新增） | ❌ D | settings 页表格列出所有备注 + 来源 + 使用次数。**P1-1d** |
+| **记账页层级化分类视图**（2026-05-04 新增） | ❌ D | 当前所有 tx 平铺不直观。重构为：选一级类目 → 看二级类目本月总额列表 → 点开看明细。**P0-7** |
 
 ---
 
@@ -50,7 +53,7 @@
 | 资产搜索 + 自动识别 | ✅ A | PROGRESS Task #12 |
 | 持仓 CRUD | ✅ A | `api/v1/holdings.py` |
 | yfinance / CoinGecko / FX 取价**逻辑** | ✅ A | `market_data/engine.py` `refresh_all_market_data()` |
-| **价格定时自动刷新** | ⚠️ B | `pyproject.toml` 列了 `apscheduler` 但**代码零引用**；只能手动 `POST /api/v1/market/refresh`。PROGRESS Task #5 标 ✅ 不实 |
+| **价格定时自动刷新** | ✅ A | 2026-05-03 P0-1 完成：`services/market_data/scheduler.py` 注册 crypto / stocks / fx 三个 AsyncIOScheduler job；启动后 15s 首次跑，按配置间隔自动循环；`GET /api/v1/system/scheduler/status` 看 next_run_time + last_run 结果 |
 | 黄金 GoldAPI | ⚠️ B/E | 配置项在，需用户申请 key |
 | 总资产汇总（折算到 base） | ✅ A | `holdings/portfolio/summary` 等接口 |
 | **链上钱包余额读取** | ❌ D | 见 1.2 |
@@ -64,7 +67,7 @@
 | 月度 income/expense/savings/transfer/other | ✅ A | `cash_flow_snapshots` 表 |
 | 按分类 / 按账户细分 JSON | ✅ A | `by_category_json`, `by_account_json` |
 | 时间序列图表 | ✅ A | `frontend/src/app/analytics/page.tsx` (224 行) |
-| **transaction CRUD 后自动重算 snapshot** | ⚠️ B | ARCHITECTURE.md 写"异步触发对应月度 snapshot 重算（debounce 2s）"——**代码里没有任何 hook**。只有手动 `POST /api/v1/cashflow/recompute` |
+| **transaction CRUD 后自动重算 snapshot** | ✅ A | 2026-05-03 P0-2 完成。`services/cashflow/engine.py` 提供 `recompute_period`；transaction create/batch/update/delete + statement confirm + account adjust-balance 全部 hook 后即时重算（同步即写，未做 debounce — 单用户场景无必要） |
 | 「储蓄」计算口径 | ⚠️ B | 字段存在，定义（净流入 vs 显式入账）需 PRD 二次澄清 |
 
 ---
@@ -119,8 +122,8 @@
 
 > 这些是用户体感会被"骗"的地方——文档/PROGRESS 写已完成，实际未跑通：
 
-1. **价格永远不会自动更新**（无 scheduler）→ 前端"实时资产"其实是**最近一次手动刷新的快照**
-2. **CashFlow 图表数据可能滞后任意久**（无重算 hook）→ 新增交易后图不变，需手动 `/recompute`
+1. ~~价格永远不会自动更新~~ ✅ 已修（P0-1，2026-05-03）
+2. ~~CashFlow 图表数据可能滞后~~ ✅ 已修（P0-2，2026-05-03）
 3. **PDF 解析器对外宣称的银行覆盖度未经真实样本回归** → 实际上传别家账单大概率挂在 generic fallback
 4. **Notion 同步从未跑通过** → 用户期望的"两个地方都有"目前只有一个
 5. **加密钱包同步是 55 行 stub** → PRD"加密钱包资产"无法满足

@@ -15,6 +15,7 @@ from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Account, Transaction
 from app.models import touch_updated_at
+from app.services.cashflow import parse_period, recompute_period
 from app.schemas import (
     AccountCreate,
     AccountOut,
@@ -239,6 +240,10 @@ async def adjust_balance(
         )
         db.add(tx)
         await db.flush()
+        # Auto-refresh cashflow snapshot
+        period = parse_period(occurred_at)
+        if period:
+            await recompute_period(db, period[0], period[1])
 
     new_row = (await db.execute(text(
         "SELECT account_id, account_name, currency, balance FROM v_account_balance WHERE account_id = :aid"

@@ -1,13 +1,30 @@
-"""PDF parser engine — detects bank and delegates to bank-specific parser."""
+"""PDF parser engine — detects bank and delegates to bank-specific parser.
+
+Supported banks (verified against real samples in `data/inputpdf_reference/`):
+  - AMEX-DE     (American Express Gold Card, Germany)
+  - N26         (N26 Bank, EUR)
+  - Revolut     (Revolut Bank, EUR)
+  - TFBank      (TF Mastercard Gold, Germany)
+  - Advanzia    (Hilton Honors / Advanzia Bank, Luxembourg)
+
+Other banks fall back to a generic heuristic parser.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import io
+import re
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import PdfImport
+
+
+# ─── Public entry ──────────────────────────────────────────────────────
 
 
 async def parse_pdf_statement(
@@ -16,7 +33,7 @@ async def parse_pdf_statement(
     content: bytes,
 ) -> dict[str, Any]:
     """Parse a PDF bank statement.
-    
+
     Returns dict with:
         detected_bank: str | None
         parser_version: str
@@ -26,448 +43,389 @@ async def parse_pdf_statement(
         transactions: list[dict]
     """
     try:
-        import pdfplumber
+        import pdfplumber  # noqa: F401 (probe only)
     except ImportError:
-        return {
-            "detected_bank": None,
-            "parser_version": "0.1.0",
-            "statement_period": None,
-            "raw_text": "",
-            "error": "pdfplumber not installed",
-            "transactions": [],
-        }
+        return _empty_result(error="pdfplumber not installed")
 
-    # Extract text
-    raw_text = ""
+    # pdfplumber + the SQLite IO that may follow are blocking; run extraction in
+    # a worker thread to avoid SQLAlchemy's greenlet check tripping on Py 3.14.
     try:
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    raw_text += page_text + "\n"
+        raw_text = await asyncio.to_thread(_extract_text_sync, content)
     except Exception as e:
-        return {
-            "detected_bank": None,
-            "parser_version": "0.1.0",
-            "statement_period": None,
-            "raw_text": "",
-            "error": f"Failed to extract text: {e}",
-            "transactions": [],
-        }
+        return _empty_result(error=f"Failed to extract text: {e}")
 
-    # Detect bank from text features
     detected_bank = _detect_bank(raw_text)
 
-    # Parse transactions based on detected bank
-    transactions = []
     if detected_bank:
-        transactions = _parse_for_bank(detected_bank, raw_text)
+        parser_func = _BANK_PARSERS.get(detected_bank, _parse_generic)
+        transactions = parser_func(raw_text)
     else:
-        # Generic heuristic parser
         transactions = _parse_generic(raw_text)
 
     return {
         "detected_bank": detected_bank,
-        "parser_version": "0.1.0",
+        "parser_version": "0.2.0",
         "statement_period": _detect_period(raw_text),
-        "raw_text": raw_text[:10000],  # Store first 10k chars
+        "raw_text": raw_text[:10000],
         "error": None,
         "transactions": transactions,
     }
 
 
-def _detect_bank(text: str) -> str | None:
-    """Detect bank from text features."""
-    text_lower = text.lower()
-    bank_markers = {
-        "icbc": ["工商银行", "中国工商银行", "icbc"],
-        "cmb": ["招商银行", "china merchants bank", "cmb"],
-        "ccb": ["建设银行", "中国建设银行", "ccb"],
-        "boc": ["中国银行", "bank of china", "boc"],
-        "n26": ["n26", "n26 bank"],
-        "revolut": ["revolut"],
+def _extract_text_sync(content: bytes) -> str:
+    """Synchronous helper: extract concatenated page text from a PDF."""
+    import pdfplumber
+    out = ""
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                out += t + "\n"
+    return out
+
+
+def _empty_result(error: str | None = None) -> dict[str, Any]:
+    return {
+        "detected_bank": None,
+        "parser_version": "0.2.0",
+        "statement_period": None,
+        "raw_text": "",
+        "error": error,
+        "transactions": [],
     }
-    for bank, markers in bank_markers.items():
-        for marker in markers:
-            if marker.lower() in text_lower:
-                return bank
+
+
+# ─── Bank detection ────────────────────────────────────────────────────
+
+
+# Use ONLY bank-issued identifiers (BIC, official domain, exact card-product
+# title, registered legal name). Plain bank names are too greedy — e.g. an N26
+# statement may carry "AMERICAN EXPRESS" in a SEPA-rejection memo.
+_BANK_MARKERS: list[tuple[str, str]] = [
+    ("amex_de",  "americanexpress.de"),
+    ("amex_de",  "american express gold card"),
+    ("n26",      "ntsbdeb1"),                  # N26 BIC
+    ("revolut",  "revolut bank uab"),
+    ("revolut",  "revodeb2"),                  # Revolut Germany BIC
+    ("tfbank",   "tfbank.de"),
+    ("tfbank",   "tf bank ab"),
+    ("advanzia", "advanzia bank s.a"),
+    ("advanzia", "hilton honors kreditkarte"),
+]
+
+
+def _detect_bank(text: str) -> str | None:
+    text_lower = text.lower()
+    for bank, marker in _BANK_MARKERS:
+        if marker in text_lower:
+            return bank
     return None
 
 
 def _detect_period(text: str) -> str | None:
-    """Try to extract statement period from text."""
-    import re
-    # Match patterns like "2026年04月" or "2026-04" or "April 2026"
-    patterns = [
-        r"(\d{4})年(\d{2})月",
-        r"(\d{4})-(\d{2})",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, text)
-        if m:
-            return f"{m.group(1)}-{m.group(2)}"
+    # AMEX-DE: "Abrechnungszeitraum vom DD.MM.YY bis DD.MM.YY" (2-digit year, no space)
+    m = re.search(r"vom\s*(\d{2})\.(\d{2})\.(\d{2})\s*bis", text)
+    if m:
+        return f"20{m.group(3)}-{m.group(2)}"
+    # TFBank: "Zeitraum: DD.MM.YYYY - DD.MM.YYYY"
+    m = re.search(r"Zeitraum:\s*(\d{2})\.(\d{2})\.(\d{4})", text)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}"
+    # Generic German "vom DD.MM.YYYY bis DD.MM.YYYY"
+    m = re.search(r"vom\s*(\d{2})\.(\d{2})\.(\d{4})\s*bis", text)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}"
+    # Revolut English "April 1, 2026 to April 30, 2026"
+    m = re.search(r"(\w{3,9})\s+\d{1,2},\s*(\d{4})\s+(?:to|until)", text)
+    if m:
+        mon = _MONTH_ABBR_EN.get(m.group(1)[:3].title())
+        if mon:
+            return f"{m.group(2)}-{mon:02d}"
+    # N26 "01.04.2026 until 30.04.2026"
+    m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s+until", text)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}"
     return None
 
 
-def _parse_for_bank(bank: str, text: str) -> list[dict]:
-    """Bank-specific parsing with real patterns."""
-    bank_parsers = {
-        "icbc": _parse_icbc,
-        "cmb": _parse_cmb,
-        "ccb": _parse_ccb,
-        "boc": _parse_boc,
-        "n26": _parse_n26,
-        "revolut": _parse_revolut,
+# ─── Shared utilities ──────────────────────────────────────────────────
+
+
+_MONTH_ABBR_EN = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def _de_amount(s: str) -> Decimal:
+    """Parse German-formatted '1.234,56' / '12,40' or plain '12.40' to Decimal."""
+    s = s.strip().replace(" ", "")
+    if "," in s and "." in s:
+        # 1.234,56 → 1234.56
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    return Decimal(s)
+
+
+def _make_tx(
+    *,
+    date_iso: str,
+    amount: Decimal,
+    tx_type: str,
+    description: str,
+    counterparty: str,
+    seq: int,
+    currency: str = "EUR",
+) -> dict:
+    """Build a transaction dict.
+
+    `counterparty` here is the **issuing bank** (AMEX-DE / N26 / ...), used only
+    for `external_id` namespacing — NOT written to the `counterparty` column,
+    because that column is semantically the actual merchant. The merchant name
+    sits in `description` for these PDFs.
+    """
+    return {
+        "occurred_at": date_iso,
+        "amount": str(abs(amount)),
+        "currency": currency,
+        "type": tx_type,
+        "description": description.strip(),
+        "raw_description": description.strip(),
+        # Leave counterparty NULL so auto-learn extracts keywords from `description`
+        # (the real merchant text) rather than from the issuing bank's name.
+        "counterparty": None,
+        "external_id": f"{counterparty.lower()}_{seq}",
     }
-    
-    parser_func = bank_parsers.get(bank)
-    if parser_func:
-        return parser_func(text)
-    else:
-        return _parse_generic(text)
 
 
-def _parse_generic(text: str) -> list[dict]:
-    """Generic heuristic parser — extracts transaction-like lines."""
-    import re
-    transactions = []
-    
-    # Split text into lines and process each line
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line:
+# ─── AMEX-DE ────────────────────────────────────────────────────────────
+
+
+_AMEX_ROW = re.compile(
+    r"^(\d{2}\.\d{2})\s+(\d{2}\.\d{2})\s+(.+?)\s+(-?[\d.]+,\d{2})\s*$",
+    re.MULTILINE,
+)
+
+
+def _parse_amex_de(text: str) -> list[dict]:
+    txs: list[dict] = []
+
+    # Year is in header: "Datum 08.04.26" → 2026
+    yr_match = re.search(r"Datum[\s\S]{0,80}?(\d{2})\.(\d{2})\.(\d{2})", text)
+    year = 2000 + int(yr_match.group(3)) if yr_match else datetime.now(timezone.utc).year
+
+    seq = 0
+    for m in _AMEX_ROW.finditer(text):
+        d_book, _d_post, desc, amt = m.groups()
+        if any(skip in desc for skip in ["Saldo", "Karten-Nr", "Abrechnung"]):
             continue
-            
-        # Match date first (supports YYYY-MM-DD and YYYY/MM/DD formats)
-        date_match = re.search(r'(\d{4}[/-]\d{2}[/-]\d{2})', line)
-        if not date_match:
-            continue
-            
-        date = date_match.group(1)
-        after_date = line[date_match.end():].strip()
-        
-        # Try to find amount (supports + and - prefixes)
-        amount_match = re.search(r'([+-]?\d+\.?\d*)', after_date)
-        if not amount_match:
-            continue
-            
-        amount_str = amount_match.group(1)
-        description = after_date[amount_match.end():].strip()
-        
-        # Skip if description is empty
-        if not description:
-            continue
-            
         try:
-            # Clean and convert amount
-            amount_clean = amount_str.replace(',', '').strip()
-            if not amount_clean:
-                continue
-                
-            amount = float(amount_clean)
-            if amount == 0:
-                continue
-            
-            # Determine transaction type
-            if amount > 0:
-                tx_type = "income"
-            else:
-                tx_type = "expense"
-                amount = abs(amount)
-            
-            transactions.append({
-                "occurred_at": f"{date.replace('/', '-')}T00:00:00Z",
-                "amount": amount,
-                "currency": "CNY",  # Default to CNY
-                "type": tx_type,
-                "description": description,
-                "raw_description": description,
-                "counterparty": None,
-                "external_id": f"pdf_gen_{len(transactions) + 1}",
-            })
-        except (ValueError, IndexError):
+            amount = _de_amount(amt)
+        except Exception:
             continue
-    
-    return transactions
+        if amount == 0:
+            continue
+        is_credit = (
+            "GUTSCHRIFT" in desc.upper()
+            or "ZAHLUNG/ÜBERWEISUNG ERHALTEN" in desc.upper()
+        )
+        tx_type = "income" if is_credit else "expense"
+        dd, mm = d_book.split(".")
+        try:
+            date_iso = f"{year}-{mm}-{dd}T00:00:00Z"
+        except Exception:
+            continue
+        seq += 1
+        txs.append(_make_tx(
+            date_iso=date_iso, amount=amount, tx_type=tx_type,
+            description=desc, counterparty="AMEX-DE", seq=seq,
+        ))
+    return txs
 
 
-def _parse_icbc(text: str) -> list[dict]:
-    """ICBC (工商银行) statement parser."""
-    import re
-    transactions = []
-    
-    # ICBC specific patterns
-    patterns = [
-        # ICBC format: 2026/05/01  收入  1,000.00  工资收入
-        r'(\d{4}/\d{2}/\d{2})\s*[收]\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-        r'(\d{4}/\d{2}/\d{2})\s*[支]\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-        # ICBC format without +/- but with amounts
-        r'(\d{4}/\d{2}/\d{2})\s*[收]\s*(\d+\.?\d*)\s*([^,\n]+)',
-        r'(\d{4}/\d{2}/\d{2})\s*[支]\s*(\d+\.?\d*)\s*([^,\n]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if len(match) >= 3:
-                date, amount_str, description = match[0], match[1], match[2]
-                
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                    if amount == 0:
-                        continue
-                    
-                    # ICBC uses 收 (income) and 支 (expense)
-                    if "收" in text[match.start():match.end()]:
-                        tx_type = "income"
-                    else:
-                        tx_type = "expense"
-                        amount = abs(amount)
-                    
-                    transactions.append({
-                        "occurred_at": f"{date.replace('/', '-')}T00:00:00Z",
-                        "amount": amount,
-                        "currency": "CNY",
-                        "type": tx_type,
-                        "description": description.strip(),
-                        "raw_description": description.strip(),
-                        "counterparty": "ICBC",
-                        "external_id": f"icbc_{len(transactions) + 1}",
-                    })
-                except (ValueError, IndexError):
-                    continue
-    
-    return transactions
+# ─── N26 ────────────────────────────────────────────────────────────────
 
 
-def _parse_cmb(text: str) -> list[dict]:
-    """CMB (招商银行) statement parser."""
-    import re
-    transactions = []
-    
-    # CMB specific patterns
-    patterns = [
-        # CMB format: 2026-05-01  存入  +1000.00  工资
-        r'(\d{4}-\d{2}-\d{2})\s*[存取]\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-        r'(\d{4}-\d{2}-\d{2})\s*([收付])\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if len(match) >= 3:
-                date, action, amount_str, description = match[0], match[1], match[2], match[3] if len(match) > 3 else ""
-                
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                    if amount == 0:
-                        continue
-                    
-                    # CMB uses 存 (deposit/income) and 取/付 (withdrawal/expense)
-                    if action in ["存", "收"]:
-                        tx_type = "income"
-                    else:
-                        tx_type = "expense"
-                        amount = abs(amount)
-                    
-                    transactions.append({
-                        "occurred_at": f"{date}T00:00:00Z",
-                        "amount": amount,
-                        "currency": "CNY",
-                        "type": tx_type,
-                        "description": description.strip(),
-                        "raw_description": description.strip(),
-                        "counterparty": "CMB",
-                        "external_id": f"cmb_{len(transactions) + 1}",
-                    })
-                except (ValueError, IndexError):
-                    continue
-    
-    return transactions
-
-
-def _parse_ccb(text: str) -> list[dict]:
-    """CCB (建设银行) statement parser."""
-    import re
-    transactions = []
-    
-    # CCB specific patterns
-    patterns = [
-        # CCB format: 20260501  收入  1000.00  工资
-        r'(\d{8})\s*[收支]\s*(\d+\.?\d*)\s*([^,\n]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if len(match) >= 3:
-                date_str, amount_str, description = match[0], match[1], match[2]
-                
-                try:
-                    # Convert date from YYYYMMDD to YYYY-MM-DD
-                    date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-                    amount = float(amount_str.replace(',', ''))
-                    if amount == 0:
-                        continue
-                    
-                    # CCB basic classification
-                    if "收" in text:
-                        tx_type = "income"
-                    else:
-                        tx_type = "expense"
-                        amount = abs(amount)
-                    
-                    transactions.append({
-                        "occurred_at": f"{date}T00:00:00Z",
-                        "amount": amount,
-                        "currency": "CNY",
-                        "type": tx_type,
-                        "description": description.strip(),
-                        "raw_description": description.strip(),
-                        "counterparty": "CCB",
-                        "external_id": f"ccb_{len(transactions) + 1}",
-                    })
-                except (ValueError, IndexError):
-                    continue
-    
-    return transactions
-
-
-def _parse_boc(text: str) -> list[dict]:
-    """BOC (中国银行) statement parser."""
-    import re
-    transactions = []
-    
-    # BOC specific patterns
-    patterns = [
-        # BOC format: 2026-05-01  收入  1000.00  工资收入
-        r'(\d{4}-\d{2}-\d{2})\s*[收入]\s*(\d+\.?\d*)\s*([^,\n]+)',
-        r'(\d{4}-\d{2}-\d{2})\s*[支出]\s*(\d+\.?\d*)\s*([^,\n]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if len(match) >= 3:
-                date, amount_str, description = match[0], match[1], match[2]
-                
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                    if amount == 0:
-                        continue
-                    
-                    # BOC uses 收入 (income) and 支出 (expense)
-                    if "收" in text[match.start():match.end()]:
-                        tx_type = "income"
-                    else:
-                        tx_type = "expense"
-                        amount = abs(amount)
-                    
-                    transactions.append({
-                        "occurred_at": f"{date}T00:00:00Z",
-                        "amount": amount,
-                        "currency": "CNY",
-                        "type": tx_type,
-                        "description": description.strip(),
-                        "raw_description": description.strip(),
-                        "counterparty": "BOC",
-                        "external_id": f"boc_{len(transactions) + 1}",
-                    })
-                except (ValueError, IndexError):
-                    continue
-    
-    return transactions
+_N26_ROW = re.compile(
+    r"^(.+?)\s+(\d{2}\.\d{2}\.\d{4})\s+([+-][\d.]+,\d{2})€\s*$",
+    re.MULTILINE,
+)
 
 
 def _parse_n26(text: str) -> list[dict]:
-    """N26 bank statement parser."""
-    import re
-    transactions = []
-    
-    # N26 specific patterns
-    patterns = [
-        # N26 format: 2026-05-01  SPENDING  -25.00  Merchant Name
-        r'(\d{4}-\d{2}-\d{2})\s*(DEPOSIT|SPENDING|TRANSFER|PENDING)\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-        # Alternative format: 2026/05/01  -25.00  Merchant Name
-        r'(\d{4}/\d{2}/\d{2})\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if len(match) >= 3:
-                date, action, amount_str, description = match[0], match[1], match[2], match[3] if len(match) > 3 else ""
-                
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                    if amount == 0:
-                        continue
-                    
-                    # N26 classification
-                    if action == "DEPOSIT" or (action == "" and amount > 0):
-                        tx_type = "income"
-                    else:
-                        tx_type = "expense"
-                        amount = abs(amount)
-                    
-                    transactions.append({
-                        "occurred_at": f"{date.replace('/', '-')}T00:00:00Z",
-                        "amount": amount,
-                        "currency": "EUR",  # N26 typically uses EUR
-                        "type": tx_type,
-                        "description": description.strip(),
-                        "raw_description": description.strip(),
-                        "counterparty": "N26",
-                        "external_id": f"n26_{len(transactions) + 1}",
-                    })
-                except (ValueError, IndexError):
-                    continue
-    
-    return transactions
+    txs: list[dict] = []
+    seq = 0
+    for m in _N26_ROW.finditer(text):
+        desc, date_str, amt = m.groups()
+        try:
+            amount = _de_amount(amt)
+        except Exception:
+            continue
+        if amount == 0:
+            continue
+        dd, mm, yyyy = date_str.split(".")
+        date_iso = f"{yyyy}-{mm}-{dd}T00:00:00Z"
+        tx_type = "income" if amount > 0 else "expense"
+        seq += 1
+        txs.append(_make_tx(
+            date_iso=date_iso, amount=amount, tx_type=tx_type,
+            description=desc, counterparty="N26", seq=seq,
+        ))
+    return txs
+
+
+# ─── Revolut ────────────────────────────────────────────────────────────
+
+
+_REVOLUT_ROW = re.compile(
+    r"^(\w{3}) (\d{1,2}), (\d{4})\s+(.+?)\s+€([\d,]+\.\d{2})\s+€[\d,]+\.\d{2}\s*$",
+    re.MULTILINE,
+)
+_REVOLUT_INCOME_KEYWORDS = (
+    "deposit", "top-up", "top up", "from ", "payment from", "incoming",
+    "from instant access", "from saving", "salary",
+)
 
 
 def _parse_revolut(text: str) -> list[dict]:
-    """Revolut bank statement parser."""
-    import re
-    transactions = []
-    
-    # Revolut specific patterns
-    patterns = [
-        # Revolut format: 2026-05-01  Card Payment  -25.00  Merchant Name
-        r'(\d{4}-\d{2}-\d{2})\s*(Card Payment|Top-Up|Exchange|Transfer| ATM Withdrawal)\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-        # Alternative: 2026-05-01  -25.00  Merchant Name
-        r'(\d{4}-\d{2}-\d{2})\s*([+-]?\d+\.?\d*)\s*([^,\n]+)',
-    ]
-    
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for match in matches:
-            if len(match) >= 3:
-                date, action, amount_str, description = match[0], match[1], match[2], match[3] if len(match) > 3 else ""
-                
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                    if amount == 0:
-                        continue
-                    
-                    # Revolut classification
-                    if action in ["Top-Up", "Transfer IN"] or (action == "" and amount > 0):
-                        tx_type = "income"
-                    else:
-                        tx_type = "expense"
-                        amount = abs(amount)
-                    
-                    transactions.append({
-                        "occurred_at": f"{date}T00:00:00Z",
-                        "amount": amount,
-                        "currency": "EUR",  # Revolut typically uses EUR
-                        "type": tx_type,
-                        "description": description.strip(),
-                        "raw_description": description.strip(),
-                        "counterparty": "Revolut",
-                        "external_id": f"revolut_{len(transactions) + 1}",
-                    })
-                except (ValueError, IndexError):
-                    continue
-    
-    return transactions
+    txs: list[dict] = []
+    seq = 0
+    for m in _REVOLUT_ROW.finditer(text):
+        mon, day, year, desc, amt = m.groups()
+        if mon not in _MONTH_ABBR_EN:
+            continue
+        try:
+            amount = Decimal(amt.replace(",", ""))
+        except Exception:
+            continue
+        if amount == 0:
+            continue
+        date_iso = f"{int(year)}-{_MONTH_ABBR_EN[mon]:02d}-{int(day):02d}T00:00:00Z"
+        desc_lower = desc.lower()
+        tx_type = "income" if any(k in desc_lower for k in _REVOLUT_INCOME_KEYWORDS) else "expense"
+        seq += 1
+        txs.append(_make_tx(
+            date_iso=date_iso, amount=amount, tx_type=tx_type,
+            description=desc, counterparty="Revolut", seq=seq,
+        ))
+    return txs
+
+
+# ─── TFBank ─────────────────────────────────────────────────────────────
+
+
+_TFBANK_ROW = re.compile(
+    r"^(\d+)\s+(\d{2}\.\d{2}\.\d{4})\s+(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+([\d.,]+)\s+EUR\s+(-?[\d.,]+)\s*(D|KR)\b",
+    re.MULTILINE,
+)
+
+
+def _parse_tfbank(text: str) -> list[dict]:
+    txs: list[dict] = []
+    seq = 0
+    for m in _TFBANK_ROW.finditer(text):
+        _txid, d_book, _d_post, desc, _amt_orig, amt_eur, dc = m.groups()
+        try:
+            amount = _de_amount(amt_eur)
+        except Exception:
+            continue
+        if amount == 0:
+            continue
+        dd, mm, yyyy = d_book.split(".")
+        date_iso = f"{yyyy}-{mm}-{dd}T00:00:00Z"
+        # D = Debit (expense), KR = Credit (refund / income)
+        tx_type = "income" if dc == "KR" else "expense"
+        # Strip "Wechselkurs 1.00000" tail from desc
+        desc = re.sub(r"\s*Wechselkurs\s+[\d.]+\s*$", "", desc).strip()
+        seq += 1
+        txs.append(_make_tx(
+            date_iso=date_iso, amount=amount, tx_type=tx_type,
+            description=desc, counterparty="TFBank", seq=seq,
+        ))
+    return txs
+
+
+# ─── Advanzia ───────────────────────────────────────────────────────────
+
+
+_ADVANZIA_ROW = re.compile(
+    r"^(\d{2}\.\d{2}\.\d{4})\s+(.+?)\s+(-?[\d.]+,\d{2})\s*$",
+    re.MULTILINE,
+)
+_ADVANZIA_SKIP = ("ALTER SALDO", "NEUER SALDO", "MINDESTBETRAG")
+
+
+def _parse_advanzia(text: str) -> list[dict]:
+    txs: list[dict] = []
+    seq = 0
+    for m in _ADVANZIA_ROW.finditer(text):
+        date_str, desc, amt = m.groups()
+        if any(skip in desc.upper() for skip in _ADVANZIA_SKIP):
+            continue
+        try:
+            amount = _de_amount(amt)
+        except Exception:
+            continue
+        if amount == 0:
+            continue
+        dd, mm, yyyy = date_str.split(".")
+        date_iso = f"{yyyy}-{mm}-{dd}T00:00:00Z"
+        # Negative amount = credit (e.g. EINZAHLUNG repayment); positive = purchase (expense).
+        tx_type = "income" if amount < 0 else "expense"
+        seq += 1
+        txs.append(_make_tx(
+            date_iso=date_iso, amount=amount, tx_type=tx_type,
+            description=desc, counterparty="Advanzia", seq=seq,
+        ))
+    return txs
+
+
+# ─── Generic fallback ──────────────────────────────────────────────────
+
+
+def _parse_generic(text: str) -> list[dict]:
+    """Heuristic parser for unrecognised banks. Best-effort, no guarantees."""
+    txs: list[dict] = []
+    seq = 0
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        date_match = re.search(r"(\d{4}[/-]\d{2}[/-]\d{2})", line)
+        if not date_match:
+            continue
+        date = date_match.group(1).replace("/", "-")
+        after = line[date_match.end():].strip()
+        amount_match = re.search(r"([+-]?\d+[.,]\d{2})", after)
+        if not amount_match:
+            continue
+        amt_str = amount_match.group(1)
+        desc = after[:amount_match.start()].strip()
+        if not desc:
+            continue
+        try:
+            amount = _de_amount(amt_str)
+        except Exception:
+            continue
+        if amount == 0:
+            continue
+        tx_type = "income" if amount > 0 else "expense"
+        seq += 1
+        txs.append(_make_tx(
+            date_iso=f"{date}T00:00:00Z", amount=amount, tx_type=tx_type,
+            description=desc, counterparty="Generic", seq=seq, currency="EUR",
+        ))
+    return txs
+
+
+# ─── Dispatch table ────────────────────────────────────────────────────
+
+
+_BANK_PARSERS = {
+    "amex_de": _parse_amex_de,
+    "n26": _parse_n26,
+    "revolut": _parse_revolut,
+    "tfbank": _parse_tfbank,
+    "advanzia": _parse_advanzia,
+}

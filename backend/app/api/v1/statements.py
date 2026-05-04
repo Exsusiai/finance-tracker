@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from datetime import datetime, timezone
@@ -11,12 +12,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.errors import NotFoundError, ConflictError, ParserError
 from app.db import get_db
 from app.models import Transaction, PdfImport
+from app.services.cashflow import parse_period, recompute_for_periods
 from app.schemas import (
     ApiSuccess,
     PdfImportOut,
@@ -106,11 +109,10 @@ async def upload_pdf(
     if existing.scalar_one_or_none():
         raise ConflictError("PDF with identical content already imported")
 
-    # Save to disk
+    # Save to disk (sync IO offloaded to a worker thread)
     storage_dir = settings.pdf_storage_dir
     storage_path = storage_dir / f"{file_hash}.pdf"
-    with open(storage_path, "wb") as f:
-        f.write(content)
+    await asyncio.to_thread(storage_path.write_bytes, content)
 
     # Create import record
     pdf_import = PdfImport(
@@ -140,6 +142,7 @@ async def upload_pdf(
         pdf_import.status = "success" if not result.get("error") else "failed"
 
         if result.get("transactions"):
+            from app.services.categorizer.engine import categorize_transaction
             for tx_data in result["transactions"]:
                 tx = Transaction(
                     account_id=account_id or tx_data.get("account_id", 0),
@@ -153,16 +156,24 @@ async def upload_pdf(
                     source="pdf_import",
                     pdf_import_id=pdf_import.id,
                     external_id=tx_data.get("external_id"),
+                    # Default pending; auto-categorizer below promotes matched ones
                     is_pending=True,
                 )
                 db.add(tx)
+                # Try rule-based auto-categorization.
+                # If matched: keep is_pending=True so the user still confirms once
+                # via the inbox (they can fast-accept the suggested category).
+                # If not matched: stays pending without category — falls into inbox
+                # for manual classification (which then triggers learning).
+                await categorize_transaction(db, tx)
 
         await db.flush()
         pdf_import.transactions_count = len(result.get("transactions", []))
 
-        # Get preview (first 5)
+        # Get preview (first 5) with eager-loaded relationships
         preview_stmt = (
             select(Transaction)
+            .options(selectinload(Transaction.account), selectinload(Transaction.category))
             .where(Transaction.pdf_import_id == pdf_import.id)
             .order_by(Transaction.occurred_at)
             .limit(5)
@@ -244,11 +255,15 @@ async def confirm_statement(
     pending_txs = tx_result.scalars().all()
 
     count = 0
+    affected_periods = []
     for tx in pending_txs:
         tx.is_pending = False
         count += 1
+        affected_periods.append(parse_period(tx.occurred_at))
 
     await db.flush()
+    # Confirmed transactions now contribute to cashflow — refresh affected snapshots
+    await recompute_for_periods(db, affected_periods)
     return ApiSuccess(data={"import_id": import_id, "confirmed": count})
 
 

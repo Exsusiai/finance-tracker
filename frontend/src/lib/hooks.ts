@@ -18,6 +18,7 @@ import {
   fetchStatements,
   fetchAssets,
   fetchFxRates,
+  fetchInbox,
 } from "@/lib/api";
 import type { TransactionFilters, TransactionOut } from "@/lib/api";
 
@@ -124,6 +125,16 @@ export function useAssets(assetClass?: string) {
   return useSWR(
     assetClass ? `assets-${assetClass}` : "assets",
     () => fetchAssets(assetClass),
+    { revalidateOnFocus: false },
+  );
+}
+
+// ─── Inbox ─────────────────────────────────────────────────────────────
+
+export function useInbox(limit: number = 100) {
+  return useSWR(
+    `inbox-${limit}`,
+    () => fetchInbox(limit),
     { revalidateOnFocus: false },
   );
 }

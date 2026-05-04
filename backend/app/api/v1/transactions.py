@@ -25,6 +25,7 @@ from app.schemas import (
     TransactionOut,
     TransactionUpdate,
 )
+from app.services.cashflow import parse_period, recompute_for_periods, recompute_period
 
 router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
@@ -93,7 +94,7 @@ async def list_transactions(
     tags: str | None = Query(None),  # CSV
     source: str | None = Query(None),
     is_pending: bool | None = Query(None),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(50, ge=1, le=1000),
     cursor: int | None = Query(None),
 ):
     stmt = (
@@ -205,6 +206,10 @@ async def create_transaction(
     )
     db.add(tx)
     await db.flush()
+    # Auto-refresh cashflow snapshot for the affected period
+    period = parse_period(tx.occurred_at)
+    if period:
+        await recompute_period(db, period[0], period[1])
     # Re-fetch with relationships loaded
     fetch = select(Transaction).options(selectinload(Transaction.account), selectinload(Transaction.category)).where(Transaction.id == tx.id)
     result = await db.execute(fetch)
@@ -244,6 +249,8 @@ async def batch_create_transactions(
         db.add(tx)
         created.append(tx)
     await db.flush()
+    # Auto-refresh cashflow snapshots for all affected periods (deduplicated)
+    await recompute_for_periods(db, [parse_period(t.occurred_at) for t in created])
     # Batch re-fetch with relationships
     if created:
         ids = [tx.id for tx in created]
@@ -292,6 +299,9 @@ async def update_transaction(
     if not tx:
         raise NotFoundError("Transaction", transaction_id)
 
+    old_period = parse_period(tx.occurred_at)
+    old_category_id = tx.category_id
+
     update_data = body.model_dump(exclude_unset=True)
     if "tags" in update_data:
         update_data["tags_json"] = json.dumps(update_data.pop("tags")) if update_data["tags"] else None
@@ -307,6 +317,20 @@ async def update_transaction(
 
     touch_updated_at(tx)
     await db.flush()
+
+    # Auto-learn: if user changed the category, derive (or strengthen) a rule
+    new_category_id = tx.category_id
+    if (
+        new_category_id is not None
+        and new_category_id != old_category_id
+        and tx.source != "manual"  # only learn from imported tx where description is "real" merchant text
+    ):
+        from app.services.categorizer.engine import learn_from_user_assignment
+        await learn_from_user_assignment(db, tx, new_category_id)
+
+    # Recompute both old and new period (occurred_at may have shifted across months)
+    new_period = parse_period(tx.occurred_at)
+    await recompute_for_periods(db, [old_period, new_period])
     return ApiSuccess(data=_tx_to_out(tx))
 
 
@@ -326,7 +350,10 @@ async def delete_transaction(
         raise NotFoundError("Transaction", transaction_id)
 
     tx.deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    period = parse_period(tx.occurred_at)
     await db.flush()
+    if period:
+        await recompute_period(db, period[0], period[1])
     return ApiSuccess(data={"id": transaction_id, "deleted": True})
 
 
@@ -351,4 +378,80 @@ async def recategorize_transaction(
 
     await categorize_transaction(db, tx)
     await db.flush()
+    return ApiSuccess(data=_tx_to_out(tx))
+
+
+# ─── Inbox: pending transactions awaiting user confirmation ───────────
+
+
+@router.get("/inbox/list", response_model=ApiSuccess[list[TransactionOut]])
+async def list_inbox(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """All pending transactions (auto-categorized or not). Frontend's confirm queue."""
+    stmt = (
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(Transaction.is_pending.is_(True), Transaction.deleted_at.is_(None))
+        .order_by(Transaction.occurred_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return ApiSuccess(data=[_tx_to_out(t) for t in rows])
+
+
+@router.post("/inbox/{transaction_id}/confirm", response_model=ApiSuccess[TransactionOut])
+async def confirm_inbox_item(
+    transaction_id: int,
+    body: TransactionUpdate,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Confirm a single inbox item with optional category override.
+
+    If `body.category_id` is set:
+      - it overrides any auto-suggested category
+      - triggers `learn_from_user_assignment` to derive a rule
+
+    Sets `is_pending=False` after confirmation.
+    """
+    from app.services.categorizer.engine import learn_from_user_assignment
+
+    stmt = (
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(Transaction.id == transaction_id, Transaction.is_pending.is_(True),
+               Transaction.deleted_at.is_(None))
+    )
+    tx = (await db.execute(stmt)).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Pending Transaction", transaction_id)
+
+    old_category_id = tx.category_id
+    update_data = body.model_dump(exclude_unset=True)
+    new_category_id = update_data.get("category_id", old_category_id)
+
+    # Apply user overrides (description / category / etc.)
+    for key, value in update_data.items():
+        if key == "amount" and value is not None:
+            value = Decimal(value)
+        setattr(tx, key, value)
+
+    tx.is_pending = False
+    touch_updated_at(tx)
+    await db.flush()
+
+    # Learn ONLY when user actually changed (or chose) the category.
+    # Confirming an auto-suggested category that wasn't changed → don't strengthen
+    # (the rule already matched, no new signal).
+    if new_category_id is not None and new_category_id != old_category_id:
+        await learn_from_user_assignment(db, tx, new_category_id)
+
+    # Refresh cashflow snapshot — a confirmed tx now contributes
+    period = parse_period(tx.occurred_at)
+    if period:
+        await recompute_period(db, period[0], period[1])
+
     return ApiSuccess(data=_tx_to_out(tx))

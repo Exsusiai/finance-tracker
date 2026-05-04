@@ -21,14 +21,14 @@
 | 2 | 资产管理页面 — 完整 CRUD | ✅ | 持仓表/饼图/账户余额面板 |
 | 3 | 总览页重构 — 去重 + 资产概览 | ✅ | 净值卡片 + 快速操作 |
 | 4 | 设置页面 — 账户与分类管理 | ✅ | |
-| 6 | PDF 解析引擎 — 单测通过 | ✅ | 样本回归 → P2-2（重新审视） |
+| 6 | PDF 解析引擎 — 真实样本回归 | ✅ | 5 家全部通过 `data/inputpdf_reference/`：AMEX-DE / N26 / Revolut / TFBank / Advanzia。识别 + 期间 + 交易数与 PDF 抬头汇总对得上 |
 | 12 | 资产搜索与自动识别 | ✅ | CoinGecko + yfinance 联合查询 |
 
 ## 半成品 — B 类（之前被错标 ✅）
 | # | Task | 状态 | 真实情况 |
 |---|------|------|------|
-| 5 | 市场数据定时刷新 | ⚠️ → ❌ | **APScheduler 未接**，价格只能手动 `/refresh`；见 P0-1 |
-| — | CashFlow snapshot 自动重算 | ⚠️ | 文档说"debounce 2s 异步重算"，**代码无 hook**；见 P0-2 |
+| 5 | 市场数据定时刷新 | ✅ | P0-1 已完成：`AsyncIOScheduler` 注册 crypto/stocks/fx 三个 job，按配置间隔自动刷新；`GET /api/v1/system/scheduler/status` 看运行状态 |
+| — | CashFlow snapshot 自动重算 | ✅ | P0-2 完成：`services/cashflow/engine.py` 提供 `recompute_period` / `recompute_for_periods`；transaction CRUD（create/batch/update/delete）+ statement confirm + account adjust 全部 hook 后即时重算 |
 | — | "待确认"工作流 | ⚠️ | `is_pending` 字段在但 categorizer 不写、前端无专栏；见 P0-4 |
 | — | 银行解析器真实样本回归 | ⚠️ | 单测通过 ≠ 真实账单通过；见 P2-2 |
 | — | `v_account_balance` 视图被前端使用 | ⚠️ | 视图创建在，是否被读未核 |
@@ -44,9 +44,14 @@
 ## 未实现 — D 类（PRD 要求但代码完全没有）
 | # | Task | 优先级 | 说明 |
 |---|------|------|------|
-| **NEW-1** | 分类自动学习 / 记忆 | 🔴 P0-3 | PRD 原话"软件需要记住，下次不要放错" |
-| **NEW-2** | 不确定收件箱工作流 | 🔴 P0-4 | PRD 原话"不确定的内容放进不确定列表" |
-| 9 | MCP Server 端到端集成测试 | 🔴 P0-5 | 6 tools 已注册，未真实跑通 |
+| **NEW-1** | 分类自动学习 / 记忆 | ✅ P0-3 | 完成。`learn_from_user_assignment` 从用户分类反向新建/加强规则；keyword 提取避免噪音/数字/银行名；学到规则下次自动匹配验证通过 |
+| **NEW-2** | 不确定收件箱工作流 | ✅ P0-4 | **后端 + 前端均完成**。transactions 页加「待确认」tab + 红色徽章计数；行内分类下拉（带 optgroup 一级/二级）+ 一键确认；改选别的分类时 UI 提示"⚡ 确认后会被记住" |
+| **NEW-11** | 记账页层级化分类视图 | ✅ P0-7 | 完成。`CategoryBreakdownView` 组件：月份选择 + kind 切换 + 总额；左栏一级类目卡（带占比条）；右栏二级类目（带占比条 + 点开看明细）。挂为 `/transactions` 默认 tab |
+| **NEW-12** | LLM 分类 fallback | 🟡 P1-1a | L1 关键词 miss → 调 LLM；置信度门槛后写分类。提供商待用户选 |
+| **NEW-13** | 用户分类备注 | 🟡 P1-1b | inbox 确认时可写备注；持久化为知识库一部分 |
+| **NEW-14** | 分类知识库注入 LLM | 🟡 P1-1c | 调 LLM 时把 rules + 关键词 + 用户备注（最近 N 条相关）作为 prompt 上下文 |
+| **NEW-15** | 知识库管理 UI | 🟡 P1-1d | settings 页表格列出所有备注 + 来源 + 使用次数；可编辑 |
+| 9 | MCP Server 端到端集成测试 | ✅ P0-5 | 完成 6 轮回归测试，发现并修复 9 个 bug（B1~B9）；7 tools 全部 PASS。修复要点：parse_bank_statement INSERT 缺字段、FX 折算方向反 + pivot 不全、parser 与 backend 漂移（已改为复用）、view 余额公式按 type 取符号 |
 | **NEW-3** | 链上加密钱包余额同步（**只填公钥即同步**） | 🟡 P1-4 | `crypto.py` 仅 55 行 stub；新建账户时只输入钱包地址即可自动读余额 |
 | **NEW-4** | 扫描件 OCR 兜底 | 🟢 P2-3 | TECH_STACK 列为 P1 |
 | **NEW-5** | "储蓄"口径定义 + 单测 | 🟡 P1-5 | PRD 二次澄清 |
@@ -80,6 +85,15 @@
 | 2026-05-03 | PRD 细化 | 新增"加密钱包：只填公钥即同步"要求，登记到 P1-4 |
 | 2026-05-03 | 加密钱包方案细化 | 用户答复：覆盖主流 L1+L2、仅现货、多链多地址聚合到同一账户。方案沉到 `docx/CRYPTO_WALLET_PLAN.md` |
 | 2026-05-03 | 加密钱包方案定稿 | 决策：参考 rotki 自写、阶段 1 接入 Binance+Bitget、砍掉 ENS/SNS、手动同步触发 |
+| 2026-05-03 | 显示币种切换全覆盖 | 资产页持仓表/资产分布/账户余额/账户卡四处补折算；dashboard 加币种切换器（共享 localStorage）+ 修原本"不同币种直接相加"bug |
+| 2026-05-03 | **P0-1 APScheduler 接入** | engine 拆 4 个细粒度 refresh；新建 `services/market_data/scheduler.py`；lifespan 启动注册 3 个 job；`/system/scheduler/status` 暴露状态。fx 已自动写入 165 条 |
+| 2026-05-03 | **P0-2 CashFlow 自动重算** | 新建 `services/cashflow/engine.py`；transaction create/batch/update/delete + statement confirm + account adjust-balance 全部 hook；端到端验证 income/savings 即时反映 |
+| 2026-05-03 | PDF 解析重写（仅本人需要的 5 家） | engine.py 完全重写，AMEX-DE/N26/Revolut/TFBank/Advanzia 真实样本通过。砍掉 ICBC/CMB/CCB/BOC（非需求）。修 detector 误识别 + greenlet lazy load bug |
+| 2026-05-04 | **P0-3 + P0-4 自动学习 + Inbox** | 9+30 类用户分类作为种子；70 条 keyword starter rule。PDF 导入后 78% 自动命中，剩 22% 进 inbox；用户分类一笔 → 反向学规则 → 同类项自动归并。E2E 验证：1 次手动归类后命中率升至 92% |
+| 2026-05-04 | **Inbox + 分类管理 前端** | transactions 页新增「待确认」tab（带数量徽章 + 一键确认 + 改选自动学习提示）；settings 页新增分类管理（一级 + 二级两层 CRUD，重命名/删除/新建） |
+| 2026-05-04 | 用户分类管道演进需求 | 用户提出三类新需求：① 记账页层级 UI 重构 ② LLM 分类 fallback + 用户备注 + 知识库注入。文档化到 `docx/CLASSIFICATION_PLAN.md`，ROADMAP 重排 P0-7 / P1-1a~d |
+| 2026-05-04 | **P0-7 记账页层级化视图** | 新增 `CategoryBreakdownView`：月份选择 + 双栏（一级 → 二级 → 明细）+ 占比条；挂为 transactions 页默认 tab。后端 transactions 接口 limit 上限 200 → 1000 |
+| 2026-05-04 | **P0-5 MCP 端到端测试 + 9 个 bug 全修** | 6 轮 agent 回归驱动：B1 INSERT 缺 transactions_count、B2 FX 方向、B3 mcp 包未装、B4 重复 import、B5 三角 pivot 缺 CNY、B6 parser 漂移（改为复用 backend）、B7 asyncio.run in event loop、B8 account_id 缺省 FK 失败、B9 v_account_balance 把 expense 加而非减。所有 bug 清零，7 tools 全 PASS |
 
 ## 下一步
 按 `docx/ROADMAP.md` 的 P0-1 ~ P0-5 顺序推进。建议起点：**P0-1 APScheduler 接入**（解锁后续所有"实时"体感）。

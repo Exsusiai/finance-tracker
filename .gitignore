@@ -45,6 +45,7 @@ data/*.db-shm
 data/pdfs/
 data/backups/
 data/uploads/
+data/inputpdf_reference/
 
 # ──────────────────────────── IDE / OS ──────────────────────────
 .idea/

@@ -11,6 +11,7 @@ import { useAccounts, useBalances } from "@/lib/hooks";
 import { ApiError, deleteAccount, type AccountOut } from "@/lib/api";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { cn, formatCurrency } from "@/lib/utils";
+import { CategoryManager } from "@/components/category-manager";
 
 export default function SettingsPage() {
   const {
@@ -183,6 +184,16 @@ export default function SettingsPage() {
               })}
             </div>
           )}
+        </section>
+
+        <section className="mt-10">
+          <div className="mb-3">
+            <h2 className="text-base font-semibold">分类管理</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              一级分类 → 二级分类两层结构。系统已预置 9 大类（住家 / 日常生活 / …）共 30 个二级，可随意增删改。
+            </p>
+          </div>
+          <CategoryManager />
         </section>
       </div>
 
