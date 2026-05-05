@@ -321,17 +321,31 @@ async def update_transaction(
 
     # Auto-learn: if user changed the category, derive (or strengthen) a rule
     new_category_id = tx.category_id
+    new_period = parse_period(tx.occurred_at)
+    affected_periods = [old_period, new_period]
     if (
         new_category_id is not None
         and new_category_id != old_category_id
         and tx.source != "manual"  # only learn from imported tx where description is "real" merchant text
     ):
-        from app.services.categorizer.engine import learn_from_user_assignment
+        from app.services.categorizer.engine import (
+            apply_to_similar_pending,
+            learn_from_user_assignment,
+        )
         await learn_from_user_assignment(db, tx, new_category_id)
+        cascaded = await apply_to_similar_pending(db, tx, new_category_id)
+        if cascaded:
+            from sqlalchemy import select as _select
+            cascaded_rows = (await db.execute(
+                _select(Transaction.occurred_at).where(
+                    Transaction.category_id == new_category_id,
+                    Transaction.id != tx.id,
+                )
+            )).all()
+            for (occ,) in cascaded_rows:
+                affected_periods.append(parse_period(occ))
 
-    # Recompute both old and new period (occurred_at may have shifted across months)
-    new_period = parse_period(tx.occurred_at)
-    await recompute_for_periods(db, [old_period, new_period])
+    await recompute_for_periods(db, affected_periods)
     return ApiSuccess(data=_tx_to_out(tx))
 
 
@@ -530,12 +544,28 @@ async def confirm_inbox_item(
     # Learn ONLY when user actually changed (or chose) the category.
     # Confirming an auto-suggested category that wasn't changed → don't strengthen
     # (the rule already matched, no new signal).
+    affected_periods = [parse_period(tx.occurred_at)]
     if new_category_id is not None and new_category_id != old_category_id:
         await learn_from_user_assignment(db, tx, new_category_id)
+        # ↳ NEW (2026-05-05): also propagate the same category to other pending
+        # tx with identical description, so the user doesn't have to confirm
+        # 35 identical "Net interest paid …" rows one by one.
+        from app.services.categorizer.engine import apply_to_similar_pending
+        cascaded = await apply_to_similar_pending(db, tx, new_category_id)
+        if cascaded:
+            # Pull periods of cascaded rows so cash-flow snapshot recomputes them too.
+            from sqlalchemy import select as _select
+            cascaded_rows = (await db.execute(
+                _select(Transaction.occurred_at).where(
+                    Transaction.category_id == new_category_id,
+                    Transaction.id != tx.id,
+                    Transaction.is_pending.is_(False),
+                )
+            )).all()
+            for (occ,) in cascaded_rows:
+                affected_periods.append(parse_period(occ))
 
-    # Refresh cashflow snapshot — a confirmed tx now contributes
-    period = parse_period(tx.occurred_at)
-    if period:
-        await recompute_period(db, period[0], period[1])
+    # Refresh cash-flow snapshots for all affected months (de-duplicated)
+    await recompute_for_periods(db, affected_periods)
 
     return ApiSuccess(data=_tx_to_out(tx))

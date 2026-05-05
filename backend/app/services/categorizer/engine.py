@@ -118,6 +118,46 @@ def _extract_keyword(text: str) -> str | None:
     return None
 
 
+async def apply_to_similar_pending(
+    db: AsyncSession,
+    seed_tx: Transaction,
+    category_id: int,
+) -> int:
+    """After a user manually classifies one tx, find all *other* pending tx
+    with the same description and apply the same category to them.
+
+    Returns the count of additional rows that were auto-classified.
+    Cash-flow snapshot recompute is the caller's responsibility (may span
+    several months).
+    """
+    if not seed_tx.description:
+        return 0
+    # Match by exact description (case-insensitive, trimmed). Also confirm them.
+    norm_desc = seed_tx.description.strip()
+    if not norm_desc:
+        return 0
+    stmt = (
+        select(Transaction)
+        .where(
+            Transaction.id != seed_tx.id,
+            Transaction.deleted_at.is_(None),
+            Transaction.is_pending.is_(True),
+            Transaction.category_id.is_(None),
+            Transaction.description == norm_desc,
+        )
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    count = 0
+    for r in rows:
+        r.category_id = category_id
+        r.is_pending = False
+        count += 1
+    if count:
+        await db.flush()
+        logger.info("apply_to_similar", seed_id=seed_tx.id, count=count, desc=norm_desc[:60])
+    return count
+
+
 async def learn_from_user_assignment(
     db: AsyncSession,
     tx: Transaction,

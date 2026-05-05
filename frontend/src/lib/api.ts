@@ -374,7 +374,7 @@ export interface TransactionCreateInput {
 export interface TransactionUpdateInput {
   account_id?: number;
   counter_account_id?: number;
-  category_id?: number;
+  category_id?: number | null;
   occurred_at?: string;
   posted_at?: string;
   amount?: string;

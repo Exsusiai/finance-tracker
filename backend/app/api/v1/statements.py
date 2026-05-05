@@ -180,12 +180,16 @@ async def upload_pdf(
                     is_pending=True,
                 )
                 db.add(tx)
-                # Try rule-based auto-categorization.
-                # If matched: keep is_pending=True so the user still confirms once
-                # via the inbox (they can fast-accept the suggested category).
-                # If not matched: stays pending without category — falls into inbox
-                # for manual classification (which then triggers learning).
-                await categorize_transaction(db, tx)
+                # Auto-categorize via rules. If a rule matches we treat that as
+                # high-confidence and auto-confirm (skip inbox). Only un-matched
+                # rows stay pending for manual classification.
+                matched = await categorize_transaction(db, tx)
+                if matched:
+                    tx.is_pending = False
+                # Transfers (sub-account or cross-bank-hint) are not "income/expense"
+                # for the user, so they shouldn't sit in the confirmation inbox either.
+                if tx.type == "transfer":
+                    tx.is_pending = False
 
         await db.flush()
         pdf_import.transactions_count = len(result.get("transactions", []))
