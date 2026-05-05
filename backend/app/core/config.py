@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     backend_port: int = 8000
     log_level: str = "INFO"
 
+    # --- Personal hints (kept out of source code; loaded from .env) ---
+    # Comma-separated list of the account-holder's name variants. Used by
+    # transfer matcher / pdf parser / categorizer to recognise self-transfers
+    # where the bank statement prints the owner's own name on both legs.
+    # Example: "Jane Doe,Doe Jane,J. Doe"
+    finance_tracker_owner_names: str = ""
+
     # --- Database ---
     database_url: str = f"sqlite:///{_DATA_DIR / 'finance.db'}"
 
@@ -80,6 +87,12 @@ class Settings(BaseSettings):
             )
             return secrets.token_hex(32)
         return v
+
+    @property
+    def owner_names(self) -> list[str]:
+        """Parsed owner-name variants for self-transfer detection (lower-cased)."""
+        raw = self.finance_tracker_owner_names or ""
+        return [n.strip().lower() for n in raw.split(",") if n.strip()]
 
     @property
     def data_dir(self) -> Path:

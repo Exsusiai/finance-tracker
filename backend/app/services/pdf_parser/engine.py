@@ -243,15 +243,32 @@ _SUBACCOUNT_USER_NAMES: list[str] = []
 # Cross-bank transfer cues (description-level). When matched we mark the row as
 # a transfer right away, even before the matcher pairs it with a counterparty
 # in another account.
-_CROSS_BANK_TRANSFER_HINTS = (
+_CROSS_BANK_TRANSFER_HINTS_BASE = (
     "outgoing transfer",
     "incoming transfer",
     "sepa direct debit",
-    "to jingsheng chen",         # owner-to-owner self-transfer
-    "from jingsheng chen",
-    "payment from jingsheng chen",
-    "payment to jingsheng chen",
 )
+
+
+def _cross_bank_transfer_hints() -> tuple[str, ...]:
+    """Combine static cues with owner-name variants from settings.
+
+    Owner names (e.g. "Jane Doe") are loaded from ``FINANCE_TRACKER_OWNER_NAMES``
+    so the codebase ships without any personally identifying string baked in.
+    """
+    from app.core.config import get_settings
+
+    extras: list[str] = []
+    for name in get_settings().owner_names:
+        extras.extend(
+            [
+                f"to {name}",
+                f"from {name}",
+                f"payment from {name}",
+                f"payment to {name}",
+            ]
+        )
+    return _CROSS_BANK_TRANSFER_HINTS_BASE + tuple(extras)
 
 
 def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
@@ -276,7 +293,7 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
         if kw in d:
             return "transfer", {"subaccount": True, "matched": kw, "source": "keyword"}
     # 3) Cross-bank cues
-    for kw in _CROSS_BANK_TRANSFER_HINTS:
+    for kw in _cross_bank_transfer_hints():
         if kw in d:
             return "transfer", {"cross_bank_hint": True, "matched": kw}
     return default_type, None

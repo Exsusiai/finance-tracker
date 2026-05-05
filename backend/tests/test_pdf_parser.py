@@ -186,7 +186,7 @@ def _n26_pdf() -> bytes:
     """N26-style statement."""
     header = "N26 Bank Statement"
     lines = [
-        "Account: DE89 3704 0044 0532 0130 00",
+        "Account: DE00 0000 0000 0000 0000 00",
         "Period: May 2026",
         "",
         "2026-05-01  DEPOSIT  +2000.00  Salary",

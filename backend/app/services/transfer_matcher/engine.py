@@ -81,8 +81,8 @@ def _hint_score(out_tx: Transaction, in_tx: Transaction,
     out_account = accounts.get(out_tx.account_id)
 
     # ── HIGHEST CONFIDENCE: IBAN match (own bank's IBAN appears in counter-leg description)
-    # When a self-transfer is "Jingsheng Chen → Jingsheng Chen", names give us
-    # nothing — but the destination IBAN is unique to one bank.
+    # When a self-transfer prints the same owner name on both legs, names give
+    # us nothing — but the destination IBAN is unique to one bank.
     out_iban = (out_account.iban or "").upper().replace(" ", "") if out_account else ""
     in_iban = (in_account.iban or "").upper().replace(" ", "") if in_account else ""
     out_desc_norm = out_desc_raw.upper().replace(" ", "")
@@ -100,10 +100,18 @@ def _hint_score(out_tx: Transaction, in_tx: Transaction,
     if out_account and out_account.name and out_account.name.lower() in in_desc:
         score += 10; reasons.append(f"in←out name '{out_account.name}'")
 
-    # Owner-name self-transfer cue ("Jingsheng Chen" appears on both legs)
-    self_pattern = re.compile(r"jingsheng\s+chen", re.I)
-    if self_pattern.search(out_desc_raw) and self_pattern.search(in_desc_raw):
-        score += 10; reasons.append("self-transfer name match")
+    # Owner-name self-transfer cue (configured via FINANCE_TRACKER_OWNER_NAMES;
+    # e.g. when both legs print the same account-holder name).
+    from app.core.config import get_settings
+
+    for owner in get_settings().owner_names:
+        if not owner:
+            continue
+        pattern = re.compile(re.escape(owner), re.I)
+        if pattern.search(out_desc_raw) and pattern.search(in_desc_raw):
+            score += 10
+            reasons.append("self-transfer name match")
+            break
 
     # Generic transfer verbs already hint at it
     if any(k in out_desc for k in ("outgoing transfer", "to ", "payment to")):

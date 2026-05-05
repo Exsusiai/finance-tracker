@@ -194,7 +194,7 @@ export function AccountForm({
               type="text"
               value={iban}
               onChange={(e) => setIban(e.target.value)}
-              placeholder="如：DE67100110012623191530（空格大小写无所谓）"
+              placeholder="例：DE00 0000 0000 0000 0000 00（空格大小写无所谓）"
               className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring tabular-nums uppercase"
               spellCheck={false}
             />

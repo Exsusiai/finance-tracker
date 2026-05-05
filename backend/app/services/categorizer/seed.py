@@ -93,7 +93,7 @@ _INCOME_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
 _TRANSFER_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
     ("转账", [
         ("信用卡还款", ["amex", "advanzia", "visa", "mastercard", "kreditkarte", "credit card", "tf bank", "信用卡"]),
-        ("跨行划转", ["sepa", "outgoing transfer", "incoming transfer", "wise", "transferwise", "to jingsheng", "from jingsheng"]),
+        ("跨行划转", ["sepa", "outgoing transfer", "incoming transfer", "wise", "transferwise"]),
         ("内部储蓄", ["saving", "saving space", "vault", "pocket", "instant access", "spaces", "round-up"]),
         ("投资划转", ["binance", "bitget", "coinbase", "okx", "kraken", "investing", "broker"]),
         ("其他转账", []),

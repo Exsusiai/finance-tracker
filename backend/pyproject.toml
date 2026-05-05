@@ -9,7 +9,7 @@ description = "Finance Tracker — personal finance & bookkeeping backend (FastA
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Jingsheng Chen", email = "chjingsheng@gmail.com" }]
+authors = [{ name = "Finance Tracker Maintainers" }]
 
 dependencies = [
     "fastapi>=0.115",
