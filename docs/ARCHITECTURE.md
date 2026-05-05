@@ -1,6 +1,7 @@
 # 架构概览 (ARCHITECTURE)
 
 > Finance Tracker — 个人资金管理与记账系统
+> 最后修订: 2026-05-05
 
 ## 高层架构
 
@@ -49,8 +50,22 @@
 | `models/` | SQLAlchemy ORM 实体 (与 `docs/SCHEMA.sql` 一一对应) |
 | `schemas/` | Pydantic v2 请求/响应模型 (与 `docs/API.md` 对齐) |
 | `api/v1/` | FastAPI route handlers (薄,只做参数校验和调用 service) |
-| `services/` | 业务逻辑层 (PDF 解析、分类、估值、现金流计算、行情拉取) |
-| `db/migrations/` | Alembic 迁移脚本 |
+| `services/` | 业务逻辑层（见下表） |
+| `db/migrations/` | Alembic 目录（暂未启用，由 `_column_migrations` idempotent ALTER 顶住） |
+
+#### `services/` 详细结构（2026-05-05）
+
+| 子目录 | 职责 |
+|---|---|
+| `pdf_parser/` | 5 家银行 parser + column-aware Revolut + 子账户 / 跨行关键词预标 |
+| `categorizer/` | 关键词规则匹配 + `learn_from_user_assignment` + `apply_to_similar_pending` 级联 + seed 种子 |
+| `transfer_matcher/` | 跨账户配对（评分制 + IBAN +40）+ 同账户 amount-match L3（subaccount 标记） |
+| `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot |
+| `market_data/` | 取价（yfinance / CoinGecko / FX）+ `scheduler.py` AsyncIOScheduler 三 job |
+| `asset_search/` | CoinGecko + yfinance 联合查询自动识别资产 |
+| `valuation/` | 持仓估值聚合（含 FX 三角换算） |
+| `bank_sync/` | GoCardless 银行直连（scaffold，未启用） + crypto.py（55 行 stub） |
+| `notion_sync/` | Notion 三模块同步（scaffold，未联调） |
 
 ### Frontend (`frontend/src/`)
 
@@ -67,17 +82,38 @@
 
 ## 关键流程
 
-### 1. PDF 上传 → 入库
+### 1. PDF 上传 → 入库 → 自动分类 + 转账识别 + 级联
 
 ```
-[Web UI] → POST /statements/upload (multipart)
-       → save file → SHA-256 hash 去重
-       → detector.detect_bank(text) → 选择 parser
-       → parser.parse() → List[ParsedTransaction]
-       → categorizer.suggest(tx) → 应用规则 / fallback 模型
-       → batch insert 到 transactions (is_pending=1)
-       → 返回预览给前端
-       → 用户确认 → POST /statements/{id}/confirm → is_pending=0
+[Web UI] → POST /statements/upload?account_id=X (multipart)
+       → SHA-256 hash 去重
+       → asyncio.to_thread(parse_pdf_statement)：pdfplumber 抽 text + words
+       → _detect_bank() 按 BIC/域名识别银行
+       → 分发：
+           - Revolut → _parse_revolut_columns（按 Money out/in 列定位）
+           - 其他 → text-regex parsers
+       → 每条 tx 经 _classify_transfer：
+           - 子账户关键词 / 用户清单 → type='transfer' + metadata.subaccount=true
+           - 跨行 cue（Outgoing Transfer / SEPA / 配置的 owner 姓名）→ type='transfer' + cross_bank_hint
+       → batch insert 到 transactions
+       → 每条 categorize_transaction(rules)
+           - 命中 → category_id 写入 + is_pending=False（自动通过 inbox）
+           - 未命中 → is_pending=True
+       → transfer 类直接 is_pending=False
+       → auto_pair_after_import：
+           1. detect_same_account_pairs (L3) → mark_subaccount_pair
+           2. find_transfer_pairs (cross-account, score≥75 自动) → pair_transactions
+       → 返回 preview（前 5 笔，用 selectinload 避免 lazy load）
+
+[用户在 inbox] → POST /transactions/inbox/{id}/confirm {category_id, user_note?}
+       → setattr(category_id, user_note); is_pending=False
+       → learn_from_user_assignment：从 description 提取关键词建/加强规则
+       → apply_to_similar_pending：同 description 兄弟全部级联（含已分类的，
+                                  保护 source!=manual / type!=transfer / type==seed.type）
+       → cashflow recompute_for_periods（含级联兄弟所在月份）
+
+[用户在 transactions/分类视图] → PATCH /transactions/{id} {category_id, type?}
+       → 同上学习 + 级联（跨 kind 时不级联，保护其他兄弟）
 ```
 
 ### 2. 实时估值
@@ -97,8 +133,20 @@
 
 ### 3. 现金流分析
 
-- 写入: 每次 transaction CRUD 后,异步触发对应月度 snapshot 重算 (debounce 2s)
-- 读取: 仪表盘直接读 `cash_flow_snapshots` (O(months))
+- **写入**：transaction CRUD（create/batch/update/delete）+ statement confirm + adjust-balance + 级联学习全部 hook 后**同步重算**（单用户场景无需 debounce）
+- **读取**：dashboard 直接读 `cash_flow_snapshots`（O(months)）
+- **层级化视图**：`/transactions` 默认 tab `CategoryBreakdownView` — 月份选择 + kind 切换 + 双栏（一级类目卡 + 占比条 → 二级类目 + 明细 + 占比条），明细行支持内联跨 kind 改分类（触发级联）
+
+### 3.5 余额视图（避免双计的关键）
+
+`v_account_balance` 视图（启动时由 lifespan DROP+CREATE 重建）：
+
+- `subaccount=true` 的 transfer 跳过（钱在同银行内，不影响整体余额）
+- 已配对的 transfer 按 `transfer_direction` 取符号（in +ABS / out −ABS）
+- 未配对 transfer 默认 −ABS（单边视角假定为出账）
+- expense −ABS / income +ABS / adjustment 保留原符号
+
+`transactions.amount` 始终存正绝对值，方向由 `type` + metadata 决定（adjustment 例外保留符号）。
 
 ### 4. Notion 数据同步 (P2)
 

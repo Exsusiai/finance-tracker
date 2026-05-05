@@ -1,7 +1,7 @@
 # 技术选型 (TECH_STACK)
 
 > Finance Tracker — 个人资金管理与记账系统
-> 决策日期: 2026-05-01
+> 创建日期: 2026-05-01 · 最后修订: 2026-05-05
 
 本文档记录 P0 阶段所有技术选型与决策依据。所有选型遵循 **本地优先 / 单用户 / 务实不过度设计** 三大原则。
 
@@ -73,32 +73,36 @@
 
 ---
 
-## 4. PDF 账单解析: **pdfplumber (主) + pypdf (备) + 银行专用解析器**
+## 4. PDF 账单解析: **pdfplumber (主) + 银行专用解析器** + **column-aware 解析**
 
 **策略**
 
-中国/欧洲银行账单 PDF 结构差异极大,**没有银行通用解析器**,必须按行做适配。
+银行账单 PDF 结构差异极大,**没有银行通用解析器**,必须按行做适配。当前实现按用户实际需求收敛到 5 家欧洲银行,中国银行解析器（icbc/cmb/ccb/boc）已从 detector 移除。
 
 ```
 services/pdf_parser/
-├── base.py              # 抽象 BankStatementParser 基类
-├── detector.py          # 通过文本特征自动识别银行
-├── parsers/
-│   ├── icbc.py          # 工商银行
-│   ├── ccb.py           # 建设银行
-│   ├── cmb.py           # 招商银行
-│   ├── boc.py           # 中国银行
-│   ├── n26.py           # 欧洲 N26
-│   ├── revolut.py       # Revolut
-│   └── generic.py       # 通用兜底 (启发式)
+└── engine.py            # 单文件实现：detector + 5 家 parser + 共享 helper
+                         #  - _parse_amex_de
+                         #  - _parse_n26
+                         #  - _parse_revolut         (text-only, 兜底)
+                         #  - _parse_revolut_columns (column-aware, 主用)
+                         #  - _parse_tfbank
+                         #  - _parse_advanzia
+                         #  - _parse_generic         (未识别银行兜底)
 ```
+
+**两条解析路径**
+
+1. **text-based regex**（4 家：AMEX-DE / N26 / TFBank / Advanzia）— pdfplumber `extract_text()` → 行级 regex 匹配 → `_make_tx`
+2. **column-aware**（Revolut 专用）— pdfplumber `extract_words()` 拿到 `(text, x0, x1, top, bottom)` → 按 `top` 分组成行 → 按 `x0` 落入哪个列（Money out 320-400 / Money in 405-475 / Balance 480-580）来确定方向。**纯 text 无法区分 Revolut 的多 product 双 section** 场景
 
 **库选择**
 
-- **pdfplumber**: 主力,表格抽取最强,支持中文。
-- **pypdf**: 部分加密 PDF / 元数据兜底。
-- **camelot-py**: 复杂表格场景备用 (依赖较重,按需引入)。
-- **pdf2image + tesseract**: 图片型 PDF 兜底 OCR (P1 阶段)。
+- **pdfplumber**: 主力，文本 + word 坐标 + 表格抽取
+- **pypdf**: pdfplumber 的依赖（部分加密 PDF / 元数据兜底）
+- **pdf2image + tesseract**: 图片型 PDF 兜底 OCR（P2-3 阶段，未实施）
+
+**MCP server 复用**：mcp-server 直接 `await _backend_parse(...)` 复用 backend 同一份解析器（消除了之前 mcp 内置简化 parser 的漂移）。
 
 ---
 
@@ -106,18 +110,68 @@ services/pdf_parser/
 
 | 资产类型 | 数据源 | 库 / 端点 | 限频 |
 |---------|--------|-----------|------|
-| 加密货币 | CoinGecko Free | `pycoingecko` | 30 calls/min |
+| 加密货币 | CoinGecko Free | `pycoingecko` / `httpx` | 30 calls/min |
 | A 股 | Yahoo Finance | `yfinance` (代码格式 `600519.SS` / `000001.SZ`) | 宽松 |
 | 欧股/美股 | Yahoo Finance | `yfinance` | 宽松 |
-| 汇率 | exchangerate.host (免费) + 备份 open.er-api.com | `httpx` 直接请求 | 充足 |
-| 黄金 (XAU) | metals.live / goldapi.io 备份 | `httpx` | 看具体源 |
+| 汇率 | **open.er-api.com**（主，无需 key）+ frankfurter.app (兜底) | `httpx` 直接请求 | 充足 |
+| 黄金 (XAU) | goldapi.io | `httpx` | 需用户申请 key（P2-8） |
 | RMB 现金 | 无需取价 (=1) | — | — |
+
+> ⚠️ 历史决策 `exchangerate.host` 已收费需 key，**已切换到 `open.er-api.com`**（free no-key），fallback 用 frankfurter.app。
 
 **架构原则**
 
-- 所有市场数据 **抽象为 `MarketDataProvider` 接口**,价格实现可插拔
-- 后端通过 APScheduler 定时拉取 (5 min ~ 1 h 不等),写入 `market_prices` 表
+- 后端 `services/market_data/scheduler.py` 通过 **APScheduler `AsyncIOScheduler`** 注册 3 个独立 job：crypto（5min）/ stocks（15min）/ fx（1h）
+- 每个 job 用独立 `AsyncSession`，不依赖 FastAPI 请求生命周期
+- 启动后 15s 首次跑（避免阻塞 startup），之后按 interval 循环
+- `GET /api/v1/system/scheduler/status` 暴露 next_run_time + last_run 结果
 - 估值计算只读本地表 → 离线也能工作
+
+## 5.5 跨账户转账识别 / 子账户处理
+
+> 用户 2026-05-05 提出，已成为核心反双计能力。详见 `docx/REQUIREMENT_GAP.md` §1.4。
+
+```
+services/transfer_matcher/engine.py
+├── find_transfer_pairs()         # 评分配对（金额 50 + 日期 0..30 + 描述/IBAN +0..50）
+├── pair_transactions()           # 标 type=transfer + transfer_direction in/out
+├── detect_same_account_pairs()   # L3: 同账户 ±X 金额 + 描述相似度匹配
+├── mark_subaccount_pair()        # 标 metadata.subaccount=true（视图跳过）
+└── auto_pair_after_import()      # PDF 上传后串接两步
+```
+
+**置信度评分** (max 100)：
+- amount-equal: 50（必要门槛）
+- date 0/1/2/3 days: 30/20/10/5
+- IBAN match (in/out_account.iban 出现在对方描述里): 40 / 20
+- account name match: 20 / 10
+- 自我转账名（账户持有人姓名出现在两边，需在 `.env` 配置 `FINANCE_TRACKER_OWNER_NAMES`）: 10
+- 转账动词提示: 5
+
+阈值：`SCORE_THRESHOLD_AUTO=75` 自动配对，`SCORE_THRESHOLD_SUGGEST=50` 进 suggestions 待人工。
+
+## 5.6 余额视图 `v_account_balance`
+
+启动时由 `app/main.py` lifespan 创建/重建：
+
+```sql
+CREATE VIEW v_account_balance AS
+SELECT a.id, a.name, a.currency,
+  a.initial_balance + COALESCE(SUM(
+    CASE
+      WHEN json_extract(t.metadata_json, '$.subaccount') = 1 THEN 0  -- 子账户互转跳过
+      WHEN t.type = 'transfer' AND json_extract(t.metadata_json, '$.transfer_direction') = 'in'  THEN  ABS(t.amount)
+      WHEN t.type = 'transfer' AND json_extract(t.metadata_json, '$.transfer_direction') = 'out' THEN -ABS(t.amount)
+      WHEN t.type = 'transfer'   THEN -ABS(t.amount)  -- 未配对 transfer 默认出账
+      WHEN t.type = 'expense'    THEN -ABS(t.amount)
+      WHEN t.type = 'income'     THEN  ABS(t.amount)
+      WHEN t.type = 'adjustment' THEN  t.amount       -- adjustment 保留原符号
+    END
+  ), 0) AS balance
+FROM accounts a LEFT JOIN transactions t ON ...
+```
+
+**重要约定**：`transactions.amount` 始终存正绝对值，方向由 `type` 决定。`adjustment` 例外（保留符号）。
 
 ---
 
@@ -158,25 +212,27 @@ services/pdf_parser/
 
 ---
 
-## 9. 核心依赖清单
+## 9. 核心依赖清单（实测可跑通）
 
-**Backend (Python)**
+**Backend (Python 3.11+)**
 
 ```
 fastapi >= 0.115
 uvicorn[standard]
-sqlalchemy >= 2.0
-alembic
+sqlalchemy[asyncio] >= 2.0
+aiosqlite
+alembic                  # 已装但未启用，用 idempotent ALTER TABLE 顶住（P2-4）
 pydantic >= 2.6
 pydantic-settings
-pdfplumber
+pdfplumber               # 主 PDF parser，含 word-level 坐标
 pypdf
 yfinance
-pycoingecko
+pycoingecko              # 也可直接 httpx
 httpx
-apscheduler
-structlog
-python-multipart    # PDF 上传
+apscheduler              # AsyncIOScheduler，市场数据定时刷新
+structlog                # 结构化日志（事件名 snake_case）
+python-multipart         # PDF 上传
+cryptography             # bank_sync 字段加密
 ```
 
 **Frontend (TypeScript)**

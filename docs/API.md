@@ -1,8 +1,9 @@
 # API 设计文档
 
 > Finance Tracker REST API — v1
-> 基地址: `http://localhost:8000/api/v1`
-> 鉴权: `Authorization: Bearer <FINANCE_TRACKER_API_TOKEN>` (除 `/health` 外全部要求)
+> 基地址: `http://localhost:8010/api/v1` (本地开发默认端口)
+> 鉴权: `Authorization: Bearer <FINANCE_TRACKER_API_TOKEN>` (除 `/health` 外全部要求；本地默认 `AUTH_DISABLED=true` 跳过)
+> 最后修订: 2026-05-05
 
 ## 通用约定
 
@@ -18,16 +19,11 @@
 { "success": false, "error": { "code": "INVALID_INPUT", "message": "...", "details": {...} } }
 ```
 
-### 分页
-
-列表端点使用 cursor + limit:
-- 请求: `?limit=50&cursor=<opaque>`
-- 响应 `meta`: `{ "next_cursor": "...", "total": 1234 }`
-
 ### 时间/金额
 
-- 时间统一 ISO-8601 UTC: `2026-05-01T10:30:00Z`
+- 时间统一 ISO-8601: `2026-05-01T10:30:00Z`
 - 金额统一字符串格式以保留精度: `"1234.56789012"`
+- `transactions.amount` **始终存正绝对值**，方向由 `type` 决定（`adjustment` 例外，保留符号）
 - 币种 ISO-4217 (大写): `"CNY"`、`"EUR"`、`"BTC"`
 
 ---
@@ -37,85 +33,151 @@
 | Method | Path        | 说明                  | 鉴权 |
 |--------|-------------|-----------------------|------|
 | GET    | `/health`   | 服务存活检查          | 否   |
-| GET    | `/version`  | 后端版本与构建信息    | 否   |
 
 ---
 
 ## 2. 账户 Accounts
 
-| Method | Path                      | 说明                   |
-|--------|---------------------------|------------------------|
-| GET    | `/accounts`               | 列出所有账户           |
-| POST   | `/accounts`               | 创建账户               |
-| GET    | `/accounts/{id}`          | 单个账户详情           |
-| PATCH  | `/accounts/{id}`          | 更新账户               |
-| DELETE | `/accounts/{id}`          | 软删除账户             |
-| GET    | `/accounts/{id}/balance`  | 当前余额 (来自 view)   |
-| GET    | `/accounts/balances`      | 全账户余额一次返回     |
+| Method | Path                              | 说明                                        |
+|--------|-----------------------------------|---------------------------------------------|
+| GET    | `/accounts`                       | 列出所有账户                                |
+| POST   | `/accounts`                       | 创建账户                                    |
+| GET    | `/accounts/{id}`                  | 单个账户详情                                |
+| PATCH  | `/accounts/{id}`                  | 更新账户 (含 IBAN / 子账户清单)             |
+| DELETE | `/accounts/{id}`                  | 软删除账户                                  |
+| GET    | `/accounts/{id}/balance`          | 当前余额 (来自 `v_account_balance` 视图)    |
+| GET    | `/accounts/balances`              | 全账户余额一次返回                          |
+| POST   | `/accounts/{id}/adjust-balance`   | 余额校准（自动建一笔 `adjustment` 交易）    |
 
 **创建请求示例**
 ```json
 {
-  "name": "招行储蓄卡",
+  "name": "Main Checking",
   "type": "bank",
-  "institution": "招商银行",
-  "account_number": "**** 1234",
-  "currency": "CNY",
-  "initial_balance": "10000.00"
+  "institution": "<bank-name>",
+  "account_number": "<masked-account-number>",
+  "iban": "<IBAN>",
+  "currency": "EUR",
+  "initial_balance": "1500.00",
+  "metadata_json": "{\"subaccount_names\": [\"Investing\", \"Dream List\"]}"
 }
 ```
+
+**`adjust-balance` 请求**
+```json
+{
+  "target_balance": "1234.56",
+  "note": "校准至银行 App 显示",
+  "occurred_at": "2026-05-05T10:00:00Z"
+}
+```
+返回新的 `BalanceOut`。系统自动创建 `type=adjustment` 交易，金额 = `target − current`。
 
 ---
 
 ## 3. 分类 Categories
 
-| Method | Path                  | 说明                        |
-|--------|-----------------------|-----------------------------|
-| GET    | `/categories`         | 列出全部 (支持 `?kind=`)    |
-| POST   | `/categories`         | 创建分类                    |
-| PATCH  | `/categories/{id}`    | 更新分类                    |
-| DELETE | `/categories/{id}`    | 删除 (system 分类禁止)      |
-| GET    | `/categories/tree`    | 返回带子分类的树形结构      |
+| Method | Path                  | 说明                                        |
+|--------|-----------------------|---------------------------------------------|
+| GET    | `/categories`         | 列出全部 (支持 `?kind=expense\|income\|transfer`) |
+| GET    | `/categories/tree`    | 返回带子分类的树形结构                      |
+| POST   | `/categories`         | 创建分类                                    |
+| PATCH  | `/categories/{id}`    | 更新分类                                    |
+| DELETE | `/categories/{id}`    | 删除 (system 分类禁止)                      |
 
 ---
 
 ## 4. 交易 Transactions
 
-| Method | Path                              | 说明                          |
-|--------|-----------------------------------|-------------------------------|
-| GET    | `/transactions`                   | 列表 (过滤参数见下)           |
-| POST   | `/transactions`                   | 手动录入交易                  |
-| POST   | `/transactions/batch`             | 批量录入 (PDF 导入用)         |
-| GET    | `/transactions/{id}`              | 单条详情                      |
-| PATCH  | `/transactions/{id}`              | 更新 (常用于修改分类)         |
-| DELETE | `/transactions/{id}`              | 软删除                        |
-| POST   | `/transactions/{id}/categorize`   | 重新跑分类规则                |
+### 基础 CRUD
 
-**列表过滤参数**
-- `account_id` / `category_id` / `type` (expense/income/transfer)
+| Method | Path                                    | 说明                                     |
+|--------|-----------------------------------------|------------------------------------------|
+| GET    | `/transactions`                         | 列表 (过滤参数见下)                      |
+| POST   | `/transactions`                         | 手动录入交易 (触发 cashflow 重算)        |
+| POST   | `/transactions/batch`                   | 批量录入 (PDF 导入用)                    |
+| GET    | `/transactions/{id}`                    | 单条详情                                 |
+| PATCH  | `/transactions/{id}`                    | 更新 (常用于改分类，触发学习+级联)       |
+| DELETE | `/transactions/{id}`                    | 软删除                                   |
+| POST   | `/transactions/{id}/categorize`         | 重新跑分类规则                           |
+
+### Inbox 工作流
+
+| Method | Path                                              | 说明                                                  |
+|--------|---------------------------------------------------|-------------------------------------------------------|
+| GET    | `/transactions/inbox/list`                        | 待确认列表 (`is_pending=true`)                        |
+| POST   | `/transactions/inbox/{id}/confirm`                | 用户确认并归类（触发学习+级联）                       |
+
+**`/inbox/{id}/confirm` 请求**
+```json
+{ "category_id": 12, "user_note": "每月房租，房东微信" }
+```
+副作用：
+1. 设 `category_id` + `user_note` + `is_pending=false`
+2. 调用 `learn_from_user_assignment`：从 `description` 提取关键词新建/加强 `categorization_rules`
+3. 调用 `apply_to_similar_pending`：同 `description` 的兄弟交易级联归类（保护 `source!=manual`、`type!=transfer`、`type==seed.type`）
+4. cashflow 重算受影响月份
+
+> **自动通过 inbox**：PDF 导入时若命中规则 → 直接 `is_pending=false` 入账，不再要求人工确认。
+
+### 跨账户转账识别
+
+| Method | Path                                                      | 说明                                                |
+|--------|-----------------------------------------------------------|-----------------------------------------------------|
+| GET    | `/transactions/transfers/suggestions`                     | 候选转账配对列表（评分 ≥ 50 但未自动配对）         |
+| POST   | `/transactions/{id}/mark-transfer?counter_transaction_id=N` | 用户手动确认配对（写入 `paired_with_tx_id`）       |
+
+**评分算法（`transfer_matcher`）**：
+- 金额相同 +50；±0.5% 浮动 +30
+- 日期相同 +30；±1 天 +20；±3 天 +10
+- 描述提示词 (transfer/sepa/wire/...) 0..30
+- IBAN 命中对方账户 +40
+- **阈值 75 自动配对**；50..74 进入 suggestions 列表等用户确认
+
+### 列表过滤参数
+
+- `account_id` / `category_id` / `type` (expense/income/transfer/adjustment)
 - `from_date` / `to_date` (YYYY-MM-DD)
 - `min_amount` / `max_amount`
 - `search` (在 description / counterparty 中模糊搜索)
-- `tags` (CSV)
-- `limit` / `cursor`
+- `is_pending` (true / false)
+- `limit` / `offset`
 
-**列表项示例**
+### 列表项示例
+
 ```json
 {
   "id": 42,
+  "account_id": 1,
+  "account_name": "Main Checking",
+  "counter_account_id": null,
+  "category_id": 5,
+  "category_name": "餐饮",
   "occurred_at": "2026-04-28T19:30:00Z",
-  "account": { "id": 1, "name": "招行储蓄卡" },
-  "category": { "id": 5, "name": "餐饮" },
-  "amount": "-128.50",
-  "currency": "CNY",
-  "base_amount": "-128.50",
+  "amount": "12.50",
+  "currency": "EUR",
+  "base_amount": "98.00",
   "type": "expense",
-  "description": "海底捞",
-  "counterparty": "海底捞火锅",
+  "description": "GROCERY STORE",
+  "raw_description": "Card payment GROCERY STORE 28.04",
+  "tags": [],
   "source": "pdf_import",
-  "tags": ["朋友聚餐"]
+  "pdf_import_id": 7,
+  "is_pending": false,
+  "metadata_json": "{\"subaccount\": false, \"transfer_direction\": null}",
+  "user_note": null,
+  "created_at": "2026-04-29T08:00:00Z",
+  "updated_at": "2026-04-29T08:00:00Z"
 }
 ```
+
+`metadata_json` 约定字段：
+- `subaccount` (bool) — 同行子账户搬运（不影响余额）
+- `transfer_direction` (`"in" | "out"`) — 配对后赋值
+- `cross_bank_hint` (bool) — 跨行预标
+- `matched` (bool) — 已配对
+- `source` (`"keyword" | "user_list" | "amount_match"`) — subaccount 三层识别来源
+- `paired_with_tx_id` (int) — 对端交易 ID
 
 ---
 
@@ -123,22 +185,34 @@
 
 | Method | Path                              | 说明                                           |
 |--------|-----------------------------------|------------------------------------------------|
-| POST   | `/statements/upload`              | 上传 PDF (multipart/form-data, field=`file`)   |
+| POST   | `/statements/upload`              | 上传 PDF (multipart/form-data, field=`file`, query `?account_id=N`) |
 | GET    | `/statements`                     | 历史导入批次列表                               |
 | GET    | `/statements/{id}`                | 批次详情 (含已生成的 transactions)             |
 | POST   | `/statements/{id}/reparse`        | 触发重新解析 (用于解析器升级后)                |
 | POST   | `/statements/{id}/confirm`        | 确认入账 (将 pending 交易转为正式)             |
 | DELETE | `/statements/{id}`                | 撤销整个批次的所有 transactions                |
 
+**支持银行**：AMEX-DE / N26 / Revolut / TFBank / Advanzia (5 家欧洲银行)
+- Revolut 使用 column-aware 解析器（按 Money out / Money in 列定位）
+- 其他使用 text-regex 解析器
+- 上传时 SHA-256 哈希去重
+
 **上传响应示例**
 ```json
 {
   "id": 7,
-  "filename": "cmb_2026_04.pdf",
-  "detected_bank": "cmb",
+  "filename": "statement_2026_04.pdf",
+  "file_hash": "abc...",
+  "file_size": 124567,
+  "detected_bank": "<bank-key>",
+  "parser_version": "<bank-key>-v1",
+  "account_id": 1,
+  "statement_period": "2026-04",
   "transactions_count": 42,
   "status": "success",
-  "preview": [ { "...": "前 5 条 transactions" } ]
+  "preview": [ /* 前 5 条 TransactionOut */ ],
+  "created_at": "2026-04-29T08:00:00Z",
+  "updated_at": "2026-04-29T08:00:00Z"
 }
 ```
 
@@ -146,18 +220,29 @@
 
 ## 6. 资产与持仓 Assets / Holdings
 
+### Assets
+
 | Method | Path                              | 说明                                 |
 |--------|-----------------------------------|--------------------------------------|
 | GET    | `/assets`                         | 资产定义列表 (?asset_class=crypto)   |
+| GET    | `/assets/search`                  | CoinGecko + yfinance 联合搜索 (`?q=BTC`) |
 | POST   | `/assets`                         | 新增资产定义                         |
 | GET    | `/assets/{id}`                    | 资产详情 + 最新价                    |
+| PATCH  | `/assets/{id}`                    | 更新                                 |
+| DELETE | `/assets/{id}`                    | 删除                                 |
+
+### Holdings & Portfolio
+
+| Method | Path                              | 说明                                 |
+|--------|-----------------------------------|--------------------------------------|
 | GET    | `/holdings`                       | 全部持仓 + 实时估值                  |
+| GET    | `/holdings/{id}`                  | 单个持仓详情                         |
 | POST   | `/holdings`                       | 新增持仓                             |
-| PATCH  | `/holdings/{id}`                  | 更新数量 (链上余额同步可走此接口)    |
+| PATCH  | `/holdings/{id}`                  | 更新数量 / 成本                      |
 | DELETE | `/holdings/{id}`                  | 删除持仓                             |
-| GET    | `/portfolio/summary`              | 总资产估值 (折算到基础币种)          |
-| GET    | `/portfolio/timeseries`           | 历史净值曲线 (?range=1m\|3m\|1y\|all)|
-| GET    | `/portfolio/breakdown`            | 按类别 / 币种饼图数据                |
+| GET    | `/holdings/portfolio/summary`     | 总资产估值 (折算到基础币种)          |
+| GET    | `/holdings/portfolio/breakdown`   | 按类别 / 币种饼图数据                |
+| GET    | `/holdings/portfolio/net-worth`   | 净资产 = 现金 + 投资（按币种细分）   |
 
 **Portfolio Summary 响应**
 ```json
@@ -167,16 +252,32 @@
   "as_of": "2026-05-01T10:30:00Z",
   "by_class": {
     "cash":     "100000.00",
-    "a_share":  "300000.00",
-    "eu_stock": "200000.00",
     "crypto":   "500000.00",
-    "gold":     "134567.89"
+    "us_stock": "284567.89",
+    "eu_stock": "200000.00",
+    "gold":     "150000.00"
   },
   "by_currency": {
     "CNY": "650000.00",
     "EUR": "300000.00",
     "USD": "284567.89"
   }
+}
+```
+
+**Net Worth 响应**
+```json
+{
+  "base_currency": "CNY",
+  "cash_total": "350000.00",
+  "investment_total": "884567.89",
+  "net_worth": "1234567.89",
+  "cash_by_currency": {
+    "CNY": { "amount": "120000.00", "base_amount": "120000.00" },
+    "EUR": { "amount": "30000.00",  "base_amount": "230000.00" }
+  },
+  "investment_by_currency": { "USD": "284567.89", "CNY": "600000.00" },
+  "as_of": "2026-05-01T10:30:00Z"
 }
 ```
 
@@ -191,6 +292,8 @@
 | GET    | `/market/refresh/status`              | 上次刷新状态                             |
 | GET    | `/market/fx`                          | 汇率快照 (?base=CNY&quote=EUR,USD,JPY)   |
 
+**FX 折算策略**：先 direct → inverse → 三角换算（依次经 CNY / USD / EUR pivot）
+
 ---
 
 ## 8. 现金流分析 Cash Flow
@@ -201,6 +304,8 @@
 | GET    | `/cashflow/by-category`           | 按分类聚合 (?period=2026-04)          |
 | GET    | `/cashflow/timeseries`            | 收入/支出/储蓄三线时间序列            |
 | POST   | `/cashflow/recompute`             | 触发指定区间快照重算                  |
+
+> 数据源：`cash_flow_snapshots` 表（写时计算）。每次 transaction CRUD / inbox confirm / adjust-balance 都会自动重算受影响月份。
 
 **月度聚合响应示例**
 ```json
@@ -215,7 +320,8 @@
       "餐饮":   "-2300.00",
       "交通":   "-800.00",
       "工资":   "25000.00"
-    }
+    },
+    "by_account": { "Main Checking": "...", "Savings": "..." }
   }
 ]
 ```
@@ -233,35 +339,76 @@
 | POST   | `/rules/test`                     | 测试规则 (传 description, 返回命中)     |
 | POST   | `/rules/apply-all`                | 对历史 transactions 重跑规则            |
 
+**学习机制**：
+- 用户在 inbox confirm / 列表 PATCH 改分类时 → 自动从 `description` 提取关键词建/加强规则
+- `hit_count` 字段记录该规则命中次数
+
 ---
 
 ## 10. 系统/配置 System
 
-| Method | Path                          | 说明                                 |
-|--------|-------------------------------|--------------------------------------|
-| GET    | `/settings`                   | 当前配置 (基础币种 / 行情源 / 排程)  |
-| PATCH  | `/settings`                   | 更新配置                             |
-| POST   | `/system/backup`              | 触发数据库备份                       |
-| GET    | `/system/backups`             | 列出已有备份文件                     |
+| Method | Path                          | 说明                                    |
+|--------|-------------------------------|-----------------------------------------|
+| GET    | `/system/settings`            | 当前配置 (基础币种 / 行情刷新周期)      |
+| PATCH  | `/system/settings`            | 更新配置                                |
+| POST   | `/system/backup`              | 触发数据库备份                          |
+| GET    | `/system/backups`             | 列出已有备份文件                        |
+| GET    | `/system/scheduler/status`    | APScheduler 任务运行状态 + 下次触发时间 |
 
 ---
 
-## 11. MCP Tools (非 HTTP, stdio)
+## 11. 银行直连 Bank Sync (scaffold, P2-1)
 
-由 `mcp-server/` 进程暴露,Agent 可调用以下 tool:
+| Method | Path                                                  | 说明                                  |
+|--------|-------------------------------------------------------|---------------------------------------|
+| POST   | `/bank-sync/setup`                                    | GoCardless 初始化（保存 secret_id/key）|
+| GET    | `/bank-sync/institutions`                             | 列出支持的银行（?country=DE）          |
+| POST   | `/bank-sync/connections`                              | 创建连接（返回 OAuth 跳转链接）        |
+| GET    | `/bank-sync/connections`                              | 已有连接列表                          |
+| GET    | `/bank-sync/connections/{id}`                         | 单个连接详情                          |
+| PATCH  | `/bank-sync/connections/{id}`                         | 更新连接（绑定 account_id 等）         |
+| DELETE | `/bank-sync/connections/{id}`                         | 删除连接                              |
+| POST   | `/bank-sync/callback`                                 | OAuth 回调端点                        |
+| POST   | `/bank-sync/connections/{id}/sync`                    | 手动触发同步                          |
+| GET    | `/bank-sync/status`                                   | 整体同步状态                          |
+| GET    | `/bank-sync/providers`                                | 列出可用 provider（GoCardless / Tink） |
 
-| Tool 名                       | 功能                                      |
-|-------------------------------|-------------------------------------------|
-| `query_balance`               | 查询账户余额                              |
-| `query_transactions`          | 查询交易 (过滤条件传 JSON)                |
-| `import_pdf_statement`        | 接收 PDF 字节流并触发解析+入库            |
-| `query_asset_value`           | 查询单资产实时估值                        |
-| `query_portfolio_summary`     | 查询总资产汇总                            |
-| `categorize_transaction`      | 给一笔交易建议分类                        |
-| `get_cashflow_summary`        | 获取月度现金流摘要                        |
-| `add_transaction`             | Agent 代用户记一笔账                      |
+> **当前状态**：scaffold 完成，未联调。详见 `docs/BANK_API_DESIGN.md`。
 
-每个 tool 返回 `{ "ok": true, "data": ... }` 或 `{ "ok": false, "error": "..." }`,内部直接调用后端 service 层 (无 HTTP 跨进程)。
+---
+
+## 12. Notion 同步 Notion Sync (P2-3)
+
+| Method | Path                              | 说明                                       |
+|--------|-----------------------------------|--------------------------------------------|
+| POST   | `/notion/sync`                    | 全量同步 (transactions + cashflow + assets)|
+| POST   | `/notion/sync/transactions`       | 仅同步交易                                 |
+| POST   | `/notion/sync/cashflow`           | 仅同步月度现金流快照                       |
+| POST   | `/notion/sync/assets`             | 仅同步资产持仓汇总                         |
+| POST   | `/notion/setup`                   | 一键创建 Notion 数据库                     |
+| GET    | `/notion/status`                  | 上次同步时间 + 状态                        |
+
+> **当前状态**：scaffold 完成，未联调。
+
+---
+
+## 13. MCP Tools (非 HTTP, stdio)
+
+由 `mcp-server/` 进程暴露，Agent 可调用以下 tool（共 7 个，已 6 轮回归测试 9 bug 全修）：
+
+| Tool 名                       | 功能                                              |
+|-------------------------------|---------------------------------------------------|
+| `get_total_assets`            | 总资产估值 + 按类别/币种细分                      |
+| `get_transactions`            | 查询交易（支持过滤条件 JSON）                     |
+| `add_transaction`             | Agent 代用户记一笔账                              |
+| `parse_bank_statement`        | 接收 PDF 字节流并触发解析+入库                    |
+| `get_cashflow`                | 月度现金流摘要                                    |
+| `get_asset_allocation`        | 资产配置饼图数据（按类别 / 币种）                 |
+| `search_transactions`         | 关键词搜索交易                                    |
+
+每个 tool 返回结构化 JSON（`{ ok: true, data }` 或 `{ ok: false, error }`），内部直接调用后端 service 层（无 HTTP 跨进程）。
+
+详见 `docx/MCP_TEST_REPORT.md`。
 
 ---
 

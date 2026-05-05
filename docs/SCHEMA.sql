@@ -23,11 +23,14 @@ CREATE TABLE accounts (
     type            TEXT NOT NULL,                     -- bank | credit_card | brokerage | crypto_wallet | cash | other
     institution     TEXT,                              -- "招商银行", "Binance", "N26"
     account_number  TEXT,                              -- 后四位或别名 (隐私安全)
+    iban            TEXT,                              -- 完整 IBAN（或前缀 ≥8 字符），transfer_matcher 用其判定内部转账
     currency        TEXT NOT NULL,                     -- 主币种 ISO-4217: CNY / EUR / USD / BTC ...
     initial_balance NUMERIC(20, 8) NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,        -- 0/1 boolean
     notes           TEXT,
-    metadata_json   TEXT,                              -- JSON 任意扩展字段
+    metadata_json   TEXT,                              -- JSON 任意扩展字段，约定字段：
+                                                       --   subaccount_names: [str]  per-account 用户子账户名清单
+                                                       --     PDF parser 看到这些字符串自动标 subaccount=true
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at      TEXT,
@@ -91,13 +94,14 @@ CREATE TABLE transactions (
     category_id         INTEGER,
     occurred_at         TEXT NOT NULL,                 -- 交易发生时间 (ISO-8601)
     posted_at           TEXT,                          -- 入账时间 (信用卡场景)
-    amount              NUMERIC(20, 8) NOT NULL,       -- 主币种金额 (支出负 / 收入正)
+    amount              NUMERIC(20, 8) NOT NULL,       -- 始终存正绝对值，方向由 type 决定
+                                                       --   （adjustment 例外，保留原符号）
     currency            TEXT NOT NULL,
     fx_rate_to_base     NUMERIC(20, 8),                -- 折算到基准币种 (CNY) 的汇率快照
     base_amount         NUMERIC(20, 8),                -- = amount * fx_rate_to_base
     type                TEXT NOT NULL,                 -- expense | income | transfer | adjustment
     description         TEXT,                          -- 商户名 / 备注
-    raw_description     TEXT,                          -- 原始账单文本 (未清洗)
+    raw_description     TEXT,                          -- 原始账单文本 (未清洗，含 Revolut 续行 IBAN 等)
     counterparty        TEXT,
     location            TEXT,
     tags_json           TEXT,                          -- JSON array ["差旅","报销"]
@@ -105,7 +109,13 @@ CREATE TABLE transactions (
     pdf_import_id       INTEGER,
     external_id         TEXT,                          -- 银行流水号 (去重用)
     is_pending          INTEGER NOT NULL DEFAULT 0,
-    metadata_json       TEXT,
+    metadata_json       TEXT,                          -- 约定字段（v_account_balance 视图依赖）：
+                                                       --   subaccount: bool         同银行内子账户互转，视图跳过余额
+                                                       --   transfer_direction: 'in'|'out'  跨账户配对后的方向
+                                                       --   cross_bank_hint: bool    PDF parser 预标的跨行 cue
+                                                       --   matched / source         配对来源（keyword/user_list/amount_match）
+                                                       --   paired_with_tx_id: int   配对的对方 tx
+    user_note           TEXT,                          -- 用户在 inbox 确认时写的备注（供 LLM few-shot 上下文）
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at          TEXT,

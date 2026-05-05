@@ -1,12 +1,12 @@
-# 需求 vs 实现 — Gap 分析（修订版）
+# 需求 vs 实现 — Gap 分析
 
-> 基于 PRD v1.0 与当前代码 (master @ 2026-05-03) 的对比
-> **本次修订承认上一版高估了实现度**：把"代码 scaffold 存在"误判为"功能可用"。本版按"是否真正闭环并验证过"重新分级。
+> 修订日期: 2026-05-05
+> 基于 PRD v1.1 与当前代码 (`master` @ ad84112) 的对比
 >
 > 图例：
 > - ✅ **A 闭环可用** — 代码到位且基本路径已验证
-> - ⚠️ **B 半成品 / 文档与代码不符** — 之前被错标为 ✅，实际有核心缺口
-> - ⏸️ **C scaffold + 等待许可启用** — 代码完整但未联调或开关默认关
+> - ⚠️ **B 半成品** — 有核心缺口
+> - ⏸️ **C scaffold + 等待启用** — 代码完整但未联调或开关默认关
 > - ❌ **D 未实现** — PRD 要求但代码完全没有
 > - 🛠 **E 工程化债务** — 部署/测试/迁移配套
 
@@ -15,60 +15,84 @@
 ## 1. 自动记账
 
 ### 1.1 手动导入 PDF
+
 | 子需求 | 等级 | 证据 / 缺口 |
 |---|---|---|
-| 上传入口 + SHA-256 去重 | ✅ A | `frontend/src/components/pdf-import-panel.tsx`, `pdf_imports.file_hash` UNIQUE |
-| 银行自动检测 (`_detect_bank`) | ✅ A | `pdf_parser/engine.py` 文本特征匹配 |
-| **本人需要的 5 家**（AMEX-DE / N26 / Revolut / TFBank / Advanzia）解析器 | ✅ A | 2026-05-03 全部用 `data/inputpdf_reference/` 真实样本回归通过：识别 + 期间 + 交易数 + 收支方向都对得上 PDF 抬头汇总。ICBC/CMB/CCB/BOC 已从 detector 移除（非需求） |
-| 扫描件 OCR 兜底 | ❌ D | TECH_STACK 列为 P1，未实现 |
-| 上传后预览 → 用户确认入库 | ⚠️ B | `is_pending` 字段在，但前端"待确认"工作流是否完整未核 |
+| 上传入口 + SHA-256 去重 | ✅ A | `pdf-import-panel.tsx`, `pdf_imports.file_hash` UNIQUE |
+| 银行检测（BIC / 域名 / 法定名） | ✅ A | `pdf_parser/engine.py::_detect_bank` |
+| **5 家银行解析器**（AMEX-DE / N26 / Revolut / TFBank / Advanzia） | ✅ A | 真实样本回归通过 |
+| **Revolut column-aware parser**（Money out / Money in 列定位） | ✅ A | 按 `word.x0` 坐标，纯 text 无法区分双 product |
+| Revolut 续行合并（Reference / From / IBAN 进 raw_description） | ✅ A | matcher 后续可识别 IBAN |
+| 上传后预览 → 用户确认（inbox） | ✅ A | InboxPanel + 数量徽章 |
+| 扫描件 OCR 兜底 | ❌ D | 当前 5 家 PDF 都是文本型；P2-3 |
 
 ### 1.2 银行直连
+
 | 子需求 | 等级 | 证据 / 缺口 |
 |---|---|---|
-| GoCardless / Nordigen 接入 | ⏸️ C | `services/bank_sync/engine.py` 428 行 + `api/v1/bank_sync.py` 10+ 端点 + `bank_connections` 表，**未联调**，`BANK_SYNC_ENABLED=false` |
-| **链上加密钱包余额同步**（**只填公钥**即自动读余额） | ❌ D | `services/bank_sync/crypto.py` 仅 **55 行 stub**。PRD 2026-05-03 明确：新建"加密钱包"账户时输入钱包地址即可，软件自动列出该地址下所有原生币 + token 余额，无需手动添加资产 |
+| GoCardless 接入 | ⏸️ C | `services/bank_sync/engine.py` 428 行 + 10+ endpoints；`BANK_SYNC_ENABLED=false`。**P1-2** |
+| **链上加密钱包余额同步**（公钥即同步） | ❌ D | `crypto.py` 仅 55 行 stub。方案见 `docx/CRYPTO_WALLET_PLAN.md`。**P1-4** |
+| **CEX API**（Binance / Bitget）只读余额 | ❌ D | 与 P1-4 一起做 |
 
 ### 1.3 分类
-| 子需求 | 等级 | 证据 / 缺口 |
+
+| 子需求 | 等级 | 证据 |
 |---|---|---|
-| 多级分类树 + 用户 CRUD | ✅ A | `categories.parent_id`, settings 页 |
-| 关键字 / 正则规则匹配 | ✅ A | `categorization_rules` 表 + `categorizer/engine.py` |
-| **LLM 兜底分类** | ❌ D | 用户 2026-05-04 重新强调并升级为三层管道（关键词 → LLM → 用户）。详见 `docx/CLASSIFICATION_PLAN.md`，已升级为 **P1-1a** |
-| **不确定收件箱（pending）** | ✅ A | 2026-05-04 P0-4 完成：后端 inbox API + 前端 InboxPanel + 数量徽章 + 一键确认 |
-| 用户改正分类 | ✅ A | `PATCH /api/v1/transactions/{id}` |
-| **自动学习 / 记忆** | ✅ A | 2026-05-04 P0-3 完成：`learn_from_user_assignment` 反向写规则；keyword 提取去噪；E2E 验证 1 次手动归类 → 同 PDF 内 5 笔 ESPRESSO 全部自动归并 |
-| **用户备注作为 LLM 线索**（2026-05-04 新增） | ❌ D | inbox 确认时可写备注，作为下次 LLM 推理的上下文。需扩展 `transactions.user_note`。**P1-1b** |
-| **分类知识库注入 LLM**（2026-05-04 新增） | ❌ D | 调 LLM 时把 rules + 关键词 + 用户备注作为 prompt 上下文。**P1-1c** |
-| **知识库管理 UI**（2026-05-04 新增） | ❌ D | settings 页表格列出所有备注 + 来源 + 使用次数。**P1-1d** |
-| **记账页层级化分类视图**（2026-05-04 新增） | ❌ D | 当前所有 tx 平铺不直观。重构为：选一级类目 → 看二级类目本月总额列表 → 点开看明细。**P0-7** |
+| 多级分类（一级 + 二级） | ✅ A | `categories.parent_id`；settings 页两栏 CRUD |
+| 分类种子（54 类 + 70 keywords） | ✅ A | `categorizer/seed.py`；含 expense (9 一级 30 二级) + income (1+5) + transfer (1+5) |
+| 关键词规则匹配 | ✅ A | contains / regex / exact / starts_with；priority 排序 |
+| **自动学习**（用户改分类 → 反向建规则） | ✅ A | `learn_from_user_assignment` + 关键字提取去噪 |
+| **「待确认」收件箱** | ✅ A | inbox API + InboxPanel |
+| **高置信度自动通过 inbox** | ✅ A | 命中规则 + transfer 直接 `is_pending=False` |
+| **同描述级联**（用户改 1 → 同名兄弟全跟着） | ✅ A | `apply_to_similar_pending`，含 `source!=manual` / `type!=transfer` / `type==seed.type` 等保护 |
+| **用户备注**（user_note 字段 + UI） | ✅ A | inbox 行内「+ 备注」textarea；为 LLM 上下文铺路 |
+| **内联分类编辑**（点 category 弹下拉） | ✅ A | 共享 `InlineCategoryPicker`；列表 + 分类视图明细行复用 |
+| **跨 kind 内联切换**（支出 ↔ 收入 ↔ 转账） | ✅ A | 下拉列出全部 3 个 kind；选中跨 kind 同步 PATCH `type` |
+| **LLM 兜底分类** | ❌ D | 三层管道方案见 `docx/CLASSIFICATION_PLAN.md`。**P1-1a** |
+| **知识库注入 LLM** | ❌ D | 调 LLM 时把 rules + 关键词 + 用户备注作为 prompt 上下文。**P1-1c** |
+| **知识库管理 UI** | ❌ D | settings 页表格列出所有备注。**P1-1d** |
+
+### 1.4 跨账户转账识别（PRD 隐含 + 用户 2026-05-05 明确）
+
+| 子需求 | 等级 | 证据 |
+|---|---|---|
+| transfer_matcher 服务（评分配对） | ✅ A | 金额 50 + 日期 0..30 + 描述提示 0..30 + IBAN +40，阈值 75 自动配 |
+| **IBAN 字段** + 评分 | ✅ A | `accounts.iban`；matcher 检索 description + raw_description |
+| **同账户 amount-match heuristic**（L3） | ✅ A | 同账户 / 金额相同 / ±3d / 描述相似度门槛 |
+| **子账户三层识别** | ✅ A | L1 关键词 / L2 user_list / L3 amount-match |
+| 「这是转账」内联 modal（方向 + 对方账户 + 候选配对） | ✅ A | `MarkTransferDialog` |
+| `v_account_balance` 视图按 type/方向取符号 | ✅ A | subaccount 跳过；transfer 按 `transfer_direction` 取符号；修了 expense 被加进余额的 bug |
+| 转账建议面板（中置信度待确认） | ✅ A | `/transfers/suggestions` + `TransferSuggestionsPanel` |
 
 ---
 
 ## 2. 资产实时跟踪
 
-| 子需求 | 等级 | 证据 / 缺口 |
+| 子需求 | 等级 | 证据 |
 |---|---|---|
-| 资产种类枚举（CNY/A股/欧美股/crypto/gold/cash等） | ✅ A | `AssetClass` |
-| 资产搜索 + 自动识别 | ✅ A | PROGRESS Task #12 |
+| 资产种类枚举 | ✅ A | `AssetClass` (cash / a_share / eu_stock / us_stock / crypto / gold / bond / fund / other) |
+| 资产搜索 / 自动识别 | ✅ A | CoinGecko + yfinance |
 | 持仓 CRUD | ✅ A | `api/v1/holdings.py` |
-| yfinance / CoinGecko / FX 取价**逻辑** | ✅ A | `market_data/engine.py` `refresh_all_market_data()` |
-| **价格定时自动刷新** | ✅ A | 2026-05-03 P0-1 完成：`services/market_data/scheduler.py` 注册 crypto / stocks / fx 三个 AsyncIOScheduler job；启动后 15s 首次跑，按配置间隔自动循环；`GET /api/v1/system/scheduler/status` 看 next_run_time + last_run 结果 |
-| 黄金 GoldAPI | ⚠️ B/E | 配置项在，需用户申请 key |
-| 总资产汇总（折算到 base） | ✅ A | `holdings/portfolio/summary` 等接口 |
-| **链上钱包余额读取** | ❌ D | 见 1.2 |
+| yfinance / CoinGecko / FX 取价 | ✅ A | `market_data/engine.py` |
+| **价格定时自动刷新**（APScheduler） | ✅ A | crypto / stocks / fx 三 job；启动后 15s 首次跑 |
+| FX 折算（direct → inverse → 三角） | ✅ A | 含 CNY/USD/EUR 三 pivot；修了方向反 bug |
+| **多币种切换**（CNY/USD/EUR/USDT/HKD/JPY/GBP） | ✅ A | dashboard + assets 共享 localStorage；稳定币 USDT/USDC = USD 折算 |
+| 总资产汇总 / 资产分布 / 净值卡 | ✅ A | `/holdings/portfolio/summary` + `/net-worth` + `/breakdown` |
+| **余额校准**（`accounts/{id}/adjust-balance`） | ✅ A | 三模式：存入 / 取出 / 校准目标值；创建 adjustment tx |
+| 黄金 GoldAPI | ⚠️ B/E | 配置项在；需用户申请 key。P2-8 |
+| **链上钱包余额读取** | ❌ D | 见 1.2；P1-4 |
 
 ---
 
 ## 3. 现金流分析
 
-| 子需求 | 等级 | 证据 / 缺口 |
+| 子需求 | 等级 | 证据 |
 |---|---|---|
-| 月度 income/expense/savings/transfer/other | ✅ A | `cash_flow_snapshots` 表 |
-| 按分类 / 按账户细分 JSON | ✅ A | `by_category_json`, `by_account_json` |
-| 时间序列图表 | ✅ A | `frontend/src/app/analytics/page.tsx` (224 行) |
-| **transaction CRUD 后自动重算 snapshot** | ✅ A | 2026-05-03 P0-2 完成。`services/cashflow/engine.py` 提供 `recompute_period`；transaction create/batch/update/delete + statement confirm + account adjust-balance 全部 hook 后即时重算（同步即写，未做 debounce — 单用户场景无必要） |
-| 「储蓄」计算口径 | ⚠️ B | 字段存在，定义（净流入 vs 显式入账）需 PRD 二次澄清 |
+| 月度 income/expense/savings/transfer/other snapshot | ✅ A | `cash_flow_snapshots` 表 |
+| 时间序列图表 | ✅ A | `analytics/page.tsx` |
+| **transaction CRUD 后即时重算** | ✅ A | tx create/batch/update/delete + statement confirm + adjust-balance + 级联学习全部 hook |
+| **记账页层级化视图**（类目 → 子类目 → 明细） | ✅ A | `CategoryBreakdownView` |
+| 「储蓄」计算口径 | ⚠️ B | 字段存在，定义需 PRD 二次澄清；P1-5 |
 
 ---
 
@@ -76,56 +100,55 @@
 
 | 子需求 | 等级 | 备注 |
 |---|---|---|
-| Web UI（Next.js + shadcn） | ✅ A | 5 大页面均已渲染 |
-| PDF 上传区域 | ✅ A | `pdf-import-panel.tsx` |
-| 资金变化图表 | ✅ A | dashboard 净值卡 + analytics |
-| 记账模块 | ✅ A | transactions 页 |
+| Web UI（Next.js 15 + shadcn/ui） | ✅ A | 5 大页面 |
+| PDF 上传区域 | ✅ A | |
+| 资金变化图表 | ✅ A | dashboard 净值卡 + analytics 时间序列 |
+| 记账模块（含层级化分类视图） | ✅ A | `CategoryBreakdownView` 默认 tab |
 | App | ❌ D | PRD 明示后续 |
 
 ---
 
 ## 5. Agent 接口
 
-| 子需求 | 等级 | 证据 / 缺口 |
+| 子需求 | 等级 | 证据 |
 |---|---|---|
-| MCP server 进程 + stdio | ✅ A | `mcp-server/src/finance_mcp/server.py` |
-| 6 个 tools 注册 | ✅ A | `get_total_assets / get_transactions / add_transaction / parse_bank_statement / get_cashflow / get_asset_allocation / search_transactions` |
+| MCP server 进程 + stdio | ✅ A | `mcp-server/run.sh` |
+| 7 tools 注册 | ✅ A | get_total_assets / get_transactions / add_transaction / parse_bank_statement / get_cashflow / get_asset_allocation / search_transactions |
+| **端到端集成测试**（6 轮回归） | ✅ A | 9 bug 全修；详见 `docx/MCP_TEST_REPORT.md` |
+| MCP 复用 backend pdf_parser | ✅ A | 消除了 parser 漂移 |
 | REST API（同等能力） | ✅ A | `/api/v1/*` |
-| **MCP 端到端真实集成测试** | ❌ D | PROGRESS Task #9 未开始 |
-| 是否需 `update_transaction_category`（让 Agent 触发学习） | ❌ D | 取决于"自动学习"功能落地后是否暴露给 Agent |
 
 ---
 
 ## 6. 数据存储
 
-| 子需求 | 等级 | 证据 / 缺口 |
+| 子需求 | 等级 | 证据 |
 |---|---|---|
 | SQLite（WAL）本地 | ✅ A | `data/finance.db` |
-| **Notion 同步** | ⏸️ C | `notion_sync/engine.py` + 一键建库 API 完整。**用户从未跑通**，需 ① integration token ② 建库 ③ 启用 |
-| **Notion 存储形态决策** | ❌ D | PRD 明示稍后再定 |
+| **Notion 同步** | ⏸️ C | 代码完整 + 一键建库 API；从未跑通。**P1-3** |
 
 ---
 
-## 7. 工程化债务（部署/测试/迁移）
+## 7. 工程化债务
 
 | 项 | 等级 | 备注 |
 |---|---|---|
-| Alembic 迁移版本 | 🛠 E | `db/migrations/` 目录空，启动时仍用 `Base.metadata.create_all()`，生产前必须补 |
-| Dockerfile 真实可构建 | 🛠 E | `docker-compose.yml` 在，Dockerfile 标"P0 占位" |
-| E2E 测试（Playwright） | 🛠 E | PROGRESS Task #8 未开始 |
-| 后端代码 lint / typecheck CI | 🛠 E | 本地能跑 ruff/mypy，CI 未配 |
-| Bearer Token 真启用（生产） | 🛠 E | 当前本地通过 `AUTH_DISABLED=true` 绕过，部署前需打开 |
+| Alembic 迁移 | 🛠 E | 当前用 idempotent ALTER 顶住；P2-4 |
+| Dockerfile 真实可构建 | 🛠 E | 占位中；P2-5 |
+| E2E Playwright | 🛠 E | P2-6 |
+| 后端 CI | 🛠 E | P2-7 |
+| 生产 Bearer 启用 + 登录页 | 🛠 E | 当前 `AUTH_DISABLED=true`；P2-9 |
 
 ---
 
-## 8. 当前**最危险**的事实
+## 8. 当前最大缺口
 
-> 这些是用户体感会被"骗"的地方——文档/PROGRESS 写已完成，实际未跑通：
+> 按"用户实际触不到 → PRD 要求"排序：
 
-1. ~~价格永远不会自动更新~~ ✅ 已修（P0-1，2026-05-03）
-2. ~~CashFlow 图表数据可能滞后~~ ✅ 已修（P0-2，2026-05-03）
-3. **PDF 解析器对外宣称的银行覆盖度未经真实样本回归** → 实际上传别家账单大概率挂在 generic fallback
-4. **Notion 同步从未跑通过** → 用户期望的"两个地方都有"目前只有一个
-5. **加密钱包同步是 55 行 stub** → PRD"加密钱包资产"无法满足
+1. **🔴 LLM 兜底分类**（P1-1a/c/d）— 当前命中率 ~80%，剩 20% 进 inbox 全靠人工；接入 LLM 可推到 95%+
+2. **🟡 链上钱包同步**（P1-4）— PRD 明文"加密钱包资产"目前只能手动录入数量
+3. **🟡 储蓄计算口径**（P1-5）— `cash_flow_snapshots.savings_total` 含义模糊，需用户给定义
+4. **🟡 Notion 同步**（P1-3）— "数据存两个地方"目前只在本地
+5. **🟢 GoCardless**（P1-2）— "完全自动化记账"还差 PDF 之外的实时入账渠道
 
 详细优先级排序见 `docx/ROADMAP.md`。
