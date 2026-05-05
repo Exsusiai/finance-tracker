@@ -58,7 +58,7 @@ async def parse_pdf_statement(
     # pdfplumber + the SQLite IO that may follow are blocking; run extraction in
     # a worker thread to avoid SQLAlchemy's greenlet check tripping on Py 3.14.
     try:
-        raw_text = await asyncio.to_thread(_extract_text_sync, content)
+        raw_text, page_words = await asyncio.to_thread(_extract_text_and_words_sync, content)
     except Exception as e:
         return _empty_result(error=f"Failed to extract text: {e}")
     # Stash for transaction-level use (read in `_make_tx`)
@@ -68,7 +68,11 @@ async def parse_pdf_statement(
 
     detected_bank = _detect_bank(raw_text)
 
-    if detected_bank:
+    # Revolut: column-aware parser (uses word X-coordinates to distinguish
+    # Money out / Money in columns — pure-text regex can't tell them apart).
+    if detected_bank == "revolut":
+        transactions = _parse_revolut_columns(page_words)
+    elif detected_bank:
         parser_func = _BANK_PARSERS.get(detected_bank, _parse_generic)
         transactions = parser_func(raw_text)
     else:
@@ -76,7 +80,7 @@ async def parse_pdf_statement(
 
     return {
         "detected_bank": detected_bank,
-        "parser_version": "0.2.0",
+        "parser_version": "0.3.0",
         "statement_period": _detect_period(raw_text),
         "raw_text": raw_text[:10000],
         "error": None,
@@ -94,6 +98,30 @@ def _extract_text_sync(content: bytes) -> str:
             if t:
                 out += t + "\n"
     return out
+
+
+def _extract_text_and_words_sync(content: bytes) -> tuple[str, list[list[dict]]]:
+    """Extract concatenated text PLUS per-page word lists with x/y coords.
+
+    Word dicts come from pdfplumber's `extract_words()` and look like:
+        {"text": "€500.00", "x0": 335.0, "x1": 371.0, "top": 306.0, "bottom": 318.0, ...}
+
+    Column-aware parsers (e.g. Revolut) need this to distinguish multiple
+    amount columns that get flattened into a single space-separated text row.
+    """
+    import pdfplumber
+    text_parts: list[str] = []
+    pages_words: list[list[dict]] = []
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text_parts.append(t)
+            try:
+                pages_words.append(page.extract_words(use_text_flow=False))
+            except Exception:
+                pages_words.append([])
+    return "\n".join(text_parts) + "\n", pages_words
 
 
 def _empty_result(error: str | None = None) -> dict[str, Any]:
@@ -203,6 +231,10 @@ _SUBACCOUNT_KEYWORDS = (
     "savings interest",
     "internal transfer",
 )
+# Note: "interest paid to ..." is INTENTIONALLY excluded — it represents
+# interest income credited to a Saving sub-account (net increase), not an
+# A↔B internal transfer. It must flow through column-based income/expense
+# detection so it actually credits the bank's overall balance.
 
 # Mutable list filled by `parse_pdf_statement` from the caller-supplied
 # per-account `subaccount_names`. Lower-cased.
@@ -230,7 +262,11 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
       - cross-bank cue       → ("transfer", {"cross_bank_hint": True})
       - otherwise            → (default_type, None)
     """
-    d = desc.lower()
+    # Normalise: lowercase, strip quotes/punctuation that break substring match
+    # (e.g. Revolut writes `to "Instant Access Savings"` with literal quotes,
+    # which would otherwise prevent `"to instant access savings"` from matching).
+    d = re.sub(r"[\"'`'']", "", desc.lower())
+    d = re.sub(r"\s+", " ", d)
     # 1) User-maintained per-account sub-account names (highest precedence)
     for name in _SUBACCOUNT_USER_NAMES:
         if name in d:
@@ -255,14 +291,25 @@ def _make_tx(
     counterparty: str,
     seq: int,
     currency: str = "EUR",
+    skip_classify: bool = False,
 ) -> dict:
     """Build a transaction dict.
 
     Auto-promotes `type` to 'transfer' when the description matches sub-account
-    or cross-bank-transfer keywords. Sub-account moves are tagged so the balance
-    view ignores them (money stays inside the same bank).
+    or cross-bank-transfer keywords (unless `skip_classify=True` — set by parsers
+    that already know the row's direction from PDF column layout, e.g. Revolut).
+
+    Why the opt-out: PDFs like Revolut record both legs of an internal transfer
+    (Account section AND Deposit section both list the same row). If the parser
+    pre-tags such a row as `subaccount=True`, the balance view skips it and
+    we'd lose the legitimate +500/-500 that should net to zero on its own. The
+    column-aware parser knows the direction is reliable and lets the amount-
+    matcher pair the two legs into a proper `transfer` afterwards.
     """
-    final_type, metadata = _classify_transfer(description, tx_type)
+    if skip_classify:
+        final_type, metadata = tx_type, None
+    else:
+        final_type, metadata = _classify_transfer(description, tx_type)
     import json as _json
     return {
         "occurred_at": date_iso,
@@ -367,6 +414,13 @@ _REVOLUT_INCOME_KEYWORDS = (
 
 
 def _parse_revolut(text: str) -> list[dict]:
+    """Legacy text-based Revolut parser. Kept for fallback / dispatch table.
+
+    NOTE: this can't reliably distinguish Money-out vs Money-in columns when
+    pdfplumber flattens the table to text — it relies on weak description
+    heuristics. The column-aware `_parse_revolut_columns` (used in the public
+    `parse_pdf_statement` entry) supersedes this for real Revolut PDFs.
+    """
     txs: list[dict] = []
     seq = 0
     for m in _REVOLUT_ROW.finditer(text):
@@ -387,6 +441,113 @@ def _parse_revolut(text: str) -> list[dict]:
             date_iso=date_iso, amount=amount, tx_type=tx_type,
             description=desc, counterparty="Revolut", seq=seq,
         ))
+
+
+# Column X-coordinate ranges learned from Revolut's standard German statement
+# layout (header words "Money out" at x≈335, "Money in" at x≈417, "Balance"
+# at x≈526). We use a tolerance band rather than exact match.
+_REVOLUT_COL_OUT_X0 = (320.0, 400.0)
+_REVOLUT_COL_IN_X0 = (405.0, 475.0)
+_REVOLUT_COL_BAL_X0 = (480.0, 580.0)
+
+
+def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
+    """Column-aware Revolut parser using word x-coordinates.
+
+    Algorithm:
+      1. Group words from all pages by their `top` (y-coordinate, rounded) →
+         each group is one logical row of the PDF.
+      2. For each row, find the date pattern at the start, the description
+         text in the middle, and any €-prefixed amounts whose `x0` falls into
+         the Money out / Money in / Balance bands.
+      3. Direction is determined by which column the amount sits in — never
+         by description text. This eliminates the entire "is 'paid to' an
+         outflow or inflow?" ambiguity.
+
+    Sub-account moves (e.g. "Net interest paid to 'Instant Access Savings'")
+    still flow through `_make_tx` → `_classify_transfer`, so the generic
+    keyword + user-list logic continues to tag them as `subaccount=true`.
+    """
+    txs: list[dict] = []
+    seq = 0
+
+    for words in pages_words:
+        # Bucket words by rounded `top` (y-position of the line)
+        rows: dict[int, list[dict]] = {}
+        for w in words:
+            key = round(w["top"])
+            rows.setdefault(key, []).append(w)
+
+        # Sort rows top→bottom; sort words within each row left→right
+        for top in sorted(rows):
+            row = sorted(rows[top], key=lambda w: w["x0"])
+            row_text = " ".join(w["text"] for w in row)
+
+            # Match leading date "Mon DD, YYYY"
+            m = re.match(r"^(\w{3})\s+(\d{1,2}),\s+(\d{4})\s+(.+)", row_text)
+            if not m:
+                continue
+            mon, day, year, _rest = m.groups()
+            if mon not in _MONTH_ABBR_EN:
+                continue
+
+            # Pick € amounts whose x0 lies in money-out / money-in column bands
+            money_out: Decimal | None = None
+            money_in: Decimal | None = None
+            for w in row:
+                if not w["text"].startswith("€"):
+                    continue
+                try:
+                    amt = Decimal(w["text"][1:].replace(",", ""))
+                except Exception:
+                    continue
+                if _REVOLUT_COL_OUT_X0[0] <= w["x0"] <= _REVOLUT_COL_OUT_X0[1]:
+                    money_out = amt
+                elif _REVOLUT_COL_IN_X0[0] <= w["x0"] <= _REVOLUT_COL_IN_X0[1]:
+                    money_in = amt
+                # Balance column is ignored.
+
+            if money_out is None and money_in is None:
+                continue
+            if money_out and money_in:
+                # Shouldn't happen in well-formed rows; pick the larger as primary
+                continue
+
+            # Description = words between date and the first € amount
+            date_word_count = 3  # Mon, DD,, YYYY
+            desc_words: list[str] = []
+            for w in row[date_word_count:]:
+                if w["text"].startswith("€"):
+                    break
+                desc_words.append(w["text"])
+            description = " ".join(desc_words).strip()
+            if not description:
+                continue
+
+            if money_in is not None:
+                amount = money_in
+                tx_type = "income"
+            else:
+                amount = money_out  # type: ignore[assignment]
+                tx_type = "expense"
+            if amount is None or amount == 0:
+                continue
+
+            try:
+                date_iso = f"{int(year)}-{_MONTH_ABBR_EN[mon]:02d}-{int(day):02d}T00:00:00Z"
+            except Exception:
+                continue
+            seq += 1
+            txs.append(_make_tx(
+                date_iso=date_iso, amount=amount, tx_type=tx_type,
+                description=description, counterparty="Revolut", seq=seq,
+                # Revolut PDF lists BOTH legs of internal transfers (one in
+                # Account section, one in Deposit section). Trust the column
+                # direction; let amount-matcher pair them into transfer/net-0
+                # rather than pre-tagging as subaccount (which would skip the
+                # balance view and miss legitimate +/− changes).
+                skip_classify=True,
+            ))
     return txs
 
 

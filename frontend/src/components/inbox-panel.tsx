@@ -21,10 +21,10 @@ import { LoadingSpinner } from "@/components/ui-common";
 export function InboxPanel() {
   const { data: items, isLoading, mutate: refreshInbox } = useInbox(200);
   const { data: categories } = useCategories();
+  const [transferTx, setTransferTx] = useState<TransactionOut | null>(null);
 
   const refreshAfterConfirm = () => {
     refreshInbox();
-    // Also invalidate the transactions list and cashflow / dashboard caches
     swrMutate(
       (k) =>
         typeof k === "string" &&
@@ -51,8 +51,9 @@ export function InboxPanel() {
     );
   }
 
-  // Group by detected_bank / source for visual grouping
-  const expense = (categories ?? []).filter((c) => c.kind === "expense");
+  // Pass ALL categories to each row; row filters by `tx.type` itself so
+  // income / transfer / expense rows each see their own category set.
+  const allCats = categories ?? [];
 
   return (
     <div className="space-y-3">
@@ -82,14 +83,26 @@ export function InboxPanel() {
                 <InboxRow
                   key={tx.id}
                   tx={tx}
-                  categories={expense}
+                  categories={allCats}
                   onDone={refreshAfterConfirm}
+                  onRequestMarkTransfer={(t) => setTransferTx(t)}
                 />
               ))}
             </tbody>
           </table>
         </div>
       </div>
+
+      {transferTx && (
+        <MarkTransferDialog
+          tx={transferTx}
+          onClose={() => setTransferTx(null)}
+          onSuccess={() => {
+            setTransferTx(null);
+            refreshAfterConfirm();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -98,15 +111,15 @@ interface InboxRowProps {
   tx: TransactionOut;
   categories: CategoryOut[];
   onDone: () => void;
+  onRequestMarkTransfer: (tx: TransactionOut) => void;
 }
 
-function InboxRow({ tx, categories, onDone }: InboxRowProps) {
+function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowProps) {
   const [pickedCat, setPickedCat] = useState<number | null>(tx.category_id ?? null);
   const [note, setNote] = useState<string>(tx.user_note ?? "");
   const [showNote, setShowNote] = useState<boolean>(Boolean(tx.user_note));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showTransferDialog, setShowTransferDialog] = useState(false);
 
   const isUserChange = pickedCat !== (tx.category_id ?? null);
   const noteChanged = (note.trim() || null) !== (tx.user_note ?? null);
@@ -250,7 +263,7 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
           {!isTransfer && (
             <button
               type="button"
-              onClick={() => setShowTransferDialog(true)}
+              onClick={() => onRequestMarkTransfer(tx)}
               disabled={submitting}
               title="标记为转账：选择方向 + 对方账户"
               className="text-[10px] px-2 py-1 rounded-md text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
@@ -263,18 +276,6 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
           <div className="text-[10px] text-destructive mt-1">{error}</div>
         )}
       </td>
-      {showTransferDialog && (
-        <td className="hidden">
-          <MarkTransferDialog
-            tx={tx}
-            onClose={() => setShowTransferDialog(false)}
-            onSuccess={() => {
-              setShowTransferDialog(false);
-              onDone();
-            }}
-          />
-        </td>
-      )}
     </tr>
   );
 }

@@ -328,11 +328,13 @@ async def detect_same_account_pairs(
     for (_acct, _amt, _cur), bucket in buckets.items():
         outs = [r for r in bucket if r.type == "expense" and r.id not in used]
         ins  = [r for r in bucket if r.type == "income" and r.id not in used]
+        # Sort each side by date so we pair the closest legitimate counterpart
+        # rather than the first one we happen to iterate over.
         for out_tx in outs:
+            best: tuple[Transaction, int] | None = None  # (in_tx, days_diff)
             for in_tx in ins:
                 if in_tx.id in used:
                     continue
-                # Only match when at least one side is in the new batch
                 if cand_set is not None and out_tx.id not in cand_set and in_tx.id not in cand_set:
                     continue
                 try:
@@ -341,12 +343,41 @@ async def detect_same_account_pairs(
                     continue
                 if days > window_days:
                     continue
-                pairs.append((out_tx, in_tx))
+                # CRITICAL: a same-account ±X pair only counts as an internal
+                # sub-account move if the two sides describe the *same* event.
+                # Without this guard, a "To Saving -500" and an unrelated
+                # "Apple Pay deposit +500" on the same day would be falsely
+                # paired just because their amounts match.
+                if not _descriptions_match(out_tx.description, in_tx.description):
+                    continue
+                if best is None or days < best[1]:
+                    best = (in_tx, days)
+            if best is not None:
+                pairs.append((out_tx, best[0]))
                 used.add(out_tx.id)
-                used.add(in_tx.id)
-                break
+                used.add(best[0].id)
 
     return pairs
+
+
+def _descriptions_match(a: str | None, b: str | None) -> bool:
+    """True when two same-account ± rows look like halves of the same event.
+
+    We accept either:
+      - exact match (case-insensitive, after stripping quotes/extra whitespace)
+      - sharing a meaningful token (≥4 chars, not in noise list)
+    """
+    if not a or not b:
+        return False
+    norm = lambda s: re.sub(r"\s+", " ", re.sub(r"[\"'`'']", "", s.lower())).strip()
+    na, nb = norm(a), norm(b)
+    if na == nb:
+        return True
+    # Token overlap fallback for when one side has more context
+    noise = {"the", "from", "to", "by", "for", "and", "into", "of", "via", "card", "fee"}
+    tokens_a = {t for t in re.split(r"[\s\-_/*\":]", na) if len(t) >= 4 and t not in noise}
+    tokens_b = {t for t in re.split(r"[\s\-_/*\":]", nb) if len(t) >= 4 and t not in noise}
+    return bool(tokens_a & tokens_b)
 
 
 async def mark_subaccount_pair(

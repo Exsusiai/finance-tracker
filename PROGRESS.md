@@ -97,6 +97,7 @@
 | 2026-05-04 | **P1-1b 用户备注字段 + UI** | ORM 加 `user_note` 字段；lifespan 加 idempotent ALTER TABLE 自动迁移已有 DB；TransactionCreate/Update/Out schemas 同步；inbox 行内「+ 备注」展开式 textarea，提交时与分类一起写入 |
 | 2026-05-05 | **跨账户转账识别（P0-8/9 新需求）** | PDF parser 加子账户/跨行关键词预标 transfer + metadata（`subaccount` / `cross_bank_hint`）；新增 `services/transfer_matcher`（评分模型：金额=50 / 日期 0..30 / 描述提示 0..30；阈值 75 自动配对）；`v_account_balance` 视图按 metadata `transfer_direction` 取符号，子账户 transfer 跳过；新增 `POST /transactions/{id}/mark-transfer` 与 `GET /transactions/transfers/suggestions`。E2E：N26+Revolut 双 PDF 导入后 6 笔跨行转账自动配对、子账户操作不影响余额、数学完全对得上 |
 | 2026-05-05 | **分类树补全 + 子账户 L1+L2+L3 识别** | seed 加 income（工资/退款/利息/礼金/其他）+ transfer（信用卡还款/跨行/内部储蓄/投资划转/其他）两个 kind；inbox 下拉按 tx.type 过滤；UI 区分子账户(灰"内部")vs 跨行(蓝"跨行")标识。子账户三层识别：**L1** 关键词扩充 + **L2** per-account 用户清单（settings 卡内 SubaccountListEditor）+ **L3** 同账户 ±X 金额匹配启发式。「这是转账」按钮改为弹 modal 选方向 + 对方账户 + 候选 tx 配对 |
+| 2026-05-05 | **修复 inbox dialog 不弹 + Revolut multi-product 解析 + amount-match 误配** | 修 3 个 bug：①「这是转账」点击无响应 — dialog 在 hidden td 内，把状态提到 InboxPanel 顶层；② inbox 分类下拉 income/transfer 行空 — categories 不预过滤，让 row 自己按 tx.type 选；③ Revolut PDF 把 "Net interest paid" 算成 expense — Revolut PDF 实际有 Account+Deposit 双 product 双 section，互转两边都有；改 Revolut 用 column-aware parser（按 word.x0 落在 Money out/Money in 列定位方向）、`skip_classify=True` 不预标 subaccount、依靠 amount-match 配对；amount-match 加 description 相似度门槛防误配（相同/共享 ≥4 字符 token） |
 
 ## 下一步
 按 `docx/ROADMAP.md` 的 P0-1 ~ P0-5 顺序推进。建议起点：**P0-1 APScheduler 接入**（解锁后续所有"实时"体感）。
