@@ -47,14 +47,27 @@ export function InlineCategoryPicker({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const eligible = categories.filter((c) => c.kind === tx.type);
-  const grouped = eligible
-    .filter((c) => c.parent_id === null)
-    .map((p) => ({
-      parent: p,
-      kids: eligible.filter((c) => c.parent_id === p.id),
-    }))
-    .filter((g) => g.kids.length > 0);
+  // Cross-kind switchable: list ALL of expense / income / transfer in one
+  // dropdown, prefixed with their kind so the user can re-classify a row's
+  // very nature (e.g. "this isn't a refund expense — it's an income"). When
+  // they pick a category whose `kind` differs from `tx.type`, we send `type`
+  // alongside `category_id` so the backend flips it atomically.
+  const KIND_LABEL: Record<string, string> = {
+    expense: "支出",
+    income: "收入",
+    transfer: "转账",
+  };
+  const KIND_ORDER = ["expense", "income", "transfer"] as const;
+  const grouped = KIND_ORDER.flatMap((kind) =>
+    categories
+      .filter((c) => c.kind === kind && c.parent_id === null)
+      .map((parent) => ({
+        kind,
+        parent,
+        kids: categories.filter((c) => c.kind === kind && c.parent_id === parent.id),
+      }))
+      .filter((g) => g.kids.length > 0),
+  );
 
   const refreshAfter = () => {
     swrMutate(
@@ -74,7 +87,16 @@ export function InlineCategoryPicker({
     setError(null);
     setSaving(true);
     try {
-      await updateTransaction(tx.id, { category_id: id });
+      const payload: { category_id: number | null; type?: string } = { category_id: id };
+      if (id !== null) {
+        const picked = categories.find((c) => c.id === id);
+        if (picked && picked.kind !== tx.type) {
+          // User re-classified across kinds (e.g. expense → income). Flip the
+          // type so cash-flow/breakdown/inbox re-bucket this tx correctly.
+          payload.type = picked.kind;
+        }
+      }
+      await updateTransaction(tx.id, payload);
       setEditing(false);
       refreshAfter();
     } catch (e) {
@@ -97,7 +119,7 @@ export function InlineCategoryPicker({
         >
           <option value="">— 未分类 —</option>
           {grouped.map((g) => (
-            <optgroup key={g.parent.id} label={g.parent.name}>
+            <optgroup key={`${g.kind}-${g.parent.id}`} label={`${KIND_LABEL[g.kind]} · ${g.parent.name}`}>
               {g.kids.map((k) => (
                 <option key={k.id} value={k.id}>
                   {k.name}

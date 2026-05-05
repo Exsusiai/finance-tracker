@@ -155,6 +155,11 @@ async def apply_to_similar_pending(
             Transaction.category_id != category_id,  # skip same-category no-ops
             Transaction.source != "manual",
             Transaction.type != "transfer",
+            # Only cascade within the same kind. When the user crosses kinds
+            # (e.g. expense → income on this row), don't drag other identical
+            # rows along — they may have legitimately been the original kind
+            # and rewriting their type would silently flip their sign.
+            Transaction.type == seed_tx.type,
         )
     )
     rows = (await db.execute(stmt)).scalars().all()
