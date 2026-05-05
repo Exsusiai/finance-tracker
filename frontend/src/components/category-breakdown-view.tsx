@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import { cn, formatCurrency, formatDate, periodLabel } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui-common";
+import { InlineCategoryPicker } from "@/components/inline-category-picker";
 
 /**
  * Hierarchical spending view: pick a top-level category → see sub-categories'
@@ -103,6 +104,7 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
               kind={kind}
               selectedChildId={selectedChildId}
               onSelectChild={(id) => setSelectedChildId(id === selectedChildId ? null : id)}
+              allCategories={categories ?? []}
             />
           )}
         </div>
@@ -256,9 +258,10 @@ interface ParentDetailProps {
   kind: "expense" | "income" | "transfer";
   selectedChildId: number | null;
   onSelectChild: (id: number) => void;
+  allCategories: CategoryOut[];
 }
 
-function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSelectChild }: ParentDetailProps) {
+function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSelectChild, allCategories }: ParentDetailProps) {
   const parentPct = grandTotal > 0 ? (parent.total / grandTotal) * 100 : 0;
 
   return (
@@ -320,7 +323,11 @@ function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSel
                   </div>
                 </div>
                 {expanded && (
-                  <ChildTransactions categoryId={c.id} period={period} />
+                  <ChildTransactions
+                    categoryId={c.id}
+                    period={period}
+                    allCategories={allCategories}
+                  />
                 )}
               </li>
             );
@@ -336,11 +343,12 @@ function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSel
 interface ChildTransactionsProps {
   categoryId: number;
   period: string;
+  allCategories: CategoryOut[];
 }
 
-function ChildTransactions({ categoryId, period }: ChildTransactionsProps) {
+function ChildTransactions({ categoryId, period, allCategories }: ChildTransactionsProps) {
   const { fromDate, toDate } = monthRange(period);
-  const { data: txResp, isLoading } = useTransactions({
+  const { data: txResp, isLoading, mutate: refreshList } = useTransactions({
     category_id: categoryId,
     from_date: fromDate,
     to_date: toDate,
@@ -372,6 +380,14 @@ function ChildTransactions({ categoryId, period }: ChildTransactionsProps) {
                 {t.account_name && (
                   <span className="text-[10px] text-muted-foreground">{t.account_name}</span>
                 )}
+              </td>
+              <td className="px-2 py-1.5 whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                <InlineCategoryPicker
+                  tx={t}
+                  categories={allCategories}
+                  onChanged={() => refreshList()}
+                  variant="icon"
+                />
               </td>
               <td className={cn(
                 "px-4 py-1.5 text-right tabular-nums whitespace-nowrap font-medium",

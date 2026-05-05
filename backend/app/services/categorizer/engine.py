@@ -123,16 +123,26 @@ async def apply_to_similar_pending(
     seed_tx: Transaction,
     category_id: int,
 ) -> int:
-    """After a user manually classifies one tx, find all *other* pending tx
-    with the same description and apply the same category to them.
+    """Cascade `category_id` to ALL other tx with the same description.
 
-    Returns the count of additional rows that were auto-classified.
-    Cash-flow snapshot recompute is the caller's responsibility (may span
-    several months).
+    Trigger: user just (re)classified `seed_tx`. Apply the same category to:
+      - any pending tx with this description (clears the inbox in bulk)
+      - any auto-categorised tx that ended up in the WRONG category, so that
+        a single correction in the breakdown view fixes the entire batch
+        of identical PDF rows
+
+    Excludes:
+      - the seed itself
+      - rows already in the target category (no-op, avoids needless updates)
+      - rows the user manually entered (`source='manual'`) — those carry a
+        more authoritative classification choice we shouldn't overwrite
+      - transfer-tagged rows (subaccount / cross-bank pairs) — re-categorising
+        them would make no sense; they're not income/expense
+
+    Returns the count of rows updated. Caller must recompute cash-flow snapshots.
     """
     if not seed_tx.description:
         return 0
-    # Match by exact description (case-insensitive, trimmed). Also confirm them.
     norm_desc = seed_tx.description.strip()
     if not norm_desc:
         return 0
@@ -141,16 +151,19 @@ async def apply_to_similar_pending(
         .where(
             Transaction.id != seed_tx.id,
             Transaction.deleted_at.is_(None),
-            Transaction.is_pending.is_(True),
-            Transaction.category_id.is_(None),
             Transaction.description == norm_desc,
+            Transaction.category_id != category_id,  # skip same-category no-ops
+            Transaction.source != "manual",
+            Transaction.type != "transfer",
         )
     )
     rows = (await db.execute(stmt)).scalars().all()
     count = 0
     for r in rows:
         r.category_id = category_id
-        r.is_pending = False
+        # If it was still pending, confirming the cascade also clears it
+        if r.is_pending:
+            r.is_pending = False
         count += 1
     if count:
         await db.flush()

@@ -190,7 +190,7 @@ export function PdfImportPanel() {
                   拖拽 PDF 文件到这里，或点击上传
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  支持：工商银行、建设银行、招商银行、N26、Revolut 等格式
+                  支持：N26、Revolut、TFBank、advanzia、AMEX等格式
                 </p>
               </div>
             </>

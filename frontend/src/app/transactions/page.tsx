@@ -10,7 +10,6 @@ import {
   type TransactionFilters,
   type TransactionOut,
   deleteTransaction,
-  updateTransaction,
   ApiError,
 } from "@/lib/api";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
@@ -22,6 +21,7 @@ import { PdfImportPanel } from "@/components/pdf-import-panel";
 import { InboxPanel } from "@/components/inbox-panel";
 import { CategoryBreakdownView } from "@/components/category-breakdown-view";
 import { TransferSuggestionsPanel } from "@/components/transfer-suggestions-panel";
+import { InlineCategoryPicker } from "@/components/inline-category-picker";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useInbox, useTransferSuggestions } from "@/lib/hooks";
 
@@ -141,28 +141,6 @@ export default function TransactionsPage() {
       }
     },
     [sortField]
-  );
-
-  const handleCategoryChange = useCallback(
-    async (txId: number, newCategoryId: number | null) => {
-      try {
-        await updateTransaction(txId, { category_id: newCategoryId });
-        // refresh tx list + inbox + cashflow (cascade may have moved many rows)
-        refresh();
-        const { mutate: globalMutate } = await import("swr");
-        globalMutate(
-          (k) =>
-            typeof k === "string" &&
-            (k.startsWith("inbox") || k.startsWith("cashflow") || k.startsWith("balances")),
-          undefined,
-          { revalidate: true },
-        );
-      } catch (e) {
-        console.error("Category change failed:", e);
-        throw e;
-      }
-    },
-    [refresh],
   );
 
   const handleDelete = useCallback(
@@ -414,7 +392,6 @@ export default function TransactionsPage() {
                     onConfirmDelete={() => handleDelete(tx.id)}
                     onCancelDelete={() => setDeleteConfirm(null)}
                     categories={categories ?? []}
-                    onCategoryChange={handleCategoryChange}
                   />
                 ))}
               </div>
@@ -466,7 +443,6 @@ function TransactionRow({
   onConfirmDelete,
   onCancelDelete,
   categories,
-  onCategoryChange,
 }: {
   tx: TransactionOut;
   isSelected: boolean;
@@ -475,26 +451,8 @@ function TransactionRow({
   isDeleteConfirm: boolean;
   onConfirmDelete: () => void;
   onCancelDelete: () => void;
-  categories: Array<{ id: number; name: string; kind: string; parent_id: number | null }>;
-  onCategoryChange: (txId: number, newCategoryId: number | null) => Promise<void>;
+  categories: Array<{ id: number; name: string; kind: string; parent_id: number | null; icon: string | null; color: string | null; sort_order: number; is_system: boolean; created_at: string }>;
 }) {
-  const [editingCat, setEditingCat] = useState(false);
-  const [savingCat, setSavingCat] = useState(false);
-  const eligible = categories.filter((c) => c.kind === tx.type);
-  const grouped = eligible
-    .filter((c) => c.parent_id === null)
-    .map((p) => ({ parent: p, kids: eligible.filter((c) => c.parent_id === p.id) }))
-    .filter((g) => g.kids.length > 0);
-
-  const handlePick = async (id: number | null) => {
-    setSavingCat(true);
-    try {
-      await onCategoryChange(tx.id, id);
-      setEditingCat(false);
-    } finally {
-      setSavingCat(false);
-    }
-  };
   const typeColors: Record<string, string> = {
     expense: "text-red-500",
     income: "text-green-500",
@@ -546,43 +504,7 @@ function TransactionRow({
 
       {/* Category — click to edit inline */}
       <div className="md:col-span-2 text-sm" onClick={(e) => e.stopPropagation()}>
-        {editingCat ? (
-          <select
-            autoFocus
-            disabled={savingCat}
-            value={tx.category_id ?? ""}
-            onChange={(e) => handlePick(e.target.value ? Number(e.target.value) : null)}
-            onBlur={() => setEditingCat(false)}
-            className="w-full px-1.5 py-0.5 text-xs rounded border border-primary bg-background focus:outline-none focus:ring-2 focus:ring-ring max-w-[180px]"
-          >
-            <option value="">— 未分类 —</option>
-            {grouped.map((g) => (
-              <optgroup key={g.parent.id} label={g.parent.name}>
-                {g.kids.map((k) => (
-                  <option key={k.id} value={k.id}>
-                    {k.name}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        ) : tx.category_name ? (
-          <button
-            onClick={() => setEditingCat(true)}
-            title="点击修改分类（系统会记住并自动归类同类条目）"
-            className="inline-block px-2 py-0.5 text-xs rounded-full bg-muted text-foreground hover:bg-primary/10 hover:text-primary transition-colors cursor-pointer"
-          >
-            {tx.category_name}
-          </button>
-        ) : (
-          <button
-            onClick={() => setEditingCat(true)}
-            title="点击设置分类"
-            className="text-muted-foreground text-xs hover:text-primary cursor-pointer underline decoration-dotted"
-          >
-            未分类
-          </button>
-        )}
+        <InlineCategoryPicker tx={tx} categories={categories} />
       </div>
 
       {/* Account */}
