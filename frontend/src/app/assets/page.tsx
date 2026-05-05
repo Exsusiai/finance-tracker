@@ -703,7 +703,7 @@ export default function AssetsPage() {
                             onClick={() => setAdjustTarget(b)}
                             className="text-xs px-2 py-1 rounded-md text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
                           >
-                            存/取
+                            调整
                           </button>
                           <span className="text-xs px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium">
                             {b.currency}
@@ -1098,7 +1098,7 @@ function BalanceAdjustDialog({ balance, onClose, onSuccess }: BalanceAdjustDialo
       />
       <div className="relative w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl">
         <div className="flex items-center justify-between mb-5">
-          <h2 className="text-lg font-semibold">存入 / 取款</h2>
+          <h2 className="text-lg font-semibold">余额操作</h2>
           <button
             type="button"
             onClick={onClose}
@@ -1120,8 +1120,8 @@ function BalanceAdjustDialog({ balance, onClose, onSuccess }: BalanceAdjustDialo
 
         <div className="mb-4 inline-flex rounded-lg border border-border bg-card p-1">
           {([
-            { value: "delta", label: "存/取（增减）" },
-            { value: "target", label: "设为目标值" },
+            { value: "delta", label: "存入 / 取出" },
+            { value: "target", label: "校准到目标值" },
           ] as const).map((m) => (
             <button
               key={m.value}
@@ -1200,8 +1200,7 @@ function BalanceAdjustDialog({ balance, onClose, onSuccess }: BalanceAdjustDialo
                 className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               />
               <p className="text-xs text-muted-foreground mt-1.5">
-                将创建一笔差额调整交易，使账户余额等于此值（{balance.currency}）
-              </p>
+                💡 用于<strong>校准</strong>：当系统余额与银行真实余额不一致时（漏记、账单错误等），把目标余额设为银行真实值。系统会创建一笔差额调整交易（{balance.currency}）。</p>
             </div>
           )}
 
@@ -1370,7 +1369,7 @@ function AccountsPanel({
                   onClick={() => onAdjust(bal)}
                   className="text-xs px-2.5 py-1.5 rounded-md text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
                 >
-                  存/取款
+                  调整余额
                 </button>
               )}
               <span className="ml-auto inline-flex gap-1.5">

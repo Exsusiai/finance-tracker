@@ -519,6 +519,7 @@ export interface AccountOut {
   type: string;
   institution: string | null;
   account_number: string | null;
+  iban: string | null;
   currency: string;
   initial_balance: string;
   is_active: boolean;
@@ -538,6 +539,7 @@ export interface AccountCreateInput {
   type: string;
   institution?: string;
   account_number?: string;
+  iban?: string;
   currency: string;
   initial_balance?: string;
   notes?: string;
@@ -548,6 +550,7 @@ export interface AccountUpdateInput {
   type?: string;
   institution?: string;
   account_number?: string;
+  iban?: string | null;
   currency?: string;
   is_active?: boolean;
   notes?: string;

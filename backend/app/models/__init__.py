@@ -60,6 +60,11 @@ class Account(Base):
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     institution: Mapped[str | None] = mapped_column(String(255))
     account_number: Mapped[str | None] = mapped_column(String(100))
+    # Full IBAN (or first 8+ chars). Used by transfer_matcher to detect
+    # internal cross-bank transfers when the description carries the
+    # counter-party's IBAN — much more reliable than name matching since
+    # counterparties on self-transfers are usually the user's own name.
+    iban: Mapped[str | None] = mapped_column(String(34))
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
     initial_balance: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

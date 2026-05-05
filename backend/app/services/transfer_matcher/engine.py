@@ -66,14 +66,33 @@ def _date_score(d1: str, d2: str) -> int:
 def _hint_score(out_tx: Transaction, in_tx: Transaction,
                 accounts: dict[int, Account]) -> tuple[int, list[str]]:
     """Look for evidence that `out_tx` describes a transfer to `in_tx`'s account
-    (and vice versa). +20 per direction match, capped at 30."""
+    (and vice versa). Capped at 50 (IBAN match alone can hit 40, putting amount-
+    matched + IBAN at 90 which clears the auto-pair threshold)."""
     score = 0
     reasons: list[str] = []
-    out_desc = (out_tx.description or "").lower()
-    in_desc = (in_tx.description or "").lower()
+    # Combine description + raw_description: PDF parsers may stash IBAN /
+    # counterparty IBAN on continuation lines into raw_description.
+    out_desc_raw = ((out_tx.description or "") + " " + (out_tx.raw_description or "")).strip()
+    in_desc_raw = ((in_tx.description or "") + " " + (in_tx.raw_description or "")).strip()
+    out_desc = out_desc_raw.lower()
+    in_desc = in_desc_raw.lower()
 
     in_account = accounts.get(in_tx.account_id)
     out_account = accounts.get(out_tx.account_id)
+
+    # ── HIGHEST CONFIDENCE: IBAN match (own bank's IBAN appears in counter-leg description)
+    # When a self-transfer is "Jingsheng Chen → Jingsheng Chen", names give us
+    # nothing — but the destination IBAN is unique to one bank.
+    out_iban = (out_account.iban or "").upper().replace(" ", "") if out_account else ""
+    in_iban = (in_account.iban or "").upper().replace(" ", "") if in_account else ""
+    out_desc_norm = out_desc_raw.upper().replace(" ", "")
+    in_desc_norm = in_desc_raw.upper().replace(" ", "")
+    # in_tx's account IBAN should appear in out_tx's description (we're sending TO it)
+    if in_iban and len(in_iban) >= 8 and in_iban in out_desc_norm:
+        score += 40; reasons.append(f"out→in IBAN match ({in_iban[:6]}…)")
+    # …or vice versa
+    if out_iban and len(out_iban) >= 8 and out_iban in in_desc_norm:
+        score += 20; reasons.append(f"in←out IBAN match ({out_iban[:6]}…)")
 
     # Account NAME mention (e.g. "to Revolut", "from N26")
     if in_account and in_account.name and in_account.name.lower() in out_desc:
@@ -83,7 +102,7 @@ def _hint_score(out_tx: Transaction, in_tx: Transaction,
 
     # Owner-name self-transfer cue ("Jingsheng Chen" appears on both legs)
     self_pattern = re.compile(r"jingsheng\s+chen", re.I)
-    if self_pattern.search(out_tx.description or "") and self_pattern.search(in_tx.description or ""):
+    if self_pattern.search(out_desc_raw) and self_pattern.search(in_desc_raw):
         score += 10; reasons.append("self-transfer name match")
 
     # Generic transfer verbs already hint at it
@@ -92,7 +111,7 @@ def _hint_score(out_tx: Transaction, in_tx: Transaction,
     if any(k in in_desc for k in ("incoming transfer", "payment from", "from ")):
         score += 5; reasons.append("incoming-verb")
 
-    return min(score, 30), reasons
+    return min(score, 50), reasons
 
 
 def _is_eligible(tx: Transaction) -> bool:

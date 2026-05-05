@@ -470,6 +470,12 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
     """
     txs: list[dict] = []
     seq = 0
+    last_tx: dict | None = None
+
+    # Continuation lines starting with these tokens carry counterparty IBAN /
+    # routing context that we want appended to the previous transaction's
+    # description, so the transfer matcher can find the IBAN later.
+    _CONTINUATION_PREFIXES = ("Reference:", "From:", "To:", "IBAN", "BIC")
 
     for words in pages_words:
         # Bucket words by rounded `top` (y-position of the line)
@@ -486,6 +492,11 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
             # Match leading date "Mon DD, YYYY"
             m = re.match(r"^(\w{3})\s+(\d{1,2}),\s+(\d{4})\s+(.+)", row_text)
             if not m:
+                # Possible continuation line: append to last_tx.raw_description
+                if last_tx is not None and any(
+                    row_text.lstrip().startswith(p) for p in _CONTINUATION_PREFIXES
+                ):
+                    last_tx["raw_description"] = (last_tx.get("raw_description") or "") + " | " + row_text.strip()
                 continue
             mon, day, year, _rest = m.groups()
             if mon not in _MONTH_ABBR_EN:
@@ -538,7 +549,7 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
             except Exception:
                 continue
             seq += 1
-            txs.append(_make_tx(
+            tx = _make_tx(
                 date_iso=date_iso, amount=amount, tx_type=tx_type,
                 description=description, counterparty="Revolut", seq=seq,
                 # Revolut PDF lists BOTH legs of internal transfers (one in
@@ -547,7 +558,9 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
                 # rather than pre-tagging as subaccount (which would skip the
                 # balance view and miss legitimate +/− changes).
                 skip_classify=True,
-            ))
+            )
+            txs.append(tx)
+            last_tx = tx
     return txs
 
 

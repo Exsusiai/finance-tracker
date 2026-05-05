@@ -51,6 +51,7 @@ export function AccountForm({
   const [name, setName] = useState(initial?.name ?? "");
   const [type, setType] = useState(initial?.type ?? "bank");
   const [institution, setInstitution] = useState(initial?.institution ?? "");
+  const [iban, setIban] = useState(initial?.iban ?? "");
   const [currency, setCurrency] = useState(initial?.currency ?? "EUR");
   const [initialBalance, setInitialBalance] = useState(
     initial?.initial_balance ?? "0",
@@ -71,11 +72,13 @@ export function AccountForm({
     try {
       setSubmitting(true);
       let result: AccountOut;
+      const ibanClean = iban.trim().replace(/\s+/g, "").toUpperCase() || null;
       if (isEdit && initial) {
         result = await updateAccount(initial.id, {
           name: name.trim(),
           type,
           institution: institution.trim() || undefined,
+          iban: ibanClean,
           notes: notes.trim() || undefined,
         });
       } else {
@@ -83,6 +86,7 @@ export function AccountForm({
           name: name.trim(),
           type,
           institution: institution.trim() || undefined,
+          iban: ibanClean ?? undefined,
           currency,
           initial_balance: initialBalance || "0",
           notes: notes.trim() || undefined,
@@ -176,6 +180,23 @@ export function AccountForm({
               onChange={(e) => setInstitution(e.target.value)}
               placeholder="如：N26 Bank、American Express"
               className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2">
+              IBAN
+              <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">
+                （用于自动识别内部转账，PDF 中含此 IBAN 的转账会被认作转给本账户）
+              </span>
+            </label>
+            <input
+              type="text"
+              value={iban}
+              onChange={(e) => setIban(e.target.value)}
+              placeholder="如：DE67100110012623191530（空格大小写无所谓）"
+              className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring tabular-nums uppercase"
+              spellCheck={false}
             />
           </div>
 

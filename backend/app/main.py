@@ -110,6 +110,7 @@ async def lifespan(app: FastAPI):
     # Each entry: (table, column, sql_to_add). Idempotent.
     _column_migrations = [
         ("transactions", "user_note", "ALTER TABLE transactions ADD COLUMN user_note TEXT"),
+        ("accounts", "iban", "ALTER TABLE accounts ADD COLUMN iban TEXT"),
     ]
     async with engine.begin() as conn:
         from sqlalchemy import text

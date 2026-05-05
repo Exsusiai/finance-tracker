@@ -45,6 +45,7 @@ class AccountCreate(BaseModel):
     type: str = Field(pattern=r"^(bank|credit_card|brokerage|crypto_wallet|cash|other)$")
     institution: str | None = None
     account_number: str | None = None
+    iban: str | None = None
     currency: str = Field(max_length=10)
     initial_balance: str = "0"
     notes: str | None = None
@@ -56,6 +57,7 @@ class AccountUpdate(BaseModel):
     type: str | None = None
     institution: str | None = None
     account_number: str | None = None
+    iban: str | None = None
     currency: str | None = None
     is_active: bool | None = None
     notes: str | None = None
@@ -68,6 +70,7 @@ class AccountOut(BaseModel):
     type: str
     institution: str | None
     account_number: str | None
+    iban: str | None = None
     currency: str
     initial_balance: str
     is_active: bool
