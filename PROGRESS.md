@@ -48,7 +48,7 @@
 | **NEW-2** | 不确定收件箱工作流 | ✅ P0-4 | **后端 + 前端均完成**。transactions 页加「待确认」tab + 红色徽章计数；行内分类下拉（带 optgroup 一级/二级）+ 一键确认；改选别的分类时 UI 提示"⚡ 确认后会被记住" |
 | **NEW-11** | 记账页层级化分类视图 | ✅ P0-7 | 完成。`CategoryBreakdownView` 组件：月份选择 + kind 切换 + 总额；左栏一级类目卡（带占比条）；右栏二级类目（带占比条 + 点开看明细）。挂为 `/transactions` 默认 tab |
 | **NEW-12** | LLM 分类 fallback | 🟡 P1-1a | L1 关键词 miss → 调 LLM；置信度门槛后写分类。提供商待用户选 |
-| **NEW-13** | 用户分类备注 | 🟡 P1-1b | inbox 确认时可写备注；持久化为知识库一部分 |
+| **NEW-13** | 用户分类备注 | ✅ P1-1b | 完成。`transactions.user_note` 字段（idempotent ALTER TABLE）+ Pydantic schemas + Inbox UI 加 「+ 备注」展开式输入框；E2E 验证写入/取回一致 |
 | **NEW-14** | 分类知识库注入 LLM | 🟡 P1-1c | 调 LLM 时把 rules + 关键词 + 用户备注（最近 N 条相关）作为 prompt 上下文 |
 | **NEW-15** | 知识库管理 UI | 🟡 P1-1d | settings 页表格列出所有备注 + 来源 + 使用次数；可编辑 |
 | 9 | MCP Server 端到端集成测试 | ✅ P0-5 | 完成 6 轮回归测试，发现并修复 9 个 bug（B1~B9）；7 tools 全部 PASS。修复要点：parse_bank_statement INSERT 缺字段、FX 折算方向反 + pivot 不全、parser 与 backend 漂移（已改为复用）、view 余额公式按 type 取符号 |
@@ -94,6 +94,8 @@
 | 2026-05-04 | 用户分类管道演进需求 | 用户提出三类新需求：① 记账页层级 UI 重构 ② LLM 分类 fallback + 用户备注 + 知识库注入。文档化到 `docx/CLASSIFICATION_PLAN.md`，ROADMAP 重排 P0-7 / P1-1a~d |
 | 2026-05-04 | **P0-7 记账页层级化视图** | 新增 `CategoryBreakdownView`：月份选择 + 双栏（一级 → 二级 → 明细）+ 占比条；挂为 transactions 页默认 tab。后端 transactions 接口 limit 上限 200 → 1000 |
 | 2026-05-04 | **P0-5 MCP 端到端测试 + 9 个 bug 全修** | 6 轮 agent 回归驱动：B1 INSERT 缺 transactions_count、B2 FX 方向、B3 mcp 包未装、B4 重复 import、B5 三角 pivot 缺 CNY、B6 parser 漂移（改为复用 backend）、B7 asyncio.run in event loop、B8 account_id 缺省 FK 失败、B9 v_account_balance 把 expense 加而非减。所有 bug 清零，7 tools 全 PASS |
+| 2026-05-04 | **P1-1b 用户备注字段 + UI** | ORM 加 `user_note` 字段；lifespan 加 idempotent ALTER TABLE 自动迁移已有 DB；TransactionCreate/Update/Out schemas 同步；inbox 行内「+ 备注」展开式 textarea，提交时与分类一起写入 |
+| 2026-05-05 | **跨账户转账识别（P0-8/9 新需求）** | PDF parser 加子账户/跨行关键词预标 transfer + metadata（`subaccount` / `cross_bank_hint`）；新增 `services/transfer_matcher`（评分模型：金额=50 / 日期 0..30 / 描述提示 0..30；阈值 75 自动配对）；`v_account_balance` 视图按 metadata `transfer_direction` 取符号，子账户 transfer 跳过；新增 `POST /transactions/{id}/mark-transfer` 与 `GET /transactions/transfers/suggestions`。E2E：N26+Revolut 双 PDF 导入后 6 笔跨行转账自动配对、子账户操作不影响余额、数学完全对得上 |
 
 ## 下一步
 按 `docx/ROADMAP.md` 的 P0-1 ~ P0-5 顺序推进。建议起点：**P0-1 APScheduler 接入**（解锁后续所有"实时"体感）。

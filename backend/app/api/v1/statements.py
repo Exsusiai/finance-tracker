@@ -82,6 +82,7 @@ def _tx_to_out(t: Transaction) -> TransactionOut:
         external_id=t.external_id,
         is_pending=t.is_pending,
         metadata_json=t.metadata_json,
+        user_note=t.user_note,
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
@@ -156,6 +157,7 @@ async def upload_pdf(
                     source="pdf_import",
                     pdf_import_id=pdf_import.id,
                     external_id=tx_data.get("external_id"),
+                    metadata_json=tx_data.get("metadata_json"),
                     # Default pending; auto-categorizer below promotes matched ones
                     is_pending=True,
                 )
@@ -169,6 +171,22 @@ async def upload_pdf(
 
         await db.flush()
         pdf_import.transactions_count = len(result.get("transactions", []))
+
+        # Run cross-account transfer matcher against the freshly imported batch
+        if result.get("transactions"):
+            from app.services.transfer_matcher import auto_pair_after_import
+            new_tx_ids = [
+                row.id for row in (await db.execute(
+                    select(Transaction.id).where(Transaction.pdf_import_id == pdf_import.id)
+                )).all()
+            ]
+            try:
+                await auto_pair_after_import(db, new_tx_ids)
+                await db.flush()
+            except Exception as e:
+                # Non-fatal: matcher errors shouldn't break the import
+                import structlog
+                structlog.get_logger(__name__).warning("transfer_matcher_failed", error=str(e))
 
         # Get preview (first 5) with eager-loaded relationships
         preview_stmt = (

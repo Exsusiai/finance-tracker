@@ -151,6 +151,7 @@ class TransactionCreate(BaseModel):
     external_id: str | None = None
     is_pending: bool = False
     metadata_json: str | None = None
+    user_note: str | None = None
 
 
 class TransactionUpdate(BaseModel):
@@ -172,6 +173,7 @@ class TransactionUpdate(BaseModel):
     external_id: str | None = None
     is_pending: bool | None = None
     metadata_json: str | None = None
+    user_note: str | None = None
 
 
 class TransactionOut(BaseModel):
@@ -198,6 +200,7 @@ class TransactionOut(BaseModel):
     external_id: str | None
     is_pending: bool
     metadata_json: str | None
+    user_note: str | None = None
     created_at: str
     updated_at: str
 

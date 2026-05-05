@@ -74,6 +74,7 @@ def _tx_to_out(t: Transaction) -> TransactionOut:
         external_id=t.external_id,
         is_pending=t.is_pending,
         metadata_json=t.metadata_json,
+        user_note=t.user_note,
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
@@ -355,6 +356,89 @@ async def delete_transaction(
     if period:
         await recompute_period(db, period[0], period[1])
     return ApiSuccess(data={"id": transaction_id, "deleted": True})
+
+
+# ─── Transfer matching ────────────────────────────────────────────────
+
+
+@router.post("/{transaction_id}/mark-transfer", response_model=ApiSuccess[TransactionOut])
+async def mark_as_transfer(
+    transaction_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    counter_transaction_id: int | None = Query(None,
+        description="If known, the matching tx in the other account. Both rows get type='transfer' and cross-link."),
+):
+    """Mark a single tx as a transfer; optionally pair with a counter-leg.
+
+    Without `counter_transaction_id`: just flips type → 'transfer' (useful when
+    only one side of the transfer was recorded, e.g. a one-off SEPA).
+    With `counter_transaction_id`: also flips that side and cross-links the two.
+    """
+    stmt = (
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(Transaction.id == transaction_id, Transaction.deleted_at.is_(None))
+    )
+    tx = (await db.execute(stmt)).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Transaction", transaction_id)
+
+    old_period = parse_period(tx.occurred_at)
+    tx.type = "transfer"
+    tx.is_pending = False
+
+    if counter_transaction_id is not None:
+        ctr = (await db.execute(
+            select(Transaction).where(
+                Transaction.id == counter_transaction_id,
+                Transaction.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if not ctr:
+            raise NotFoundError("Counter Transaction", counter_transaction_id)
+        ctr.type = "transfer"
+        ctr.is_pending = False
+        tx.counter_account_id = ctr.account_id
+        ctr.counter_account_id = tx.account_id
+        # Recompute both periods (counter may be on a different month)
+        ctr_period = parse_period(ctr.occurred_at)
+        await db.flush()
+        await recompute_for_periods(db, [old_period, ctr_period])
+    else:
+        await db.flush()
+        await recompute_for_periods(db, [old_period])
+
+    return ApiSuccess(data=_tx_to_out(tx))
+
+
+@router.get("/transfers/suggestions", response_model=ApiSuccess[list[dict]])
+async def get_transfer_suggestions(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Suggest pairs the matcher couldn't auto-confirm (score 50–74)."""
+    from app.services.transfer_matcher import find_transfer_pairs, SCORE_THRESHOLD_AUTO
+    candidates = await find_transfer_pairs(db)
+    suggestions = [
+        {
+            "out_transaction_id": c.a.id,
+            "in_transaction_id": c.b.id,
+            "out_account_id": c.a.account_id,
+            "in_account_id": c.b.account_id,
+            "amount": str(c.a.amount),
+            "currency": c.a.currency,
+            "out_date": c.a.occurred_at,
+            "in_date": c.b.occurred_at,
+            "out_description": c.a.description,
+            "in_description": c.b.description,
+            "score": c.score,
+            "reasons": c.reasons,
+        }
+        for c in candidates
+        if c.score < SCORE_THRESHOLD_AUTO
+    ]
+    return ApiSuccess(data=suggestions)
 
 
 @router.post("/{transaction_id}/categorize", response_model=ApiSuccess[TransactionOut])

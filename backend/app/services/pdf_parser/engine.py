@@ -168,6 +168,54 @@ def _de_amount(s: str) -> Decimal:
     return Decimal(s)
 
 
+# Sub-account / vault keywords appearing in bank PDFs. When matched in a row's
+# description we override `type` to "transfer" and tag `metadata_json` with
+# subaccount=true so the balance view skips it (the money stays inside the
+# same bank, just changes pocket).
+_SUBACCOUNT_KEYWORDS = (
+    # N26 Spaces / Vault
+    "from saving", "to saving",
+    "from spaces", "to spaces",
+    # Revolut Pockets / Vaults / Instant Access Savings
+    "from instant access savings", "to instant access savings",
+    "from vault", "to vault",
+    "from pocket", "to pocket",
+    # Generic
+    "round-up",
+)
+
+# Cross-bank transfer cues (description-level). When matched we mark the row as
+# a transfer right away, even before the matcher pairs it with a counterparty
+# in another account.
+_CROSS_BANK_TRANSFER_HINTS = (
+    "outgoing transfer",
+    "incoming transfer",
+    "sepa direct debit",
+    "to jingsheng chen",         # owner-to-owner self-transfer
+    "from jingsheng chen",
+    "payment from jingsheng chen",
+    "payment to jingsheng chen",
+)
+
+
+def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
+    """Decide whether a row is a transfer based on description heuristics.
+
+    Returns (final_type, metadata_dict_or_None).
+      - sub-account keyword → ("transfer", {"subaccount": True})
+      - cross-bank cue       → ("transfer", {"cross_bank_hint": True})
+      - otherwise            → (default_type, None)
+    """
+    d = desc.lower()
+    for kw in _SUBACCOUNT_KEYWORDS:
+        if kw in d:
+            return "transfer", {"subaccount": True, "matched": kw}
+    for kw in _CROSS_BANK_TRANSFER_HINTS:
+        if kw in d:
+            return "transfer", {"cross_bank_hint": True, "matched": kw}
+    return default_type, None
+
+
 def _make_tx(
     *,
     date_iso: str,
@@ -180,22 +228,22 @@ def _make_tx(
 ) -> dict:
     """Build a transaction dict.
 
-    `counterparty` here is the **issuing bank** (AMEX-DE / N26 / ...), used only
-    for `external_id` namespacing — NOT written to the `counterparty` column,
-    because that column is semantically the actual merchant. The merchant name
-    sits in `description` for these PDFs.
+    Auto-promotes `type` to 'transfer' when the description matches sub-account
+    or cross-bank-transfer keywords. Sub-account moves are tagged so the balance
+    view ignores them (money stays inside the same bank).
     """
+    final_type, metadata = _classify_transfer(description, tx_type)
+    import json as _json
     return {
         "occurred_at": date_iso,
         "amount": str(abs(amount)),
         "currency": currency,
-        "type": tx_type,
+        "type": final_type,
         "description": description.strip(),
         "raw_description": description.strip(),
-        # Leave counterparty NULL so auto-learn extracts keywords from `description`
-        # (the real merchant text) rather than from the issuing bank's name.
         "counterparty": None,
         "external_id": f"{counterparty.lower()}_{seq}",
+        "metadata_json": _json.dumps(metadata) if metadata else None,
     }
 
 

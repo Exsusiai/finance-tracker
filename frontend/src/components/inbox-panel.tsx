@@ -101,18 +101,26 @@ interface InboxRowProps {
 
 function InboxRow({ tx, categories, onDone }: InboxRowProps) {
   const [pickedCat, setPickedCat] = useState<number | null>(tx.category_id ?? null);
+  const [note, setNote] = useState<string>(tx.user_note ?? "");
+  const [showNote, setShowNote] = useState<boolean>(Boolean(tx.user_note));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isUserChange = pickedCat !== (tx.category_id ?? null);
+  const noteChanged = (note.trim() || null) !== (tx.user_note ?? null);
 
   const handleConfirm = async () => {
     setError(null);
     try {
       setSubmitting(true);
       // Always send category_id (even if unchanged) so backend's learn-only-on-change
-      // logic can short-circuit cleanly.
-      await confirmInboxItem(tx.id, { category_id: pickedCat });
+      // logic can short-circuit cleanly. user_note is only sent when changed,
+      // to avoid clobbering a previously-saved note with empty string.
+      const payload: { category_id: number | null; user_note?: string | null } = {
+        category_id: pickedCat,
+      };
+      if (noteChanged) payload.user_note = note.trim() || null;
+      await confirmInboxItem(tx.id, payload);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "确认失败");
@@ -124,7 +132,7 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
   const grouped = categoriesByParent(categories);
 
   return (
-    <tr className="border-t border-border hover:bg-muted/30 transition-colors">
+    <tr className="border-t border-border hover:bg-muted/30 transition-colors align-top">
       <td className="px-3 py-2.5 whitespace-nowrap text-muted-foreground">
         {formatDate(tx.occurred_at)}
       </td>
@@ -134,6 +142,30 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
         </div>
         {tx.account_name && (
           <div className="text-[10px] text-muted-foreground mt-0.5">{tx.account_name}</div>
+        )}
+        {showNote ? (
+          <div className="mt-2">
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="备注（保存后系统会用作 AI 分类时的线索）"
+              rows={2}
+              className="w-full max-w-[320px] px-2 py-1 text-[11px] rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:ring-2 focus:ring-ring resize-y"
+            />
+            {noteChanged && (
+              <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
+                💡 备注会作为分类线索被记住
+              </div>
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowNote(true)}
+            className="mt-1 text-[10px] text-muted-foreground hover:text-primary transition-colors"
+          >
+            + 备注
+          </button>
         )}
       </td>
       <td className={cn(

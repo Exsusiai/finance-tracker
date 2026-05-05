@@ -49,6 +49,11 @@ _BALANCE_VIEW_DROP_SQL = "DROP VIEW IF EXISTS v_account_balance"
 # but historically also accepted signed values for `manual` rows. We derive the
 # direction from `type` so all writers behave consistently and the view stays
 # correct regardless of sign convention.
+#
+# Special case for sub-account transfers (e.g. N26 main → N26 Saving Space):
+# the user does NOT want sub-accounts as separate entities, so an in-bank move
+# should leave the bank's overall balance unchanged. We tag those rows with
+# `metadata_json LIKE %"subaccount":true%` and the view skips them.
 _BALANCE_VIEW_SQL = """
 CREATE VIEW v_account_balance AS
 SELECT
@@ -56,11 +61,21 @@ SELECT
     a.name            AS account_name,
     a.currency        AS currency,
     a.initial_balance + COALESCE(SUM(
-        CASE t.type
-            WHEN 'expense'    THEN -ABS(t.amount)
-            WHEN 'income'     THEN  ABS(t.amount)
-            WHEN 'transfer'   THEN -ABS(t.amount)  -- single-row outflow; reverse leg adds back
-            WHEN 'adjustment' THEN  t.amount       -- adjustment carries its own sign
+        CASE
+            -- In-bank sub-account moves: ignore (money stays inside the bank)
+            WHEN json_extract(t.metadata_json, '$.subaccount') = 1 THEN 0
+            -- Cross-account transfer with explicit direction tag
+            WHEN t.type = 'transfer'
+                 AND json_extract(t.metadata_json, '$.transfer_direction') = 'in'
+                 THEN  ABS(t.amount)
+            WHEN t.type = 'transfer'
+                 AND json_extract(t.metadata_json, '$.transfer_direction') = 'out'
+                 THEN -ABS(t.amount)
+            -- Untagged transfer (one-sided / unmatched): default to outflow
+            WHEN t.type = 'transfer'   THEN -ABS(t.amount)
+            WHEN t.type = 'expense'    THEN -ABS(t.amount)
+            WHEN t.type = 'income'     THEN  ABS(t.amount)
+            WHEN t.type = 'adjustment' THEN  t.amount
             ELSE 0
         END
     ), 0) AS balance
@@ -90,6 +105,21 @@ async def lifespan(app: FastAPI):
         from sqlalchemy import text
         await conn.execute(text(_BALANCE_VIEW_DROP_SQL))
         await conn.execute(text(_BALANCE_VIEW_SQL))
+
+    # Lightweight in-place schema migrations (until Alembic is wired up — P2-4).
+    # Each entry: (table, column, sql_to_add). Idempotent.
+    _column_migrations = [
+        ("transactions", "user_note", "ALTER TABLE transactions ADD COLUMN user_note TEXT"),
+    ]
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        for table, column, ddl in _column_migrations:
+            existing_cols = [
+                row[1] for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).fetchall()
+            ]
+            if column not in existing_cols:
+                await conn.execute(text(ddl))
+                logger.info("schema_column_added", table=table, column=column)
 
     # Seed default expense categories + starter matching rules (idempotent)
     from app.services.categorizer.seed import seed_categories

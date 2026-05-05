@@ -350,6 +350,7 @@ export interface TransactionOut {
   external_id: string | null;
   is_pending: boolean;
   metadata_json: string | null;
+  user_note: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -596,7 +597,11 @@ export async function fetchInbox(limit: number = 100): Promise<TransactionOut[]>
 
 export async function confirmInboxItem(
   id: number,
-  data: { category_id?: number | null; description?: string | null },
+  data: {
+    category_id?: number | null;
+    description?: string | null;
+    user_note?: string | null;
+  },
 ): Promise<TransactionOut> {
   return request(`/api/v1/transactions/inbox/${id}/confirm`, {
     method: "POST",

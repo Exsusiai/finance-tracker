@@ -194,6 +194,10 @@ class Transaction(Base):
     external_id: Mapped[str | None] = mapped_column(String(255))
     is_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     metadata_json: Mapped[str | None] = mapped_column(Text)
+    # User-authored note attached at inbox confirmation time. Persisted as a
+    # classification "clue" — surfaced to the LLM-fallback path (P1-1c) as
+    # few-shot context for similar future transactions.
+    user_note: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     deleted_at: Mapped[str | None] = mapped_column(String(30))
