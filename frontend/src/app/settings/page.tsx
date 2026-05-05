@@ -12,6 +12,7 @@ import { ApiError, deleteAccount, type AccountOut } from "@/lib/api";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { cn, formatCurrency } from "@/lib/utils";
 import { CategoryManager } from "@/components/category-manager";
+import { SubaccountListEditor } from "@/components/subaccount-list-editor";
 
 export default function SettingsPage() {
   const {
@@ -179,6 +180,7 @@ export default function SettingsPage() {
                         已停用
                       </p>
                     )}
+                    <SubaccountListEditor account={a} />
                   </div>
                 );
               })}

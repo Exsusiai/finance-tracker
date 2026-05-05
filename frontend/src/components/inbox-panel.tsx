@@ -4,6 +4,7 @@ import { useState } from "react";
 import { mutate as swrMutate } from "swr";
 import { useInbox, useCategories } from "@/lib/hooks";
 import { ApiError, confirmInboxItem, type CategoryOut, type TransactionOut } from "@/lib/api";
+import { MarkTransferDialog } from "@/components/mark-transfer-dialog";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui-common";
 
@@ -105,17 +106,28 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
   const [showNote, setShowNote] = useState<boolean>(Boolean(tx.user_note));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showTransferDialog, setShowTransferDialog] = useState(false);
 
   const isUserChange = pickedCat !== (tx.category_id ?? null);
   const noteChanged = (note.trim() || null) !== (tx.user_note ?? null);
+  const isTransfer = tx.type === "transfer";
+
+  // Distinguish sub-account vs cross-bank transfer for the visual badge.
+  const txMeta = parseMeta(tx.metadata_json);
+  const isSubaccount = txMeta?.subaccount === true;
+  const isCrossBank = isTransfer && !isSubaccount && tx.counter_account_id != null;
+  const transferLabel = isSubaccount ? "内部" : isCrossBank ? "跨行" : isTransfer ? "转账" : null;
+  const transferBadgeClass = isSubaccount
+    ? "bg-slate-500/15 text-slate-600 dark:text-slate-400"
+    : "bg-blue-500/15 text-blue-600 dark:text-blue-400";
+
+  // Filter inbox category dropdown by tx type (expense → expense cats only, etc.)
+  const eligibleCategories = categories.filter((c) => c.kind === tx.type);
 
   const handleConfirm = async () => {
     setError(null);
     try {
       setSubmitting(true);
-      // Always send category_id (even if unchanged) so backend's learn-only-on-change
-      // logic can short-circuit cleanly. user_note is only sent when changed,
-      // to avoid clobbering a previously-saved note with empty string.
       const payload: { category_id: number | null; user_note?: string | null } = {
         category_id: pickedCat,
       };
@@ -129,7 +141,8 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
     }
   };
 
-  const grouped = categoriesByParent(categories);
+
+  const grouped = categoriesByParent(eligibleCategories);
 
   return (
     <tr className="border-t border-border hover:bg-muted/30 transition-colors align-top">
@@ -137,8 +150,25 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
         {formatDate(tx.occurred_at)}
       </td>
       <td className="px-3 py-2.5">
-        <div className="font-medium text-foreground truncate max-w-[280px]" title={tx.description ?? ""}>
-          {tx.description || tx.raw_description || "—"}
+        <div className="font-medium text-foreground truncate max-w-[280px] flex items-center gap-1.5" title={tx.description ?? ""}>
+          {transferLabel && (
+            <span
+              className={cn(
+                "inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase shrink-0",
+                transferBadgeClass,
+              )}
+              title={
+                isSubaccount
+                  ? "同银行内子账户互转（不影响该银行余额）"
+                  : isCrossBank
+                  ? "跨银行转账（已配对，不计入支出/收入）"
+                  : "转账（不计入支出/收入）"
+              }
+            >
+              {transferLabel}
+            </span>
+          )}
+          <span className="truncate">{tx.description || tx.raw_description || "—"}</span>
         </div>
         {tx.account_name && (
           <div className="text-[10px] text-muted-foreground mt-0.5">{tx.account_name}</div>
@@ -209,19 +239,55 @@ function InboxRow({ tx, categories, onDone }: InboxRowProps) {
         )}
       </td>
       <td className="px-3 py-2.5 text-right whitespace-nowrap">
-        <button
-          onClick={handleConfirm}
-          disabled={submitting}
-          className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
-        >
-          {submitting ? "确认中…" : "确认"}
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={handleConfirm}
+            disabled={submitting}
+            className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {submitting ? "确认中…" : "确认"}
+          </button>
+          {!isTransfer && (
+            <button
+              type="button"
+              onClick={() => setShowTransferDialog(true)}
+              disabled={submitting}
+              title="标记为转账：选择方向 + 对方账户"
+              className="text-[10px] px-2 py-1 rounded-md text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
+            >
+              这是转账…
+            </button>
+          )}
+        </div>
         {error && (
           <div className="text-[10px] text-destructive mt-1">{error}</div>
         )}
       </td>
+      {showTransferDialog && (
+        <td className="hidden">
+          <MarkTransferDialog
+            tx={tx}
+            onClose={() => setShowTransferDialog(false)}
+            onSuccess={() => {
+              setShowTransferDialog(false);
+              onDone();
+            }}
+          />
+        </td>
+      )}
     </tr>
   );
+}
+
+/** Safely parse `metadata_json` returned by backend. */
+function parseMeta(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Group categories by their parent (only return parents that have at least one child). */

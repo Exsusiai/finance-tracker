@@ -20,8 +20,9 @@ import { CategoryFilter } from "@/components/category-filter";
 import { PdfImportPanel } from "@/components/pdf-import-panel";
 import { InboxPanel } from "@/components/inbox-panel";
 import { CategoryBreakdownView } from "@/components/category-breakdown-view";
+import { TransferSuggestionsPanel } from "@/components/transfer-suggestions-panel";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { useInbox } from "@/lib/hooks";
+import { useInbox, useTransferSuggestions } from "@/lib/hooks";
 
 type SortField = "occurred_at" | "amount" | "category";
 type SortDir = "asc" | "desc";
@@ -86,6 +87,8 @@ export default function TransactionsPage() {
   const { data: accounts } = useAccounts(true);
   const { data: inboxItems } = useInbox(200);
   const inboxCount = inboxItems?.length ?? 0;
+  const { data: transferSuggestions } = useTransferSuggestions();
+  const suggestionCount = transferSuggestions?.length ?? 0;
 
   // ─── Derived data ─────────────────────────────────────────────────────
   const transactions = useMemo(() => {
@@ -195,6 +198,14 @@ export default function TransactionsPage() {
                 </span>
               )}
             </TabsTrigger>
+            <TabsTrigger value="transfers">
+              转账建议
+              {suggestionCount > 0 && (
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded-full bg-blue-500 text-white">
+                  {suggestionCount}
+                </span>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="import">PDF 导入</TabsTrigger>
           </TabsList>
 
@@ -204,6 +215,10 @@ export default function TransactionsPage() {
 
           <TabsContent value="inbox">
             <InboxPanel />
+          </TabsContent>
+
+          <TabsContent value="transfers">
+            <TransferSuggestionsPanel />
           </TabsContent>
 
           <TabsContent value="list">

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -134,7 +135,24 @@ async def upload_pdf(
         pdf_import.status = "parsing"
         await db.flush()
 
-        result = await parse_pdf_statement(db, pdf_import, content)
+        # Look up the account's sub-account names so the parser can identify
+        # internal moves (e.g. N26 main → "Investing" Space).
+        subaccount_names: list[str] = []
+        if account_id:
+            from app.models import Account
+            acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
+            if acct and acct.metadata_json:
+                try:
+                    meta = json.loads(acct.metadata_json)
+                    raw_names = meta.get("subaccount_names") if isinstance(meta, dict) else None
+                    if isinstance(raw_names, list):
+                        subaccount_names = [str(n) for n in raw_names if str(n).strip()]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        result = await parse_pdf_statement(
+            db, pdf_import, content, subaccount_names=subaccount_names,
+        )
         pdf_import.detected_bank = result.get("detected_bank")
         pdf_import.parser_version = result.get("parser_version")
         pdf_import.statement_period = result.get("statement_period")

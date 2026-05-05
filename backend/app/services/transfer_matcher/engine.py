@@ -251,23 +251,124 @@ async def auto_pair_after_import(
 ) -> dict:
     """Run the matcher on a freshly imported batch; auto-pair high-confidence
     matches. Returns a summary dict for caller logging."""
+    # Step 1: same-account amount pairing → flag as in-bank sub-account moves
+    same_acct = await detect_same_account_pairs(db, candidate_ids=new_tx_ids)
+    same_paired_ids: list[tuple[int, int]] = []
+    for out_tx, in_tx in same_acct:
+        await mark_subaccount_pair(db, out_tx, in_tx)
+        same_paired_ids.append((out_tx.id, in_tx.id))
+        logger.info("subaccount_pair_marked", out_id=out_tx.id, in_id=in_tx.id)
+
+    # Step 2: cross-account transfer matcher
     candidates = await find_transfer_pairs(db, candidate_ids=new_tx_ids)
     auto = [c for c in candidates if c.score >= SCORE_THRESHOLD_AUTO]
     suggested = [c for c in candidates if SCORE_THRESHOLD_SUGGEST <= c.score < SCORE_THRESHOLD_AUTO]
 
     paired_ids: list[tuple[int, int]] = []
     for c in auto:
+        # Skip if either side was already marked as sub-account in step 1
+        if c.a.type == "transfer" and json.loads(c.a.metadata_json or "{}").get("subaccount"):
+            continue
+        if c.b.type == "transfer" and json.loads(c.b.metadata_json or "{}").get("subaccount"):
+            continue
         await pair_transactions(db, c.a, c.b)
         paired_ids.append((c.a.id, c.b.id))
         logger.info("transfer_paired", out_id=c.a.id, in_id=c.b.id, score=c.score, reasons=c.reasons)
 
-    if paired_ids:
+    if paired_ids or same_paired_ids:
         await db.flush()
 
     return {
         "auto_paired": paired_ids,
+        "subaccount_paired": same_paired_ids,
         "suggested": [
             {"out_id": c.a.id, "in_id": c.b.id, "score": c.score, "reasons": c.reasons}
             for c in suggested
         ],
     }
+
+
+# ─── Same-account amount-matching heuristic ────────────────────────────
+
+
+async def detect_same_account_pairs(
+    db: AsyncSession,
+    *,
+    candidate_ids: Iterable[int] | None = None,
+    window_days: int = WINDOW_DAYS,
+) -> list[tuple[Transaction, Transaction]]:
+    """Within the SAME account, find +X / -X pairs within `window_days`.
+
+    Heuristic: when the same statement has both an outgoing (expense) and an
+    incoming (income) row of identical amount + currency within ±N days, it's
+    almost always an in-bank sub-account move (e.g. main → "Investing" Space).
+    Returns pairs `(out_tx, in_tx)` to be marked as `subaccount=true`.
+
+    This catches user-customised sub-account names that the keyword list and
+    user list both miss (e.g. user added a Space but didn't add it to the
+    settings list yet).
+    """
+    base = select(Transaction).where(Transaction.deleted_at.is_(None))
+    rows = (await db.execute(base)).scalars().all()
+    rows = [r for r in rows if _is_eligible(r)]
+
+    cand_set = set(candidate_ids) if candidate_ids is not None else None
+
+    # Bucket by (account_id, amount, currency)
+    buckets: dict[tuple[int, str, str], list[Transaction]] = {}
+    for r in rows:
+        if r.type not in ("expense", "income"):
+            continue
+        key = (r.account_id, str(r.amount), r.currency)
+        buckets.setdefault(key, []).append(r)
+
+    pairs: list[tuple[Transaction, Transaction]] = []
+    used: set[int] = set()
+
+    for (_acct, _amt, _cur), bucket in buckets.items():
+        outs = [r for r in bucket if r.type == "expense" and r.id not in used]
+        ins  = [r for r in bucket if r.type == "income" and r.id not in used]
+        for out_tx in outs:
+            for in_tx in ins:
+                if in_tx.id in used:
+                    continue
+                # Only match when at least one side is in the new batch
+                if cand_set is not None and out_tx.id not in cand_set and in_tx.id not in cand_set:
+                    continue
+                try:
+                    days = abs((_date_only(out_tx.occurred_at) - _date_only(in_tx.occurred_at)).days)
+                except (ValueError, TypeError):
+                    continue
+                if days > window_days:
+                    continue
+                pairs.append((out_tx, in_tx))
+                used.add(out_tx.id)
+                used.add(in_tx.id)
+                break
+
+    return pairs
+
+
+async def mark_subaccount_pair(
+    db: AsyncSession,
+    out_tx: Transaction,
+    in_tx: Transaction,
+) -> None:
+    """Tag a same-account ± pair as in-bank sub-account moves.
+
+    Both legs become `type='transfer'` with `metadata.subaccount=true`. The
+    balance view skips them (money stayed inside the bank); cash-flow doesn't
+    count them as income/expense.
+    """
+    out_tx.type = "transfer"
+    in_tx.type = "transfer"
+    out_tx.metadata_json = _merge_meta(
+        out_tx.metadata_json,
+        {"subaccount": True, "matched": "amount_match_heuristic", "source": "same_account_pair",
+         "transfer_direction": "out", "paired_with_tx_id": in_tx.id},
+    )
+    in_tx.metadata_json = _merge_meta(
+        in_tx.metadata_json,
+        {"subaccount": True, "matched": "amount_match_heuristic", "source": "same_account_pair",
+         "transfer_direction": "in", "paired_with_tx_id": out_tx.id},
+    )

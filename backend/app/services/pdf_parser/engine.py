@@ -31,8 +31,16 @@ async def parse_pdf_statement(
     db: AsyncSession,
     pdf_import: PdfImport,
     content: bytes,
+    *,
+    subaccount_names: list[str] | None = None,
 ) -> dict[str, Any]:
     """Parse a PDF bank statement.
+
+    Args:
+      subaccount_names: per-account user-maintained list of sub-account names
+        (e.g. ["Investing", "Dream List"]). When a tx description contains any
+        of these, we tag the tx as a sub-account move (type='transfer' +
+        metadata.subaccount=true) so the balance view skips it.
 
     Returns dict with:
         detected_bank: str | None
@@ -53,6 +61,10 @@ async def parse_pdf_statement(
         raw_text = await asyncio.to_thread(_extract_text_sync, content)
     except Exception as e:
         return _empty_result(error=f"Failed to extract text: {e}")
+    # Stash for transaction-level use (read in `_make_tx`)
+    _SUBACCOUNT_USER_NAMES.clear()
+    if subaccount_names:
+        _SUBACCOUNT_USER_NAMES.extend(n.strip().lower() for n in subaccount_names if n.strip())
 
     detected_bank = _detect_bank(raw_text)
 
@@ -176,13 +188,25 @@ _SUBACCOUNT_KEYWORDS = (
     # N26 Spaces / Vault
     "from saving", "to saving",
     "from spaces", "to spaces",
+    "from main account", "to main account",
     # Revolut Pockets / Vaults / Instant Access Savings
     "from instant access savings", "to instant access savings",
     "from vault", "to vault",
     "from pocket", "to pocket",
+    # Common user-customizable Space names (heuristic — best-effort defaults)
+    "from investing", "to investing",
+    "from dream list", "to dream list",
+    "from emergency", "to emergency",
+    "from saving space", "to saving space",
     # Generic
     "round-up",
+    "savings interest",
+    "internal transfer",
 )
+
+# Mutable list filled by `parse_pdf_statement` from the caller-supplied
+# per-account `subaccount_names`. Lower-cased.
+_SUBACCOUNT_USER_NAMES: list[str] = []
 
 # Cross-bank transfer cues (description-level). When matched we mark the row as
 # a transfer right away, even before the matcher pairs it with a counterparty
@@ -207,9 +231,15 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
       - otherwise            → (default_type, None)
     """
     d = desc.lower()
+    # 1) User-maintained per-account sub-account names (highest precedence)
+    for name in _SUBACCOUNT_USER_NAMES:
+        if name in d:
+            return "transfer", {"subaccount": True, "matched": name, "source": "user_list"}
+    # 2) Hard-coded common sub-account keywords
     for kw in _SUBACCOUNT_KEYWORDS:
         if kw in d:
-            return "transfer", {"subaccount": True, "matched": kw}
+            return "transfer", {"subaccount": True, "matched": kw, "source": "keyword"}
+    # 3) Cross-bank cues
     for kw in _CROSS_BANK_TRANSFER_HINTS:
         if kw in d:
             return "transfer", {"cross_bank_hint": True, "matched": kw}

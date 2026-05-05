@@ -19,6 +19,7 @@ import {
   fetchAssets,
   fetchFxRates,
   fetchInbox,
+  fetchTransferSuggestions,
 } from "@/lib/api";
 import type { TransactionFilters, TransactionOut } from "@/lib/api";
 
@@ -135,6 +136,14 @@ export function useInbox(limit: number = 100) {
   return useSWR(
     `inbox-${limit}`,
     () => fetchInbox(limit),
+    { revalidateOnFocus: false },
+  );
+}
+
+export function useTransferSuggestions() {
+  return useSWR(
+    "transfer-suggestions",
+    () => fetchTransferSuggestions(),
     { revalidateOnFocus: false },
   );
 }

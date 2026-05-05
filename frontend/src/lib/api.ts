@@ -551,6 +551,7 @@ export interface AccountUpdateInput {
   currency?: string;
   is_active?: boolean;
   notes?: string;
+  metadata_json?: string | null;
 }
 
 export async function createAccount(data: AccountCreateInput): Promise<AccountOut> {
@@ -588,6 +589,39 @@ export async function adjustAccountBalance(
 }
 
 // ─── PDF Import ────────────────────────────────────────────────────────
+
+// ─── Transfer matching ────────────────────────────────────────────────
+
+export interface TransferSuggestion {
+  out_transaction_id: number;
+  in_transaction_id: number;
+  out_account_id: number;
+  in_account_id: number;
+  amount: string;
+  currency: string;
+  out_date: string;
+  in_date: string;
+  out_description: string | null;
+  in_description: string | null;
+  score: number;
+  reasons: string[];
+}
+
+export async function fetchTransferSuggestions(): Promise<TransferSuggestion[]> {
+  return request("/api/v1/transactions/transfers/suggestions");
+}
+
+export async function markAsTransfer(
+  id: number,
+  counterTransactionId?: number,
+): Promise<TransactionOut> {
+  const params = counterTransactionId
+    ? `?counter_transaction_id=${counterTransactionId}`
+    : "";
+  return request(`/api/v1/transactions/${id}/mark-transfer${params}`, {
+    method: "POST",
+  });
+}
 
 // ─── Inbox (pending transactions awaiting user confirmation) ──────────
 

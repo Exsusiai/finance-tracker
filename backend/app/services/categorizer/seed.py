@@ -19,8 +19,9 @@ from app.models import CategorizationRule, Category
 logger = structlog.get_logger(__name__)
 
 
-# (parent_name, [(child_name, [keyword1, keyword2, ...]), ...])
-_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
+# Taxonomy keyed by `kind`: {"expense" | "income" | "transfer"} → [parents...]
+# Each parent: (parent_name, [(child_name, [keyword1, ...]), ...])
+_EXPENSE_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
     ("住家", [
         ("房租", ["miete", "rent", "房租"]),
         ("房屋维修", ["reparatur", "repair", "维修"]),
@@ -78,6 +79,36 @@ _TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
 ]
 
 
+_INCOME_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
+    ("收入", [
+        ("工资", ["salary", "gehalt", "lohn", "payroll", "工资"]),
+        ("退款 / 报销", ["refund", "reimburs", "rückerstattung", "退款"]),
+        ("利息 / 投资收益", ["interest", "dividend", "zinsen", "interest paid", "利息"]),
+        ("礼金 / 红包", ["gift", "geschenk", "红包", "礼金"]),
+        ("其他收入", []),
+    ]),
+]
+
+
+_TRANSFER_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
+    ("转账", [
+        ("信用卡还款", ["amex", "advanzia", "visa", "mastercard", "kreditkarte", "credit card", "tf bank", "信用卡"]),
+        ("跨行划转", ["sepa", "outgoing transfer", "incoming transfer", "wise", "transferwise", "to jingsheng", "from jingsheng"]),
+        ("内部储蓄", ["saving", "saving space", "vault", "pocket", "instant access", "spaces", "round-up"]),
+        ("投资划转", ["binance", "bitget", "coinbase", "okx", "kraken", "investing", "broker"]),
+        ("其他转账", []),
+    ]),
+]
+
+
+# Combined map keyed by Category.kind for the seeder's iteration logic.
+_TAXONOMY_BY_KIND: dict[str, list[tuple[str, list[tuple[str, list[str]]]]]] = {
+    "expense": _EXPENSE_TAXONOMY,
+    "income": _INCOME_TAXONOMY,
+    "transfer": _TRANSFER_TAXONOMY,
+}
+
+
 async def seed_categories(db: AsyncSession) -> dict[str, int]:
     """Idempotently insert taxonomy + starter matching rules.
 
@@ -86,20 +117,21 @@ async def seed_categories(db: AsyncSession) -> dict[str, int]:
     cat_added = 0
     rule_added = 0
 
-    for parent_name, children in _TAXONOMY:
-        parent = await _ensure_category(db, name=parent_name, kind="expense", parent_id=None)
-        if parent[1]:
-            cat_added += 1
-
-        for child_name, keywords in children:
-            child = await _ensure_category(db, name=child_name, kind="expense", parent_id=parent[0])
-            if child[1]:
+    for kind, taxonomy in _TAXONOMY_BY_KIND.items():
+        for parent_name, children in taxonomy:
+            parent = await _ensure_category(db, name=parent_name, kind=kind, parent_id=None)
+            if parent[1]:
                 cat_added += 1
-            child_id = child[0]
 
-            for kw in keywords:
-                if await _ensure_rule(db, pattern=kw, category_id=child_id):
-                    rule_added += 1
+            for child_name, keywords in children:
+                child = await _ensure_category(db, name=child_name, kind=kind, parent_id=parent[0])
+                if child[1]:
+                    cat_added += 1
+                child_id = child[0]
+
+                for kw in keywords:
+                    if await _ensure_rule(db, pattern=kw, category_id=child_id):
+                        rule_added += 1
 
     if cat_added or rule_added:
         await db.flush()
