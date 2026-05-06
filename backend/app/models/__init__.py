@@ -127,6 +127,10 @@ class PdfImportStatus(StrEnum):
     parsing = "parsing"
     success = "success"
     failed = "failed"
+    awaiting_account = "awaiting_account"  # parser succeeded but the user
+                                            # needs to choose which account
+                                            # this PDF belongs to before
+                                            # transactions are inserted.
 
 
 class PdfImport(Base):
@@ -153,7 +157,7 @@ class PdfImport(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','parsing','success','failed')",
+            "status IN ('pending','parsing','success','failed','awaiting_account')",
             name="ck_pdf_import_status",
         ),
     )

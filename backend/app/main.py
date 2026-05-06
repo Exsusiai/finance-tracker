@@ -153,6 +153,52 @@ async def lifespan(app: FastAPI):
         await conn.execute(text(_BALANCE_VIEW_DROP_SQL))
         await conn.execute(text(_BALANCE_VIEW_SQL))
 
+    # 2026-05-06: SQLite can't ALTER a CHECK constraint. When we add a new
+    # allowed value to PdfImportStatus (e.g. 'awaiting_account'), the
+    # existing table still carries the old CHECK and writes fail. Detect
+    # the old constraint and rebuild the table in place. Idempotent.
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        row = (await conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='pdf_imports'")
+        )).first()
+        existing_sql = (row[0] if row else "") or ""
+        if "awaiting_account" not in existing_sql and "pdf_imports" in existing_sql:
+            logger.info("schema_check_constraint_rebuild", table="pdf_imports")
+            await conn.execute(text("""
+                CREATE TABLE pdf_imports_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename VARCHAR(500) NOT NULL,
+                    file_hash VARCHAR(64) NOT NULL UNIQUE,
+                    file_size INTEGER NOT NULL,
+                    storage_path VARCHAR(500) NOT NULL,
+                    detected_bank VARCHAR(50),
+                    parser_version VARCHAR(50),
+                    account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+                    statement_period VARCHAR(50),
+                    transactions_count INTEGER NOT NULL DEFAULT 0,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    raw_text TEXT,
+                    metadata_json TEXT,
+                    created_at VARCHAR(30) NOT NULL,
+                    updated_at VARCHAR(30) NOT NULL,
+                    CONSTRAINT ck_pdf_import_status
+                        CHECK (status IN ('pending','parsing','success','failed','awaiting_account'))
+                )
+            """))
+            await conn.execute(text("""
+                INSERT INTO pdf_imports_new
+                SELECT id, filename, file_hash, file_size, storage_path,
+                       detected_bank, parser_version, account_id,
+                       statement_period, transactions_count, status,
+                       error_message, raw_text, metadata_json,
+                       created_at, updated_at
+                FROM pdf_imports
+            """))
+            await conn.execute(text("DROP TABLE pdf_imports"))
+            await conn.execute(text("ALTER TABLE pdf_imports_new RENAME TO pdf_imports"))
+
     # Lightweight in-place schema migrations (until Alembic is wired up — P2-4).
     # Each entry: (table, column, sql_to_add). Idempotent.
     _column_migrations = [
