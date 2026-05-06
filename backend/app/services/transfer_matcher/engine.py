@@ -248,13 +248,41 @@ async def pair_transactions(
     Crucially we tag each leg's `metadata_json.transfer_direction` so the
     balance view can apply the correct sign — without this the view's
     type='transfer' branch (default `-ABS`) would deduct from BOTH accounts.
+
+    2026-05-06 fix: when the row was previously auto-categorised by an
+    income/expense rule (e.g. "TF Bank AB" → expense:信用卡还款) and is
+    now being promoted to a transfer, the old category_id points at a
+    category whose kind != 'transfer' — that violates the FIX-5 kind
+    invariant. Try to remap to a transfer-kind category with the same
+    name (so 'expense:信用卡还款' becomes 'transfer:信用卡还款' if it
+    exists), otherwise drop the category_id so the user can re-pick.
     """
+    from sqlalchemy import select as _select
+
+    from app.models import Category
+
     out_tx.type = "transfer"
     in_tx.type = "transfer"
     out_tx.counter_account_id = in_tx.account_id
     in_tx.counter_account_id = out_tx.account_id
     out_tx.metadata_json = _merge_meta(out_tx.metadata_json, {"transfer_direction": "out"})
     in_tx.metadata_json = _merge_meta(in_tx.metadata_json, {"transfer_direction": "in"})
+
+    for leg in (out_tx, in_tx):
+        if leg.category_id is None:
+            continue
+        cat = (await db.execute(
+            _select(Category).where(Category.id == leg.category_id)
+        )).scalar_one_or_none()
+        if cat is None or cat.kind == "transfer":
+            continue  # already valid (or category gone)
+        # Try a transfer-kind category with the same name.
+        replacement = (await db.execute(
+            _select(Category).where(
+                Category.kind == "transfer", Category.name == cat.name
+            )
+        )).scalar_one_or_none()
+        leg.category_id = replacement.id if replacement is not None else None
 
 
 def _merge_meta(existing: str | None, new: dict) -> str:
