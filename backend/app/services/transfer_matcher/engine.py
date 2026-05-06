@@ -29,7 +29,7 @@ import structlog
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Account, Transaction
+from app.models import Account, Category, Transaction
 
 logger = structlog.get_logger(__name__)
 
@@ -330,17 +330,137 @@ async def auto_pair_after_import(
         paired_ids.append((c.a.id, c.b.id))
         logger.info("transfer_paired", out_id=c.a.id, in_id=c.b.id, score=c.score, reasons=c.reasons)
 
-    if paired_ids or same_paired_ids:
+    # Step 3 (2026-05-06): single-leg IBAN detection. When a tx's
+    # description / raw_description contains an IBAN that belongs to one
+    # of the user's OWN accounts (i.e. they linked it in Settings), it's
+    # an internal transfer even if the counterpart PDF hasn't been
+    # uploaded yet. The previous logic required both legs to exist for
+    # cross-account pairing — leaving the user to hand-confirm these.
+    single_leg_paired = await detect_single_leg_iban(db, candidate_ids=new_tx_ids)
+
+    if paired_ids or same_paired_ids or single_leg_paired:
         await db.flush()
 
     return {
         "auto_paired": paired_ids,
         "subaccount_paired": same_paired_ids,
+        "single_leg_iban": single_leg_paired,
         "suggested": [
             {"out_id": c.a.id, "in_id": c.b.id, "score": c.score, "reasons": c.reasons}
             for c in suggested
         ],
     }
+
+
+async def detect_single_leg_iban(
+    db: AsyncSession,
+    *,
+    candidate_ids: Iterable[int] | None = None,
+) -> list[dict]:
+    """Identify single-leg internal transfers via IBAN match.
+
+    For each not-yet-paired tx (type expense/income, not subaccount), check
+    whether its description / raw_description contains an IBAN belonging
+    to one of the user's OTHER active accounts. If so, promote the row to
+    type='transfer', set counter_account_id, and tag transfer_direction
+    (out for expense, in for income). The user can later upload the
+    counterpart PDF and the matcher will recognise both sides are already
+    transfers (idempotent).
+    """
+    base = (
+        select(Transaction)
+        .where(
+            Transaction.deleted_at.is_(None),
+            Transaction.type.in_(("expense", "income")),
+            Transaction.counter_account_id.is_(None),
+        )
+    )
+    if candidate_ids is not None:
+        ids = list(candidate_ids)
+        if not ids:
+            return []
+        base = base.where(Transaction.id.in_(ids))
+    rows = (await db.execute(base)).scalars().all()
+    if not rows:
+        return []
+
+    # Index every other account's IBAN (uppercased, no spaces).
+    accounts = (await db.execute(
+        select(Account).where(Account.deleted_at.is_(None))
+    )).scalars().all()
+    iban_to_account: dict[str, Account] = {}
+    for a in accounts:
+        if not a.iban:
+            continue
+        norm = a.iban.upper().replace(" ", "")
+        if len(norm) >= 8:
+            iban_to_account[norm] = a
+    if not iban_to_account:
+        return []
+
+    matched: list[dict] = []
+    for tx in rows:
+        # Skip rows already flagged as sub-account moves.
+        if tx.metadata_json:
+            try:
+                m = json.loads(tx.metadata_json)
+                if isinstance(m, dict) and m.get("subaccount"):
+                    continue
+            except (json.JSONDecodeError, TypeError):
+                pass
+        haystack = (
+            (tx.description or "") + " " + (tx.raw_description or "")
+        ).upper().replace(" ", "")
+        # Find the FIRST own-account IBAN appearing in the description that
+        # isn't tx's own account (avoid self-pair on N26 footer-leak rows).
+        hit_account: Account | None = None
+        for iban, acct in iban_to_account.items():
+            if acct.id == tx.account_id:
+                continue
+            if iban in haystack:
+                hit_account = acct
+                break
+        if hit_account is None:
+            continue
+
+        direction = "out" if tx.type == "expense" else "in"
+        original_type = tx.type
+        tx.type = "transfer"
+        tx.counter_account_id = hit_account.id
+        tx.is_pending = False
+        tx.metadata_json = _merge_meta(tx.metadata_json, {
+            "transfer_direction": direction,
+            "matched_by": "iban_single_leg",
+            "matched_iban": hit_account.iban,
+        })
+        # Re-map category to transfer kind if needed (same logic as
+        # pair_transactions).
+        if tx.category_id is not None:
+            cat = (await db.execute(
+                select(Category).where(Category.id == tx.category_id)
+            )).scalar_one_or_none()
+            if cat is not None and cat.kind != "transfer":
+                replacement = (await db.execute(
+                    select(Category).where(
+                        Category.kind == "transfer", Category.name == cat.name
+                    )
+                )).scalar_one_or_none()
+                tx.category_id = replacement.id if replacement is not None else None
+        matched.append({
+            "tx_id": tx.id,
+            "counter_account_id": hit_account.id,
+            "counter_account_name": hit_account.name,
+            "direction": direction,
+            "iban": hit_account.iban,
+            "from_type": original_type,
+        })
+        logger.info(
+            "single_leg_iban_matched",
+            tx_id=tx.id,
+            counter_account=hit_account.name,
+            direction=direction,
+        )
+    return matched
 
 
 # ─── Same-account amount-matching heuristic ────────────────────────────
