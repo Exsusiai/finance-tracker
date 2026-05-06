@@ -194,7 +194,9 @@ function Header({ period, onPeriodChange, kind, onKindChange, grandTotal, displa
         </div>
 
         <div className="text-right">
-          <p className="text-xs text-muted-foreground">总{kindLabel(kind)}</p>
+          <p className="text-xs text-muted-foreground">
+            总{kindLabel(kind)} <span className="text-[10px] opacity-60">({displayCurrency})</span>
+          </p>
           <p className="text-2xl font-bold tabular-nums">
             {grandTotal > 0 ? formatCurrency(grandTotal, displayCurrency) : "—"}
           </p>
