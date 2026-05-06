@@ -51,6 +51,21 @@ _AMOUNT_BASE_EXPR = (
     "END"
 )
 
+# Sprint 4 audit (2026-05-06): sub-account transfers (in-bank moves like
+# N26 main → Saving Space, marked metadata.subaccount=true) shouldn't
+# inflate transfer_total either — they're invisible noise from the user's
+# whole-portfolio perspective. The COALESCE wrap handles SQLite NULL
+# three-valued logic: a row is "subaccount" only when metadata_json is
+# valid JSON AND $.subaccount = 1; everything else (NULL metadata,
+# malformed JSON, missing key) is treated as not-subaccount.
+_NOT_SUBACCOUNT = (
+    "COALESCE("
+    "  json_valid(metadata_json) "
+    "  AND json_extract(metadata_json, '$.subaccount') = 1, "
+    "  0"
+    ") = 0"
+)
+
 _RECOMPUTE_SQL = text(f"""
     INSERT OR REPLACE INTO cash_flow_snapshots
         (period_year, period_month, base_currency,
@@ -60,7 +75,8 @@ _RECOMPUTE_SQL = text(f"""
         :year, :month, :base_currency,
         COALESCE(SUM(CASE WHEN type = 'income'  THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'transfer' AND {_NOT_SUBACCOUNT}
+                          THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN type = 'income'  THEN  ABS({_AMOUNT_BASE_EXPR})
                           WHEN type = 'expense' THEN -ABS({_AMOUNT_BASE_EXPR})
                           ELSE 0 END), 0),

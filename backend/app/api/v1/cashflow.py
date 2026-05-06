@@ -49,7 +49,7 @@ async def monthly_cashflow(
             substr(occurred_at, 1, 7) AS period,
             SUM(CASE WHEN type = 'income'  THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END) AS income,
             SUM(CASE WHEN type = 'expense' THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END) AS expense,
-            SUM(CASE WHEN type = 'transfer' THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END) AS transfer,
+            SUM(CASE WHEN type = 'transfer' AND COALESCE(json_valid(metadata_json) AND json_extract(metadata_json, '$.subaccount') = 1, 0) = 0 THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END) AS transfer,
             SUM(CASE WHEN type = 'income'  THEN  ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END)
                      WHEN type = 'expense' THEN -ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END)
                      ELSE 0 END) AS savings,
@@ -236,7 +236,7 @@ async def recompute_cashflow(
             :base_currency,
             SUM(CASE WHEN type = 'income'  THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END),
             SUM(CASE WHEN type = 'expense' THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END),
-            SUM(CASE WHEN type = 'transfer' THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END),
+            SUM(CASE WHEN type = 'transfer' AND COALESCE(json_valid(metadata_json) AND json_extract(metadata_json, '$.subaccount') = 1, 0) = 0 THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END),
             SUM(CASE WHEN type = 'income'  THEN  ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END)
                      WHEN type = 'expense' THEN -ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END)
                      ELSE 0 END),
