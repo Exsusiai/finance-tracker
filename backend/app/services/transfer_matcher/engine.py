@@ -761,47 +761,26 @@ async def _resolve_transfer_category(
     db: AsyncSession,
     *,
     kind: str,
-    counter_account: "Account | None" = None,
+    counter_account: "Account | None" = None,  # noqa: ARG001 - reserved for future
 ) -> int | None:
-    """Pick a sensible transfer-kind sub-category by intent (Bug 1 fix).
+    """Pick a transfer-kind sub-category by intent.
 
-    `kind`:
-      - "subaccount"          → "内部储蓄"
-      - "credit_card_payback" → "信用卡还款"
-      - "investing"           → "投资划转"
-      - "cross_bank"          → "跨行划转"
-      - "other"               → "其他转账"
+    Simplified per user spec (2026-05-06): we no longer try to differentiate
+    "credit_card_payback" / "investing" / "cross_bank" — auto-categorising
+    bank↔credit_card transfers as 信用卡还款 turned out to be brittle (the
+    bank-side leg and credit-card-side leg ended up in different categories,
+    confusing the user). The only special case worth keeping is the in-bank
+    sub-account move, which we tag as 内部储蓄 because it's invisible noise
+    from the user's whole-portfolio perspective.
 
-    If `counter_account` is supplied and `kind` is "auto", we infer the
-    sub-category from the counter_account.type:
-      credit_card → "信用卡还款"
-      brokerage / crypto_wallet → "投资划转"
-      bank / cash → "跨行划转"
-      else → "其他转账"
+      `kind="subaccount"`  → 内部储蓄
+      everything else      → 跨行划转
+
+    The `counter_account` parameter is kept in the signature for callers
+    that already pass it but is no longer consulted; if we re-introduce
+    the heuristic later it doesn't require a callsite change.
     """
-    name_map = {
-        "subaccount": "内部储蓄",
-        "credit_card_payback": "信用卡还款",
-        "investing": "投资划转",
-        "cross_bank": "跨行划转",
-        "other": "其他转账",
-    }
-    if kind == "auto":
-        if counter_account is None:
-            kind = "other"
-        else:
-            t = (counter_account.type or "").lower()
-            if t == "credit_card":
-                kind = "credit_card_payback"
-            elif t in ("brokerage", "crypto_wallet"):
-                kind = "investing"
-            elif t in ("bank", "cash"):
-                kind = "cross_bank"
-            else:
-                kind = "other"
-    target_name = name_map.get(kind)
-    if not target_name:
-        return None
+    target_name = "内部储蓄" if kind == "subaccount" else "跨行划转"
     row = (await db.execute(
         select(Category).where(
             Category.kind == "transfer", Category.name == target_name
