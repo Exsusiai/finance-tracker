@@ -3,19 +3,6 @@
 Review 日期：2026-05-05  
 Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Schema 文档、后端服务与 API、前端资金和分类流程、MCP Server、银行同步与 Notion 同步 scaffold。
 
-> **2026-05-06 验证 + 修复跟踪**：21 项问题全部经代码实地核查属实。修复已并入 `docx/ROADMAP.md` 顶部的 Sprint 0/1/2 计划。每条 issue 在标题旁标注状态：
-> - 🟡 = 计划中（已写入 ROADMAP）
-> - 🔧 = Sprint 进行中
-> - ✅ = 已修复 + commit
-
-| 等级 | 含义 | 涉及条目 |
-|---|---|---|
-| **R0** | 当前每次操作都在产生错数据（资金错误） | P0-3, P1-1, P1-2 |
-| **R1** | 数据一致性 + 测试基础设施 | P1-3, P1-4, P1-5, P1-6, P3-2 |
-| **R2** | 公开 GitHub / 暴露非 loopback 前必修 | P0-1, P0-2, P2-1, P2-8 |
-| **R3** | 子系统启用前修（GoCardless / Notion） | P1-7, P1-8, P2-2, P2-3 |
-| **R4** | 清理类（低风险，顺手） | P2-4, P2-5, P2-6, P2-7, P3-1 |
-
 ## 1. 当前已实现功能概览
 
 - 后端：FastAPI + async SQLAlchemy + SQLite WAL，已实现账户、分类、交易 CRUD，PDF 上传 / 重解析 / 删除，规则分类，自动学习，转账匹配，现金流聚合和快照，市场数据，持仓与净资产，系统备份和设置接口。
@@ -25,7 +12,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 2. P0 - 严重问题 / 真实使用前必须修复
 
-### P0-1. Notion API 路由完全没有鉴权 ✅ FIX-8（2026-05-06）
+### P0-1. Notion API 路由完全没有鉴权
 
 证据：
 - `backend/app/api/v1/notion.py:44`、`:84`、`:101`、`:117`、`:133`、`:160` 定义的路由都没有 `Depends(require_auth)`。
@@ -39,7 +26,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 给 Notion router 添加 `dependencies=[Depends(require_auth)]`，或给每个 Notion endpoint 加 `_token: _auth`。
 - 增加鉴权回归测试：无 token 访问 `/api/v1/notion/status` 和所有 Notion mutation route 应返回 401。
 
-### P0-2. 本地运行配置关闭鉴权，同时 backend 监听所有网卡并开放通配 CORS ✅ FIX-9（2026-05-06）
+### P0-2. 本地运行配置关闭鉴权，同时 backend 监听所有网卡并开放通配 CORS
 
 证据：
 - 本地 `.env` 中 `AUTH_DISABLED=true`，`BACKEND_HOST=0.0.0.0`。本报告没有复制任何 secret 值。
@@ -58,7 +45,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - CORS 只允许配置中的前端 origin。
 - 如果 `AUTH_DISABLED=true` 且 host 不是 loopback，启动时直接失败。
 
-### P0-3. 手动确认转账会导致余额计算错误 ✅ FIX-1（2026-05-06）
+### P0-3. 手动确认转账会导致余额计算错误
 
 证据：
 - 余额视图依赖 `metadata_json.transfer_direction` 来决定 transfer 的正负号：`backend/app/main.py:68-75`。
@@ -77,7 +64,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 3. P1 - 高优先级资金正确性问题
 
-### P1-1. 储蓄计算把支出加上了，而不是减掉 ✅ FIX-2（2026-05-06）
+### P1-1. 储蓄计算把支出加上了，而不是减掉
 
 证据：
 - cashflow snapshot 重算使用 `WHEN type = 'expense' THEN amount`：`backend/app/services/cashflow/engine.py:43-45`。
@@ -94,7 +81,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
   `SUM(CASE WHEN type='income' THEN ABS(amount) WHEN type='expense' THEN -ABS(amount) ELSE 0 END)`。
 - 增加测试覆盖：正数支出、历史 signed expense、adjustment。
 
-### P1-2. 现金流聚合直接混加不同币种 ✅ FIX-3（2026-05-06）
+### P1-2. 现金流聚合直接混加不同币种
 
 证据：
 - cashflow SQL 直接 `SUM(amount)`，没有使用 `currency`、`fx_rate_to_base` 或 `base_amount`：`backend/app/api/v1/cashflow.py:40-43`、`:98`，`backend/app/services/cashflow/engine.py:40-46`。
@@ -109,7 +96,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 优先使用 `base_amount`；缺失时按交易币种通过 FX 折算。
 - cashflow API 返回币种元信息，前端不要硬编码 EUR。
 
-### P1-3. PDF upload / confirm / reparse / delete 路径会留下 stale cashflow 或丢失分类与转账逻辑 ✅ FIX-4（2026-05-06）
+### P1-3. PDF upload / confirm / reparse / delete 路径会留下 stale cashflow 或丢失分类与转账逻辑
 
 证据：
 - upload 路径会自动分类和转账匹配，但没有对导入时已变成 non-pending 的交易重算 cashflow：`backend/app/api/v1/statements.py:163-207`。
@@ -127,7 +114,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - upload / reparse / delete 后重算所有新旧受影响月份。
 - reparse 时保留 parser metadata，并重新跑 categorizer 和 transfer matcher。
 
-### P1-4. 交易 type 与分类 kind 没有后端一致性校验 ✅ FIX-5（2026-05-06）
+### P1-4. 交易 type 与分类 kind 没有后端一致性校验
 
 证据：
 - Transaction schema 允许独立传入 `type` 和 `category_id`：`backend/app/schemas/__init__.py:137-157`、`:160-179`。
@@ -143,7 +130,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 创建子分类时校验 parent 存在，且 parent.kind 与 child.kind 相同。
 - 添加服务层测试，不依赖前端过滤来保证数据正确。
 
-### P1-5. amount 正负号约定在不同写入路径中不一致 ✅ FIX-4（2026-05-06）
+### P1-5. amount 正负号约定在不同写入路径中不一致
 
 证据：
 - 文档和 PDF parser 约定非 adjustment 金额存正数；`_make_tx` 返回 `abs(amount)`。
@@ -159,7 +146,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 强制统一 invariant：非 adjustment 的 `amount = ABS(input)`，方向只由 `type` 和 transfer metadata 决定。
 - 如果需要兼容历史 signed rows，应做迁移和兼容测试。
 
-### P1-6. 文档中的 transaction 去重和索引没有在 ORM 中实现 ✅ FIX-6（2026-05-06）
+### P1-6. 文档中的 transaction 去重和索引没有在 ORM 中实现
 
 证据：
 - `docs/SCHEMA.sql:129-134` 写了 transaction indexes 和 `(account_id, external_id)` 去重索引。
@@ -174,7 +161,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 在 ORM 或 Alembic migration 中添加真实索引和 partial unique index。
 - 加测试验证同一账户 active transaction 的重复 `external_id` 会失败。
 
-### P1-7. Bank sync 绕过核心记账流水线 ✅ FIX-4（2026-05-06）
+### P1-7. Bank sync 绕过核心记账流水线
 
 证据：
 - Bank sync 直接创建 `Transaction`：`backend/app/services/bank_sync/engine.py:364-388`。
@@ -201,7 +188,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 4. P2 - 中优先级安全 / 稳定性问题
 
-### P2-1. PDF 上传没有大小和类型限制 ✅ FIX-10（2026-05-06）
+### P2-1. PDF 上传没有大小和类型限制
 
 证据：
 - 上传接口直接把整个文件读入内存并写盘，再交给 parser：`backend/app/api/v1/statements.py:100-117`。
@@ -248,7 +235,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 建议：
 - 使用单个 `YYYY-MM` period 字符串比较，或构造真实日期边界。
 
-### P2-5. 未使用的 valuation helper 汇率方向是反的 ✅ FIX-12（2026-05-06）
+### P2-5. 未使用的 valuation helper 汇率方向是反的
 
 证据：
 - `compute_holding_value` 查询 `(base_currency -> latest.currency)`，然后返回 `value * fx.rate`：`backend/app/services/valuation/engine.py:37-49`。
@@ -259,7 +246,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 建议：
 - 删除重复实现，复用 holdings / MCP 中更完整的 `_convert_to_base` 逻辑。
 
-### P2-6. Transaction 列表分页 total 没有应用全部过滤条件 ✅ FIX-12（2026-05-06）
+### P2-6. Transaction 列表分页 total 没有应用全部过滤条件
 
 证据：
 - list 查询支持 min/max/search/tags/source/is_pending 等过滤。
@@ -271,7 +258,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 建议：
 - 把 filters 构建成一个共享函数，同时应用到 data query 和 count query。
 
-### P2-7. 前端 token bootstrap 有问题，且 token 存储方式较弱 ✅ FIX-12（2026-05-06，token 存储改进延到 P3 真正 auth flow）
+### P2-7. 前端 token bootstrap 有问题，且 token 存储方式较弱
 
 证据：
 - `DevTokenBootstrap` 没有被渲染；inline script 在浏览器中引用 `process.env`：`frontend/src/app/layout.tsx:10-19`、`:26-29`。
@@ -286,7 +273,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 使用真正的 auth flow，或由服务端安全地注入 public env。
 - 如果后续会暴露在非纯本地环境，优先使用 HttpOnly cookie。
 
-### P2-8. 用户自定义 regex 分类规则可能阻塞服务 ✅ FIX-11（2026-05-06）
+### P2-8. 用户自定义 regex 分类规则可能阻塞服务
 
 证据：
 - regex rule 直接用 Python `re.search` 执行：`backend/app/services/categorizer/engine.py:66`。
@@ -300,7 +287,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 5. P3 - 文档 / 测试 / 可维护性问题
 
-### P3-1. `docs/SCHEMA.sql` 中的余额视图已经过期，作为参考有风险 ✅ FIX-12（2026-05-06）
+### P3-1. `docs/SCHEMA.sql` 中的余额视图已经过期，作为参考有风险
 
 证据：
 - 文档仍写着 `initial_balance + SUM(t.amount)`：`docs/SCHEMA.sql:257-262`。
@@ -313,7 +300,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 更新 schema 文档，使其与 runtime view 一致。
 - 更好的做法是由 migration / ORM 自动生成 schema 文档。
 
-### P3-2. 后端测试陈旧，且当前本地无法运行 ✅ FIX-7（2026-05-06）
+### P3-2. 后端测试陈旧，且当前本地无法运行
 
 证据：
 - `python3 -m pytest` 和 `.venv/bin/python -m pytest` 都失败，因为没有安装 `pytest`。

@@ -27,10 +27,10 @@ V1 共 21 个问题，本轮复核结论：
 | P0-2 AUTH_DISABLED + 0.0.0.0 + wildcard CORS | ✅ 已修复主风险 | 默认 host 改为 `127.0.0.1`，CORS 改 allow-list，lifespan 会拒绝 `AUTH_DISABLED=true` + 非 loopback；本地 `.env` 仍是 `AUTH_DISABLED=true`，但 host 已是 loopback |
 | P0-3 手动确认转账余额错误 | ✅ 已修复 | `/mark-transfer` 已保存 `transfer_direction`，双边配对走 `pair_transactions()`，前端也传 direction |
 | P1-1 savings 公式错误 | ✅ 已修复 | 后端 live/snapshot/MCP 都改为 `ABS(income) - ABS(expense)` |
-| P1-2 多币种现金流混加 | ✅ 已修复（FIX-13, 2026-05-06）| ingestion 加 Step 1.5：自动 resolve_fx_to_base + 写 base_amount/fx_rate_to_base；缺汇率时标 metadata.fx_missing=true 而非静默 fallback。5 用例覆盖 |
+| P1-2 多币种现金流混加 | 🟡 部分修复 | SQL 和前端优先使用 `base_amount/fx_rate_to_base`，但 ingestion/PDF/bank sync/manual UI 并没有保证写入这些字段；缺失时仍 fallback raw amount，外币仍会混加 |
 | P1-3 PDF upload/reparse/delete stale cashflow | ✅ REST 路径已修复 | REST upload/reparse/delete 已接入 ingestion/recompute；但 MCP PDF 导入仍绕过，见 V2-P0-3 |
-| P1-4 Transaction.type 与 Category.kind invariant | ✅ 已修复（FIX-14, 2026-05-06）| categorize_transaction selectinload Category 后跳过 kind 不匹配的规则；apply_to_similar_pending 入口加守卫；/rules/apply-all 同样保护；rules create/update 校验 category 存在 |
-| P1-5 amount 正负号 invariant | ✅ 已修复（FIX-15, 2026-05-06）| transactions PATCH 和 inbox confirm 加 ABS（非 adjustment）；MCP parse_bank_statement 改成走完整 sync mirror（amount normalize + categorize + kind guard + recompute）|
+| P1-4 Transaction.type 与 Category.kind invariant | 🟡 部分修复 | API create/update/inbox/category create 已校验；但规则创建/更新和自动分类仍可把 expense 规则套到 income 交易上 |
+| P1-5 amount 正负号 invariant | 🟡 部分修复 | ingestion、bank sync、MCP add_transaction 已处理；transaction patch/inbox patch 和 MCP PDF import 仍可绕过完整规则 |
 | P1-6 transaction 索引和 external_id 去重 | ✅ 已修复 | ORM + lifespan DDL 已加 index 和 partial unique；测试覆盖通过 |
 | P1-7 bank sync 绕过核心流水线 | ✅ 已修复 | `BankSyncEngine.sync_transactions()` 新交易已调用 `ingest_transactions()` |
 | P1-8 Notion 资产摘要旧余额公式 | ❌ 未修复 | 仍使用 `Account.initial_balance + SUM(Transaction.amount)` |
@@ -40,10 +40,10 @@ V1 共 21 个问题，本轮复核结论：
 | P2-4 cashflow recompute 跨年过滤错误 | ❌ 未修复 | 仍独立比较 year/month，跨年范围会错 |
 | P2-5 valuation helper FX 方向反 | ✅ 已修复 | 旧 helper 已删除 |
 | P2-6 transaction 分页 total 过滤不一致 | ✅ 已修复 | data query 和 count query 共用 `_apply_filters()` |
-| P2-7 前端 token bootstrap/存储 | ✅ 已修复（FIX-18, 2026-05-06）| 删除 layout.tsx 内 NEXT_PUBLIC_API_TOKEN 注入；settings 页加 ApiTokenInput 组件让用户手动粘贴。HttpOnly cookie/真正 auth flow 仍是 P3（远端部署时再上）|
-| P2-8 regex ReDoS | ✅ 已修复（FIX-16, 2026-05-06）| rules.py _match_rule 改用 _safe_regex_search；/rules/test、/rules/apply-all 全部走同一 wrapper |
+| P2-7 前端 token bootstrap/存储 | 🟡 部分修复 | `process.env` 浏览器错误已修；但 token 仍走 `NEXT_PUBLIC_API_TOKEN` + localStorage，且没有真正登录流 |
+| P2-8 regex ReDoS | 🟡 部分修复 | 写入时有复杂度校验；主引擎有 wrapper；但 `/rules/test`、`/rules/apply-all` 仍直接 `re.search` |
 | P3-1 `docs/SCHEMA.sql` 余额视图过期 | ✅ 已修复 | 文档视图已同步 `transfer_direction`/`subaccount` 逻辑 |
-| P3-2 测试陈旧/不可运行 | ✅ 已修复（FIX-17, 2026-05-06）| Settings.resolved_database_url 把 sqlite:///./xxx 解析到 _PROJECT_ROOT；从任何 cwd 跑 pytest 都使用同一份 DB |
+| P3-2 测试陈旧/不可运行 | 🟡 部分修复 | 从仓库根目录 `.venv/bin/python -m pytest backend/tests --ignore=backend/tests/test_api.py` 通过 53 项；但从 `backend/` 目录运行会因相对 DB path 失败 |
 
 ## 3. V2 新发现 / 仍需优先修复的问题
 
