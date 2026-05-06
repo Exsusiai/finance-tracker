@@ -87,13 +87,36 @@ V1 21 项问题修复进度：
 
 ---
 
-## Sprint 4+ — R3 子系统启用前修（按需触发）
+## 🔥 Sprint 4 — review V3 派生：当前 P0/P1 + 安全（待启动 2026-05-06）
+
+> 来源：`code review/review V3.md` 实地核查后属实的 14 项问题中，按用户范围（"目前正在关注的 P0/P1 + 安全"）筛出 7 项。半成品（GoCardless / Notion / bank encryption key 配置链）和 UX 优化（持仓跨币种市值、账户删除一致性）按用户约定推迟到对应子系统启用时一起修。
+> 估时 2-3 天。
+
+| # | 任务 | 来源 | 范围 |
+|---|---|---|---|
+| **FIX-19** | base_amount 生命周期：cashflow SQL 缺汇率不再 fallback raw amount（改为剔除外币缺 FX 行 + 返回 `fx_missing_count` warning）；PATCH/inbox 改 amount/currency/fx 字段时清空旧 `base_amount` 触发重算 | V3-P0-1 + V3-P0-2 | 资金正确性 |
+| **FIX-20** | MCP 写入路径完整 mirror：`add_transaction` 加 sync `_convert_fx` 折算 + 写 base_amount；`parse_bank_statement` 改 `_safe_regex_search` + PDF size/magic guard + 同账户 amount-match 镜像 | V3-P1-1 | 一致性 + 安全 |
+| **FIX-21** | `/cashflow/recompute` 跨年范围：改 `substr(occurred_at, 1, 7)` period 字符串比较 | V3-P1-4 | 功能 |
+| **FIX-22** | 资产/净值币种语义：`by_currency` entry 拆分 `original_value` + `base_value`，明确 key 是报价币种 + 值是 base 折算；MCP `get_total_assets` 缺 FX 不计入 base total，返回 missing_fx 列表 | V3-P1-5 + V3-P1-8 | 资产展示 |
+| **FIX-23** | metadata_json 校验：Pydantic schema 校验输入是 JSON object；`v_account_balance` SQL 加 `json_valid()` 防护 | V3-P1-6 | 安全可用性 |
+| **FIX-24** | 同描述级联 NULL category：`apply_to_similar_pending` 改 `or_(category_id.is_(None), category_id != X)` | V3-P2-1 | 功能 |
+| **FIX-25** | IntegrityError 响应脱敏：客户端只返回通用 message，原始 `exc.orig` 写日志 | V3-P3-1 | 安全 |
+
+按用户约定**跳过**（启用对应子系统时一起修）：
+- V3-P1-2 GoCardless query/country bug → 启用 GoCardless 时
+- V3-P1-3 Notion 资产摘要旧公式 → 启用 Notion 时
+- V3-P1-7 bank encryption key 走 Settings → 启用 GoCardless 时
+- V3-P2-2 持仓详情跨币种市值 → 持仓 UX 优化阶段
+- V3-P2-3 账户删除一致性 → 账户管理 UX 阶段
+
+---
+
+## Sprint 5+ — R3 子系统启用前修（按需触发）
 
 | 启用项 | 必须先修 | 来源 |
 |---|---|---|
-| **GoCardless**（原 P1-2） | FIX-13 bank_sync 复用统一 ingestion；FIX-14 凭据走 body 不走 query；FIX-15 country 字段独立修复 | review P1-7, P2-2, P2-3 |
-| **Notion**（原 P1-3） | FIX-16 资产摘要改读 `v_account_balance` | review P1-8 |
-| 手动 cashflow recompute 跨年范围 | FIX-17 改用 period 字符串比较 | review P2-4 |
+| **GoCardless**（原 P1-2） | bank_sync 复用统一 ingestion；凭据走 body 不走 query；country 字段独立修复；bank encryption key 走 Settings | V1 P1-7, P2-2, P2-3 / V3-P1-2, P1-7 |
+| **Notion**（原 P1-3） | 资产摘要改读 `v_account_balance` | V1 P1-8 / V3-P1-3 |
 
 ---
 

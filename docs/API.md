@@ -2,8 +2,10 @@
 
 > Finance Tracker REST API — v1
 > 基地址: `http://localhost:8010/api/v1` (本地开发默认端口)
-> 鉴权: `Authorization: Bearer <FINANCE_TRACKER_API_TOKEN>` (除 `/health` 外全部要求；本地默认 `AUTH_DISABLED=true` 跳过)
-> 最后修订: 2026-05-05
+> 鉴权: `Authorization: Bearer <FINANCE_TRACKER_API_TOKEN>` (除 `/health` 外全部要求；本地默认 `AUTH_DISABLED=true` 跳过——Sprint 2 FIX-9 加了 invariant：仅当 `BACKEND_HOST` 是 loopback 时才允许跳过鉴权)
+> CORS: 允许列表由 `ALLOWED_ORIGINS` 控制（默认 `http://localhost:3000,http://localhost:3010,…`）
+> 前端 token 注入：用户在 Settings → API Token 输入框手动粘贴（FIX-18 后不再走 `NEXT_PUBLIC_API_TOKEN` bundle 注入）
+> 最后修订: 2026-05-06
 
 ## 通用约定
 
@@ -122,10 +124,21 @@
 
 ### 跨账户转账识别
 
-| Method | Path                                                      | 说明                                                |
-|--------|-----------------------------------------------------------|-----------------------------------------------------|
-| GET    | `/transactions/transfers/suggestions`                     | 候选转账配对列表（评分 ≥ 50 但未自动配对）         |
-| POST   | `/transactions/{id}/mark-transfer?counter_transaction_id=N` | 用户手动确认配对（写入 `paired_with_tx_id`）       |
+| Method | Path                                            | 说明                                                |
+|--------|-------------------------------------------------|-----------------------------------------------------|
+| GET    | `/transactions/transfers/suggestions`           | 候选转账配对列表（评分 ≥ 50 但未自动配对）         |
+| POST   | `/transactions/{id}/mark-transfer`              | 用户手动确认配对（body schema 见下）                |
+
+**`mark-transfer` 请求 body**（Sprint 0 FIX-1）：
+```json
+{
+  "counter_transaction_id": 42,           // optional
+  "transfer_direction": "out"             // "in" | "out"，单边场景必填
+}
+```
+- 双边（counter_transaction_id 给定）：调用 `pair_transactions()` 同时给两腿打 `metadata.transfer_direction`，`v_account_balance` 视图据此正负折算余额
+- 单边（无 counter）：仅当腿 `type = transfer` + 写 metadata.transfer_direction
+- 缺 direction → 422 INVALID_INPUT
 
 **评分算法（`transfer_matcher`）**：
 - 金额相同 +50；±0.5% 浮动 +30
@@ -312,19 +325,22 @@
 [
   {
     "period": "2026-04",
+    "base_currency": "CNY",
     "income":   "25000.00",
-    "expense":  "-12340.50",
+    "expense":  "12340.50",
     "transfer": "0.00",
     "savings":  "12659.50",
     "by_category": {
-      "餐饮":   "-2300.00",
-      "交通":   "-800.00",
+      "餐饮":   "2300.00",
+      "交通":   "800.00",
       "工资":   "25000.00"
     },
     "by_account": { "Main Checking": "...", "Savings": "..." }
   }
 ]
 ```
+
+> Sprint 0 FIX-3：响应额外包含 `base_currency` 字段；金额都已折算到 base 币种（用 `COALESCE(base_amount, amount * fx_rate_to_base, amount)`）。`expense` 是 `ABS()` 后的正值；`savings = income − expense`。
 
 ---
 

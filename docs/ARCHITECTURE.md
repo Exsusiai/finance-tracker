@@ -1,7 +1,7 @@
 # 架构概览 (ARCHITECTURE)
 
 > Finance Tracker — 个人资金管理与记账系统
-> 最后修订: 2026-05-05
+> 最后修订: 2026-05-06
 
 ## 高层架构
 
@@ -53,18 +53,19 @@
 | `services/` | 业务逻辑层（见下表） |
 | `db/migrations/` | Alembic 目录（暂未启用，由 `_column_migrations` idempotent ALTER 顶住） |
 
-#### `services/` 详细结构（2026-05-05）
+#### `services/` 详细结构（2026-05-06）
 
 | 子目录 | 职责 |
 |---|---|
+| `ingestion/` | **统一交易写入管道**（Sprint 1 FIX-4）：amount 归一 → FX 折算（`fx.py:resolve_fx_to_base`）→ categorize（含 kind 守卫）→ transfer match → cashflow recompute。upload / reparse / batch / bank_sync / mcp 全部接入 |
 | `pdf_parser/` | 5 家银行 parser + column-aware Revolut + 子账户 / 跨行关键词预标 |
-| `categorizer/` | 关键词规则匹配 + `learn_from_user_assignment` + `apply_to_similar_pending` 级联 + seed 种子 |
-| `transfer_matcher/` | 跨账户配对（评分制 + IBAN +40）+ 同账户 amount-match L3（subaccount 标记） |
-| `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot |
+| `categorizer/` | 关键词规则匹配（含 `_safe_regex_search` ReDoS 防御）+ `learn_from_user_assignment` + `apply_to_similar_pending` 级联 + seed 种子 |
+| `transfer_matcher/` | 跨账户配对（评分制 + IBAN +40）+ 同账户 amount-match L3（subaccount 标记）+ `pair_transactions` 写 `metadata.transfer_direction` |
+| `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot；多币种用 `COALESCE(base_amount, amount * fx_rate_to_base, amount)` |
 | `market_data/` | 取价（yfinance / CoinGecko / FX）+ `scheduler.py` AsyncIOScheduler 三 job |
 | `asset_search/` | CoinGecko + yfinance 联合查询自动识别资产 |
-| `valuation/` | 持仓估值聚合（含 FX 三角换算） |
-| `bank_sync/` | GoCardless 银行直连（scaffold，未启用） + crypto.py（55 行 stub） |
+| `valuation/` | 占位（旧 helper 已删，估值逻辑在 `api/v1/holdings.py`）|
+| `bank_sync/` | GoCardless 银行直连（scaffold，未启用） |
 | `notion_sync/` | Notion 三模块同步（scaffold，未联调） |
 
 ### Frontend (`frontend/src/`)

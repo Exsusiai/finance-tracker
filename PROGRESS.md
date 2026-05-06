@@ -7,7 +7,7 @@
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` branch
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ **Sprint 0 + 1 + 2 + 3 全部完成**（review V1 21 项修了 17 项；V2 复核标记的 6 个 partial 全部闭合）。`pytest backend/tests/ --ignore=test_api.py` → **67 passed**。剩余 4 项 R3（P1-8/P2-2/P2-3/P2-4）等启用 GoCardless / Notion 时一并修。下一步：P1-4（链上钱包）→ P1-1（LLM）
+- **当前阶段**: ✅ Sprint 0+1+2+3 完成 → 🔥 **Sprint 4 待启动**（review V3 派生：当前 P0/P1 + 安全 7 项 FIX-19~25）。`pytest backend/tests/ --ignore=test_api.py` → **67 passed**。半成品相关问题（GoCardless / Notion）按用户约定延后到子系统启用时再修。Sprint 4 之后：P1-4（链上钱包）→ P1-1（LLM）
 
 ---
 
@@ -48,6 +48,20 @@
 | **FIX-16** | rules.py `_match_rule` 共用 `_safe_regex_search` | review V2 §V2-P1-4（V1 P2-8 partial） |
 | **FIX-17** | `resolved_database_url` 把相对 SQLite 路径锚到 `_PROJECT_ROOT` | review V2 §V2-P2-3（V1 P3-2 partial） |
 | **FIX-18** | 删除前端 token 自动注入；settings 页加 ApiTokenInput；统一 `NEXT_PUBLIC_API_URL` | review V2 §V2-P2-4 + §V2-P2-2（V1 P2-7 partial） |
+
+## 🔥 Sprint 4 — review V3 派生：当前 P0/P1 + 安全（待启动 2026-05-06）
+
+> review V3 提到 14 项核实属实的问题，按用户约定（仅当前 P0/P1 + 安全）筛出 7 项立即修；半成品 / UX 优化（5 项）延后到子系统启用阶段。详细计划见 `docx/ROADMAP.md` Sprint 4 段。
+
+| FIX | 内容 | 来源 |
+|---|---|---|
+| **FIX-19** | base_amount 生命周期：cashflow 缺 FX 不再 fallback raw amount + 返回 fx_missing_count；PATCH/inbox 改 amount/currency/fx 时清空旧 base_amount | V3-P0-1 + V3-P0-2 |
+| **FIX-20** | MCP 写入路径完整 mirror：add_transaction 写 base_amount；parse_bank_statement 用 _safe_regex_search + PDF size/magic guard + 同账户 amount-match | V3-P1-1 |
+| **FIX-21** | `/cashflow/recompute` 跨年范围用 `substr(occurred_at, 1, 7)` period 字符串比较 | V3-P1-4 |
+| **FIX-22** | 资产/净值 by_currency 拆分 original_value + base_value；MCP get_total_assets 缺 FX 不混入 base total | V3-P1-5 + V3-P1-8 |
+| **FIX-23** | metadata_json Pydantic 校验为 JSON object + v_account_balance 用 `json_valid()` 防护 | V3-P1-6 |
+| **FIX-24** | apply_to_similar_pending 加 NULL category 兼容 `or_(is_(None), != X)` | V3-P2-1 |
+| **FIX-25** | IntegrityError 响应脱敏，原始 db 错误只写日志 | V3-P3-1 |
 
 ## 状态图例
 - ✅ 闭环可用（验证通过）
