@@ -353,6 +353,13 @@ async def update_transaction(
     final_cat_id = update_data.get("category_id", tx.category_id)
     await _validate_kind_match(db, tx_type=final_type, category_id=final_cat_id)
 
+    # Sprint 3 FIX-15 (review V2 closes V1 P1-5): non-adjustment rows are
+    # always stored as ABS(amount). Apply the same invariant the ingestion
+    # pipeline enforces, so PATCH can't reintroduce signed amounts.
+    if "amount" in update_data and update_data["amount"] is not None:
+        if final_type != "adjustment" and update_data["amount"] < 0:
+            update_data["amount"] = -update_data["amount"]
+
     for key, value in update_data.items():
         setattr(tx, key, value)
 
@@ -609,6 +616,11 @@ async def confirm_inbox_item(
     for key, value in update_data.items():
         if key == "amount" and value is not None:
             value = Decimal(value)
+            # Sprint 3 FIX-15 (review V2 closes V1 P1-5): non-adjustment
+            # rows must store ABS(amount). Inbox confirm is a write path
+            # that previously bypassed the ingestion-level invariant.
+            if final_type != "adjustment" and value < 0:
+                value = -value
         setattr(tx, key, value)
 
     tx.is_pending = False

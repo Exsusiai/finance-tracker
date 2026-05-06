@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import InvalidInputError
-from app.models import CategorizationRule, Transaction
+from app.models import CategorizationRule, Category, Transaction
 
 logger = structlog.get_logger(__name__)
 
@@ -77,15 +77,31 @@ def _safe_regex_search(pattern: str, value: str, *, timeout_sec: float = 1.0) ->
 
 
 async def categorize_transaction(db: AsyncSession, tx: Transaction) -> bool:
-    """Apply rules to `tx`. Returns True if matched (and sets `tx.category_id`)."""
+    """Apply rules to `tx`. Returns True if matched (and sets `tx.category_id`).
+
+    Only applies a rule when the rule's target category kind matches the
+    transaction type (FIX-14: kind guard).
+    """
+    from sqlalchemy.orm import selectinload  # local import to avoid circular
+
     stmt = (
         select(CategorizationRule)
+        .options(selectinload(CategorizationRule.category))
         .where(CategorizationRule.enabled.is_(True))
         .order_by(CategorizationRule.priority.desc(), CategorizationRule.id)
     )
     rules = (await db.execute(stmt)).scalars().all()
 
     for rule in rules:
+        category = rule.category
+        if category is None or category.kind != tx.type:
+            logger.debug(
+                "rule_skipped_kind_mismatch",
+                rule_id=rule.id,
+                category_kind=category.kind if category else None,
+                tx_type=tx.type,
+            )
+            continue
         value = _field_value(tx, rule.field)
         if _match(rule, value):
             tx.category_id = rule.category_id
@@ -188,6 +204,20 @@ async def apply_to_similar_pending(
 
     Returns the count of rows updated. Caller must recompute cash-flow snapshots.
     """
+    # Defense-in-depth: verify the category kind matches the seed transaction type.
+    # The API already validates this, but guard here too (FIX-14).
+    cat_result = await db.execute(select(Category).where(Category.id == category_id))
+    new_cat = cat_result.scalar_one_or_none()
+    if new_cat is not None and new_cat.kind != seed_tx.type:
+        logger.warning(
+            "apply_to_similar_kind_mismatch",
+            seed_tx_id=seed_tx.id,
+            category_id=category_id,
+            category_kind=new_cat.kind,
+            tx_type=seed_tx.type,
+        )
+        return 0
+
     if not seed_tx.description:
         return 0
     norm_desc = seed_tx.description.strip()

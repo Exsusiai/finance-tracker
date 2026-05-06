@@ -34,7 +34,11 @@ services:
     env_file:
       - .env
     environment:
-      - NEXT_PUBLIC_API_BASE_URL=http://backend:8000/api/v1
+      # Sprint 3 FIX-18 (review V2 §V2-P2-2): the frontend reads
+      # `process.env.NEXT_PUBLIC_API_URL` (without trailing /api/v1) and
+      # appends paths itself. Unify the var name across .env.example +
+      # docker-compose + lib/api.ts.
+      - NEXT_PUBLIC_API_URL=http://backend:8000
     depends_on:
       backend:
         condition: service_healthy

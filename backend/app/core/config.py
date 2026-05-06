@@ -130,14 +130,35 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> Path:
-        """Return the SQLite file path from the database_url."""
+        """Return the SQLite file path from the database_url, anchored to the
+        project root for relative paths so the data file is the same regardless
+        of cwd (Sprint 3 FIX-17 — review V2 §V2-P2-3).
+        """
         url = self.database_url
-        if url.startswith("sqlite:///"):
-            rel = url[len("sqlite:///") :]
-            return Path(rel) if not rel.startswith("/") else Path(rel)
         if url.startswith("sqlite:////"):
+            # 4 slashes → absolute path
             return Path(url[len("sqlite:///"):])
+        if url.startswith("sqlite:///"):
+            rel = url[len("sqlite:///"):]
+            p = Path(rel)
+            if p.is_absolute():
+                return p
+            # Strip a leading "./" so "./data/finance.db" → "data/finance.db"
+            cleaned = rel[2:] if rel.startswith("./") else rel
+            return _PROJECT_ROOT / cleaned
         return _DATA_DIR / "finance.db"
+
+    @property
+    def resolved_database_url(self) -> str:
+        """``database_url`` with relative SQLite paths anchored to project root.
+
+        Use this everywhere instead of the raw ``database_url`` so engines
+        agree on the same file no matter what cwd they were started from.
+        """
+        url = self.database_url
+        if url.startswith("sqlite:///") and not url.startswith("sqlite:////"):
+            return f"sqlite:///{self.db_path}"
+        return url
 
 
 @lru_cache(maxsize=1)

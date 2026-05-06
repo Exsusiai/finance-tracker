@@ -7,7 +7,7 @@
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` branch
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ **Sprint 0 + 1 + 2 全部完成**（review V1 R0 + R1 + R2 全部，21 项问题修了 13 项）。`pytest backend/tests/ --ignore=test_api.py` → **53 passed**。**可以 push 到公开 GitHub**。下一步：P1-4（链上钱包）→ P1-1（LLM）→ Sprint 3（启用 GoCardless / Notion 时再修 R3 P1-7/8/P2-2/3/4）
+- **当前阶段**: ✅ **Sprint 0 + 1 + 2 + 3 全部完成**（review V1 21 项修了 17 项；V2 复核标记的 6 个 partial 全部闭合）。`pytest backend/tests/ --ignore=test_api.py` → **67 passed**。剩余 4 项 R3（P1-8/P2-2/P2-3/P2-4）等启用 GoCardless / Notion 时一并修。下一步：P1-4（链上钱包）→ P1-1（LLM）
 
 ---
 
@@ -37,6 +37,17 @@
 | **FIX-10** | PDF 上传 `MAX_PDF_SIZE_MB=10` + `%PDF-` magic bytes 双重校验 | review V1 §P2-1 |
 | **FIX-11** | regex 规则写入时复杂度校验（长度 + 嵌套量词检测 + 编译验证）+ 运行时线程池 timeout | review V1 §P2-8 |
 | **FIX-12** | SCHEMA.sql 视图同步真值；删 valuation 死 helper；transactions list 过滤共享 helper（count/data 一致）；layout.tsx 改 next/script | review V1 §P2-5/6/7, §P3-1 |
+
+## ✅ Sprint 3 — 把 V1 partial 修完 + V2 衍生（已完成 2026-05-06）
+
+| FIX | 内容 | 来源 |
+|---|---|---|
+| **FIX-13** | ingestion Step 1.5：`resolve_fx_to_base` 自动填 `base_amount/fx_rate_to_base`，缺汇率标 `metadata.fx_missing=true` | review V2 §V2-P0-1（V1 P1-2 partial） |
+| **FIX-14** | categorize / apply_to_similar / /rules/apply-all 全部加 `Category.kind == tx.type` 守卫 | review V2 §V2-P0-2（V1 P1-4 partial） |
+| **FIX-15** | transactions PATCH + inbox confirm + MCP `parse_bank_statement` 全部走完整 invariant | review V2 §V2-P0-3（V1 P1-5 partial） |
+| **FIX-16** | rules.py `_match_rule` 共用 `_safe_regex_search` | review V2 §V2-P1-4（V1 P2-8 partial） |
+| **FIX-17** | `resolved_database_url` 把相对 SQLite 路径锚到 `_PROJECT_ROOT` | review V2 §V2-P2-3（V1 P3-2 partial） |
+| **FIX-18** | 删除前端 token 自动注入；settings 页加 ApiTokenInput；统一 `NEXT_PUBLIC_API_URL` | review V2 §V2-P2-4 + §V2-P2-2（V1 P2-7 partial） |
 
 ## 状态图例
 - ✅ 闭环可用（验证通过）

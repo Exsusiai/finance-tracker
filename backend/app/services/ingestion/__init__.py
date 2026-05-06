@@ -33,6 +33,9 @@ from typing import Iterable
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import json
+
+from app.core.config import get_settings
 from app.models import Transaction
 from app.services.cashflow.engine import parse_period, recompute_for_periods
 
@@ -47,6 +50,18 @@ class IngestResult:
     subaccount_paired: list[tuple[int, int]] = field(default_factory=list)
     suggested: list[dict] = field(default_factory=list)
     affected_periods: set[tuple[int, int]] = field(default_factory=set)
+
+
+def _fx_missing_meta(tx: Transaction, src: str, base: str) -> None:
+    """Tag tx.metadata_json with fx_missing=True (non-destructive shallow merge)."""
+    try:
+        cur: dict = json.loads(tx.metadata_json) if tx.metadata_json else {}
+        if not isinstance(cur, dict):
+            cur = {}
+    except (json.JSONDecodeError, TypeError):
+        cur = {}
+    cur.update({"fx_missing": True, "fx_src": src, "fx_base": base})
+    tx.metadata_json = json.dumps(cur)
 
 
 def _normalize_amount(tx: Transaction) -> None:
@@ -93,6 +108,29 @@ async def ingest_transactions(
     # Step 1: amount sign normalisation
     for tx in tx_list:
         _normalize_amount(tx)
+
+    # Step 1.5: multi-currency fold (FIX-13 / review V2 §V2-P0-1)
+    # Populate fx_rate_to_base + base_amount for foreign-currency rows so the
+    # COALESCE(...) in cashflow SQL actually folds to BASE_CURRENCY.
+    settings = get_settings()
+    base_currency = settings.base_currency.upper()
+    from app.services.ingestion.fx import resolve_fx_to_base
+
+    for tx in tx_list:
+        tx_currency = (tx.currency or "").upper()
+        if tx_currency == base_currency:
+            continue  # SQL COALESCE handles same-currency via `amount`
+        if tx.fx_rate_to_base is not None:
+            continue  # caller / parser already provided the rate
+        if tx.base_amount is not None:
+            continue  # caller already provided base_amount
+        rate = await resolve_fx_to_base(db, src_currency=tx_currency, base_currency=base_currency)
+        if rate is not None:
+            tx.fx_rate_to_base = rate
+            tx.base_amount = (tx.amount if isinstance(tx.amount, Decimal) else Decimal(str(tx.amount))) * rate
+        else:
+            # Non-fatal: mark metadata so downstream cashflow can detect the gap
+            _fx_missing_meta(tx, tx_currency, base_currency)
 
     # Step 2: auto-categorise (rule-matching). `transfer` rows are already
     # confirmed (no inbox), so we only run rules for income/expense.

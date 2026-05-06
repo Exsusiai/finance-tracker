@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AccountForm,
   ACCOUNT_TYPE_ICONS,
@@ -197,6 +197,18 @@ export default function SettingsPage() {
           </div>
           <CategoryManager />
         </section>
+
+        <section className="mt-10">
+          <div className="mb-3">
+            <h2 className="text-base font-semibold">API Token</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              当后端开启鉴权（AUTH_DISABLED=false）时需要。本地 loopback +
+              AUTH_DISABLED=true 模式下可留空。Token 存于浏览器
+              localStorage，刷新后保留；任何拥有此设备访问权的人都能读到。
+            </p>
+          </div>
+          <ApiTokenInput />
+        </section>
       </div>
 
       {showForm && (
@@ -216,6 +228,8 @@ export default function SettingsPage() {
           }}
         />
       )}
+
+      {/* fragment continues; ApiTokenInput defined at module scope below */}
 
       {pendingDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -251,6 +265,84 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+
+// Sprint 3 FIX-18 (review V2 §V2-P2-4): UI for the user to paste their API
+// token instead of building it into the public bundle via NEXT_PUBLIC_*.
+function ApiTokenInput() {
+  const [token, setToken] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [hasStored, setHasStored] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const existing = window.localStorage.getItem("finance_api_token") ?? "";
+    setHasStored(existing.length > 0);
+  }, []);
+
+  const handleSave = () => {
+    if (typeof window === "undefined") return;
+    if (token.trim()) {
+      window.localStorage.setItem("finance_api_token", token.trim());
+      setHasStored(true);
+    } else {
+      window.localStorage.removeItem("finance_api_token");
+      setHasStored(false);
+    }
+    setToken("");
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  const handleClear = () => {
+    if (typeof window === "undefined") return;
+    window.localStorage.removeItem("finance_api_token");
+    setHasStored(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+      <div className="text-xs text-muted-foreground">
+        当前状态：
+        {hasStored ? (
+          <span className="ml-1 text-emerald-600 dark:text-emerald-400">已保存 token</span>
+        ) : (
+          <span className="ml-1 text-amber-600 dark:text-amber-400">未设置</span>
+        )}
+      </div>
+      <div className="flex gap-2">
+        <input
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder={hasStored ? "输入新 token 以替换" : "粘贴 32 字节 hex token"}
+          className="flex-1 rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+          spellCheck={false}
+          autoComplete="off"
+        />
+        <button
+          onClick={handleSave}
+          className="px-3 py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+        >
+          保存
+        </button>
+        {hasStored && (
+          <button
+            onClick={handleClear}
+            className="px-3 py-2 text-sm font-medium rounded-md border border-border hover:bg-muted transition-colors"
+          >
+            清除
+          </button>
+        )}
+      </div>
+      {saved && (
+        <p className="text-xs text-emerald-600 dark:text-emerald-400">已保存，刷新页面后生效</p>
       )}
     </div>
   );

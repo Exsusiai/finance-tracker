@@ -13,10 +13,12 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# Convert sqlite:/// → sqlite+aiosqlite:///
-DB_URL = settings.database_url
+# Sprint 3 FIX-17 (review V2 §V2-P2-3): use the resolved URL so relative
+# `sqlite:///./data/...` paths anchor to the project root regardless of cwd.
+# Convert `sqlite:///` → `sqlite+aiosqlite:///` for async engine.
+DB_URL = settings.resolved_database_url
 if DB_URL.startswith("sqlite:///"):
-    DB_URL = "sqlite+aiosqlite:///" + DB_URL[len("sqlite:///") :]
+    DB_URL = "sqlite+aiosqlite:///" + DB_URL[len("sqlite:///"):]
 
 engine = create_async_engine(
     DB_URL,

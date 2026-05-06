@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
@@ -16,7 +15,7 @@ from app.core.errors import InvalidInputError, NotFoundError  # noqa: F401 (Inva
 from app.db import get_db
 from app.models import CategorizationRule, Transaction, Category
 from app.models import touch_updated_at
-from app.services.categorizer.engine import validate_regex_complexity
+from app.services.categorizer.engine import validate_regex_complexity, _safe_regex_search
 from app.schemas import (
     ApiSuccess,
     RuleCreate,
@@ -56,10 +55,7 @@ def _match_rule(rule: CategorizationRule, value: str) -> bool:
     elif rule.pattern_type == "starts_with":
         return value.lower().startswith(rule.pattern.lower())
     elif rule.pattern_type == "regex":
-        try:
-            return bool(re.search(rule.pattern, value, re.IGNORECASE))
-        except re.error:
-            return False
+        return _safe_regex_search(rule.pattern, value)
     return False
 
 
@@ -88,6 +84,11 @@ async def create_rule(
 ):
     if body.pattern_type == "regex":
         validate_regex_complexity(body.pattern)
+
+    # Ensure the target category exists (FIX-14: write-time guard).
+    cat_result = await db.execute(select(Category).where(Category.id == body.category_id))
+    if cat_result.scalar_one_or_none() is None:
+        raise NotFoundError("Category", body.category_id)
 
     rule = CategorizationRule(
         pattern=body.pattern,
@@ -128,6 +129,13 @@ async def update_rule(
     new_pattern = updates.get("pattern", rule.pattern)
     if new_pattern_type == "regex":
         validate_regex_complexity(new_pattern)
+
+    # If category_id is being updated, verify the new category exists (FIX-14).
+    if "category_id" in updates:
+        new_cat_id = updates["category_id"]
+        cat_result = await db.execute(select(Category).where(Category.id == new_cat_id))
+        if cat_result.scalar_one_or_none() is None:
+            raise NotFoundError("Category", new_cat_id)
 
     for key, value in updates.items():
         setattr(rule, key, value)
@@ -194,9 +202,10 @@ async def apply_rules_to_all(
     db: AsyncSession = Depends(get_db),
 ):
     """Re-run all enabled rules against all uncategorized transactions."""
-    # Get all enabled rules
+    # Get all enabled rules with their categories loaded (FIX-14: kind guard).
     rule_stmt = (
         select(CategorizationRule)
+        .options(selectinload(CategorizationRule.category))
         .where(CategorizationRule.enabled.is_(True))
         .order_by(CategorizationRule.priority.desc(), CategorizationRule.id)
     )
@@ -214,6 +223,10 @@ async def apply_rules_to_all(
     updated = 0
     for tx in transactions:
         for rule in rules:
+            # Skip if category kind does not match transaction type (FIX-14).
+            if rule.category is None or rule.category.kind != tx.type:
+                continue
+
             value = ""
             if rule.field == "description":
                 value = tx.description or ""

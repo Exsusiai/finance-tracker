@@ -582,30 +582,110 @@ async def parse_bank_statement(
                 conn.commit()
                 return {"success": False, "error": parse_result["error"], "import_id": import_id}
 
-            # Insert transactions
+            # Sprint 3 FIX-15 (review V2 §V2-P0-3, closes V1 P1-3/5 partial):
+            # mirror the REST ingestion invariants so MCP-driven PDF imports
+            # produce the SAME shape of data:
+            #   1) preserve parser metadata_json (subaccount, cross_bank_hint…)
+            #   2) ABS(amount) for non-adjustment rows
+            #   3) auto-categorise via rules; rule hit → is_pending=False
+            #   4) pre-mark transfer rows as confirmed (no inbox)
+            #   5) recompute every affected period AFTER all rows are inserted
             tx_ids = []
+            affected_periods: set[tuple[int, int]] = set()
+            kind_categories = {  # Snapshot of category kinds for kind-guard.
+                row["id"]: row["kind"]
+                for row in conn.execute("SELECT id, kind FROM categories").fetchall()
+            }
+            # Load active categorization rules once (priority desc).
+            rules = conn.execute(
+                "SELECT id, pattern, pattern_type, field, category_id, priority "
+                "FROM categorization_rules WHERE enabled = 1 "
+                "ORDER BY priority DESC, id"
+            ).fetchall()
+
+            def _rule_field(tx_data, field):
+                if field == "description":
+                    return tx_data.get("description") or ""
+                if field == "counterparty":
+                    return tx_data.get("counterparty") or ""
+                if field == "raw_description":
+                    return tx_data.get("raw_description") or ""
+                return ""
+
+            def _match(rule, value: str) -> bool:
+                if not value:
+                    return False
+                p = rule["pattern"] or ""
+                pt = rule["pattern_type"]
+                v = value.lower()
+                if pt == "contains":
+                    return p.lower() in v
+                if pt == "exact":
+                    return p.lower() == v
+                if pt == "starts_with":
+                    return v.startswith(p.lower())
+                if pt == "regex":
+                    import re as _re
+                    try:
+                        return bool(_re.search(p, value, _re.IGNORECASE))
+                    except _re.error:
+                        return False
+                return False
+
             for tx_data in transactions:
+                # 2) amount sign normalisation
+                raw_amt = Decimal(str(tx_data.get("amount", 0)))
+                tx_type = tx_data.get("type", "expense")
+                if tx_type != "adjustment" and raw_amt < 0:
+                    raw_amt = -raw_amt
+
+                # 3+4) auto-categorise + pre-confirm transfer / matched rows
+                category_id = tx_data.get("category_id")
+                is_pending = 0 if auto_confirm else 1
+                if tx_type == "transfer":
+                    is_pending = 0
+                elif category_id is None:
+                    for rule in rules:
+                        rule_cat_kind = kind_categories.get(rule["category_id"])
+                        if rule_cat_kind != tx_type:
+                            continue  # FIX-14 kind guard mirrored
+                        if _match(rule, _rule_field(tx_data, rule["field"])):
+                            category_id = rule["category_id"]
+                            is_pending = 0
+                            break
+
                 tx_cur = conn.execute("""
                     INSERT INTO transactions
                         (account_id, occurred_at, amount, currency, type, description,
-                         raw_description, counterparty, source, pdf_import_id, external_id,
-                         is_pending, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pdf_import', ?, ?, ?, ?, ?)
+                         raw_description, counterparty, category_id, source, pdf_import_id,
+                         external_id, metadata_json, is_pending, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pdf_import', ?, ?, ?, ?, ?, ?)
                 """, (
                     account_id,
                     tx_data.get("occurred_at", now),
-                    str(Decimal(str(tx_data.get("amount", 0)))),
+                    str(raw_amt),
                     tx_data.get("currency", "CNY"),
-                    tx_data.get("type", "expense"),
+                    tx_type,
                     tx_data.get("description"),
                     tx_data.get("raw_description"),
                     tx_data.get("counterparty"),
+                    category_id,
                     import_id,
                     tx_data.get("external_id"),
-                    0 if auto_confirm else 1,
+                    tx_data.get("metadata_json"),  # 1) preserve parser metadata
+                    is_pending,
                     now, now,
                 ))
                 tx_ids.append(tx_cur.lastrowid)
+
+                # Collect period for snapshot recompute (only confirmed rows
+                # contribute to cashflow).
+                occ = tx_data.get("occurred_at", now)
+                if not is_pending and len(occ) >= 7:
+                    try:
+                        affected_periods.add((int(occ[0:4]), int(occ[5:7])))
+                    except ValueError:
+                        pass
 
             # Update import record
             conn.execute("""
@@ -617,6 +697,14 @@ async def parse_bank_statement(
                 WHERE id = ?
             """, (detected_bank, statement_period, raw_text[:10000],
                   len(transactions), now, import_id))
+
+            # 5) recompute cashflow snapshots for every month touched.
+            for (year, month) in affected_periods:
+                try:
+                    _recompute_period_sync(conn, year, month)
+                except sqlite3.Error:
+                    # Snapshot refresh is best-effort; rows are already in.
+                    pass
 
             conn.commit()
 

@@ -41,7 +41,7 @@ npm run start
 npm run lint     # next lint
 ```
 
-设置后端地址（浏览器侧）：`NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1`。前端通过 `localStorage["finance_api_token"]` 注入 Bearer token。
+设置后端根地址（浏览器侧）：`NEXT_PUBLIC_API_URL=http://localhost:8000`（不含 `/api/v1` 后缀，前端 `lib/api.ts` 自己加）。Bearer token 不再走 `NEXT_PUBLIC_*` 注入（那样会编进 bundle 公开）——用户在 Settings → API Token 输入框粘贴，存 `localStorage["finance_api_token"]`。本地默认 `AUTH_DISABLED=true` + loopback 时不需要 token。
 
 ### MCP Server
 

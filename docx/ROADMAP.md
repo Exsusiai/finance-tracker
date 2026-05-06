@@ -66,7 +66,28 @@
 
 ---
 
-## Sprint 3+ — R3 子系统启用前修（按需触发）
+## ✅ Sprint 3 — 把 V1 partial 修完（已完成 2026-05-06）
+
+> 来源：`code review/review V2.md` 复核。V1 21 项里 V2 标记的 6 个 partial 全部闭合。
+
+| # | 任务 | 来源 | 状态 |
+|---|---|---|---|
+| **FIX-13** | ingestion Step 1.5：`resolve_fx_to_base` + 写 `base_amount/fx_rate_to_base`；缺汇率标 `metadata.fx_missing=true` | V2 §V2-P0-1 / V1 P1-2 | ✅ |
+| **FIX-14** | categorize_transaction + apply_to_similar_pending + /rules/apply-all 全部加 `Category.kind == tx.type` 守卫；rules create/update 校验 category 存在 | V2 §V2-P0-2 / V1 P1-4 | ✅ |
+| **FIX-15** | transactions PATCH 和 inbox confirm 加 ABS（非 adjustment）；MCP `parse_bank_statement` 重写：完整 amount normalize + categorize + kind guard + recompute_period_sync | V2 §V2-P0-3 / V1 P1-5 | ✅ |
+| **FIX-16** | rules.py `_match_rule` 改用 categorizer 的 `_safe_regex_search`；/rules/test 和 /rules/apply-all 共用 | V2 §V2-P1-4 / V1 P2-8 | ✅ |
+| **FIX-17** | Settings.resolved_database_url：把 `sqlite:///./xxx` 锚到 `_PROJECT_ROOT`，cwd 不敏感 | V2 §V2-P2-3 / V1 P3-2 | ✅ |
+| **FIX-18** | 删除 layout.tsx 内 NEXT_PUBLIC_API_TOKEN 注入；settings 页加 ApiTokenInput；统一 NEXT_PUBLIC_API_URL（删除 _BASE_URL）| V2 §V2-P2-4 + §V2-P2-2 / V1 P2-7 | ✅ |
+
+**测试结果**：`pytest backend/tests/ --ignore=test_api.py` → **67 passed**（+14 from Sprint 2 baseline 53）
+
+V1 21 项问题修复进度：
+- ✅ 完全修复：**17 项**（R0+R1+R2 全部 + V1 6 个 partial 全部闭合）
+- ❌ 未修：**4 项**（R3，等启用 GoCardless / Notion 时一并修）：P1-8, P2-2, P2-3, P2-4
+
+---
+
+## Sprint 4+ — R3 子系统启用前修（按需触发）
 
 | 启用项 | 必须先修 | 来源 |
 |---|---|---|
