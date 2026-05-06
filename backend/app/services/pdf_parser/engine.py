@@ -78,9 +78,25 @@ async def parse_pdf_statement(
     else:
         transactions = _parse_generic(raw_text)
 
+    # 2026-05-06: parser external_ids look like "tfbank_1" / "n26_3" — they
+    # restart from seq=1 in every PDF, so two TFBank statements (e.g. March
+    # and April) BOTH emit "tfbank_1", which collides with the partial
+    # unique index `(account_id, external_id) WHERE deleted_at IS NULL`
+    # the second time around. Post-process the parser output to prefix the
+    # external_id with a per-PDF disambiguator (the SHA-256 prefix of the
+    # PDF bytes) so two different PDFs can never produce the same
+    # external_id even when their seqs overlap.
+    import hashlib
+
+    pdf_disambiguator = hashlib.sha256(content).hexdigest()[:12]
+    for tx in transactions:
+        eid = tx.get("external_id")
+        if eid:
+            tx["external_id"] = f"{eid}_{pdf_disambiguator}"
+
     return {
         "detected_bank": detected_bank,
-        "parser_version": "0.3.0",
+        "parser_version": "0.3.1",
         "statement_period": _detect_period(raw_text),
         "raw_text": raw_text[:10000],
         "error": None,
