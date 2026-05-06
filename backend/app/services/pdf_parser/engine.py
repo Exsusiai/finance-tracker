@@ -343,27 +343,66 @@ def _make_tx(
 
 # ─── IBAN extraction helper (2026-05-06) ───────────────────────────────
 # Most non-Revolut bank statements put the counterparty IBAN on the line
-# AFTER the transaction row. The single-line regex parsers below would
-# normally drop that text, leaving the transfer matcher unable to score
-# the +40-pt IBAN-match bonus. This helper looks for an IBAN-shaped token
-# in the gap between two consecutive transaction matches and stitches it
-# onto the row's raw_description so the matcher can see it later.
-_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9 ]{13,30}\b")
+# AFTER the transaction row, prefixed with "IBAN:" or "IBAN ". This
+# helper looks for that pattern in the gap between two consecutive
+# transaction matches and stitches the IBAN onto the row's raw_description
+# so the transfer matcher can score the +40-pt IBAN-match bonus.
+#
+# Subtle: PDFs paginate, and page footers / legal sections also contain
+# IBAN-shaped tokens (e.g. the user's own account IBAN appears in the
+# N26 footer alongside their address; AMEX-DE's legal footer mentions
+# the Amex company IBAN). We had a false-positive bug where a tx's tail
+# spilled into the next page's header and grabbed the WRONG IBAN, so:
+#   1. we require an explicit `IBAN[: ]` prefix before the digits, and
+#   2. we truncate the tail at the first page-footer marker we recognise.
+_IBAN_LABELED_RE = re.compile(
+    r"\bIBAN\s*[:\s]\s*([A-Z]{2}\d{2}[A-Z0-9 ]{11,40})",
+    re.IGNORECASE,
+)
+
+# Markers that signal we've crossed into a different section (page footer,
+# legal disclaimer, next-page header, sub-account overview). Any IBAN
+# appearing AFTER one of these inside the tail belongs to the bank /
+# account itself, not the transaction's counterparty.
+_TX_TAIL_TERMINATORS = (
+    "Issued on",
+    "Schivelbeiner",                # user's home address in N26 footer
+    "Bank Statement",
+    "Spaces Overview",
+    "Spaces Ov",
+    "Karten-Nr",
+    "Saldo des laufenden Monats",
+    "American Express Europe",      # AMEX-DE legal footer
+    "Hinweise zu Ihrer Kartenabrechnung",
+    "Postadresse Internet Kontakt",  # TFBank footer
+)
 
 
 def _extract_iban_in_window(text: str, start: int, end: int) -> str | None:
-    """Return the cleaned IBAN (uppercase, no spaces) found between
-    ``text[start:end]`` (i.e. the continuation lines that follow a
-    transaction row), or None if none is present."""
+    """Return the cleaned IBAN (uppercase, no spaces) explicitly labeled
+    with ``IBAN:`` in ``text[start:end]`` BEFORE any page-footer marker,
+    or None.
+
+    Returning None on a section-footer IBAN is intentional — that IBAN
+    belongs to the bank / account itself, not to the transaction's
+    counterparty."""
     if start >= end:
         return None
     snippet = text[start:end]
-    for m in _IBAN_RE.finditer(snippet):
-        candidate = re.sub(r"\s+", "", m.group(0).upper())
-        # IBAN length sanity: real IBANs are 15-34 chars with a known
-        # 2-letter country prefix.
-        if 15 <= len(candidate) <= 34:
-            return candidate
+    # Truncate at the earliest page-footer marker so we don't grab an
+    # IBAN from a footer or the next page's header.
+    cut = len(snippet)
+    for marker in _TX_TAIL_TERMINATORS:
+        idx = snippet.find(marker)
+        if idx >= 0 and idx < cut:
+            cut = idx
+    snippet = snippet[:cut]
+    m = _IBAN_LABELED_RE.search(snippet)
+    if not m:
+        return None
+    candidate = re.sub(r"\s+", "", m.group(1).upper())
+    if 15 <= len(candidate) <= 34:
+        return candidate
     return None
 
 
