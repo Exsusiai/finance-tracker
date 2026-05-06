@@ -39,10 +39,15 @@ export class ApiError extends Error {
 
 export interface CashFlowMonthly {
   period: string;
+  // Currency unit for ALL numeric fields below; matches backend BASE_CURRENCY.
+  // Front-end book-keeping views should label numbers with this, not the
+  // user's display-currency toggle.
+  base_currency: string;
   income: string;
   expense: string;
   transfer: string;
   savings: string;
+  fx_missing_count?: number;
   by_category: Record<string, string>;
   by_account: Record<string, string>;
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  useCashFlowMonthly,
   useCategories,
   useTransactions,
 } from "@/lib/hooks";
@@ -32,15 +33,15 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
   const [selectedParentId, setSelectedParentId] = useState<number | null>(null);
   const [selectedChildId, setSelectedChildId] = useState<number | null>(null);
 
-  // FIX-3 (review V1 §P1-2): the previous version hard-coded EUR for display
-  // even when the user's chosen display / base currency was something else.
-  // Read the user's preference (shared with /assets and /dashboard via
-  // localStorage); fall back to CNY which is the project's BASE_CURRENCY default.
-  const [displayCurrency, setDisplayCurrency] = useState<string>("CNY");
-  useEffect(() => {
-    const saved = typeof window !== "undefined" ? window.localStorage.getItem("display_currency") : null;
-    if (saved) setDisplayCurrency(saved);
-  }, []);
+  // 2026-05-06 (book-keeping unit pinning): the previous version read
+  // localStorage["display_currency"] which is the asset-page toggle, and
+  // could end up labelling CNY-amount numbers as € (or vice-versa). The
+  // book-keeping domain (cashflow / inbox / breakdown) now ALWAYS uses
+  // BASE_CURRENCY from the cashflow API response. Currency conversion in
+  // record-keeping is the user's job — they enter EUR amounts, see EUR.
+  // The asset page keeps a separate display-currency toggle.
+  const cashflowSnapshot = useCashFlowMonthly(period);
+  const displayCurrency = cashflowSnapshot.data?.[0]?.base_currency ?? "EUR";
 
   const { data: categories } = useCategories();
   // Pull ALL transactions for the month (including pending) — pending tx

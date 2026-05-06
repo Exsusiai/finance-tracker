@@ -80,17 +80,16 @@ export default function DashboardPage() {
   }, [currencyTotals, displayCurrency, fxMap]);
 
   // ─── Derived: This month income / expense / savings rate ──────────────
+  // 2026-05-06: book-keeping section is pinned to BASE_CURRENCY from the
+  // API response — no displayCurrency conversion. The user enters EUR and
+  // sees EUR; only the asset / net-worth section above honours the
+  // displayCurrency toggle.
   const thisMonth = monthlyData?.[0];
   const monthIncomeRaw = thisMonth ? parseFloat(thisMonth.income) : 0;
   const monthExpenseRaw = thisMonth ? parseFloat(thisMonth.expense) : 0;
   const cashflowCurrency = (thisMonth as { base_currency?: string } | undefined)?.base_currency ?? baseCurrency;
-  const convertCashflow = (raw: number) => {
-    if (displayCurrency === cashflowCurrency) return { value: raw, currency: cashflowCurrency };
-    const v = convertAmount(raw, cashflowCurrency, displayCurrency, fxMap);
-    return v == null ? { value: raw, currency: cashflowCurrency } : { value: v, currency: displayCurrency };
-  };
-  const monthIncome = convertCashflow(monthIncomeRaw);
-  const monthExpense = convertCashflow(monthExpenseRaw);
+  const monthIncome = { value: monthIncomeRaw, currency: cashflowCurrency };
+  const monthExpense = { value: monthExpenseRaw, currency: cashflowCurrency };
   const savingsRate = monthIncomeRaw > 0 ? ((monthIncomeRaw - monthExpenseRaw) / monthIncomeRaw) * 100 : 0;
 
   // ─── Derived: Asset class mini-cards (converted to displayCurrency) ───
