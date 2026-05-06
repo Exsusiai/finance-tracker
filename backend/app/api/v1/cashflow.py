@@ -33,14 +33,23 @@ async def monthly_cashflow(
     start_period: str | None = Query(None, alias="from", description="Start period YYYY-MM"),
     end_period: str | None = Query(None, alias="to", description="End period YYYY-MM"),
 ):
-    """Aggregate cash flow by month, computed from live transactions."""
+    """Aggregate cash flow by month, computed from live transactions.
+
+    Amounts are folded to ``BASE_CURRENCY`` via
+    ``COALESCE(base_amount, amount * fx_rate_to_base, amount)``. Rows missing
+    both ``base_amount`` and ``fx_rate_to_base`` fall back to the raw amount
+    (acceptable for same-currency rows; for foreign-currency rows the parser
+    or ingestion pipeline should set one of those fields).
+    """
     stmt = text("""
         SELECT
             substr(occurred_at, 1, 7) AS period,
-            SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) AS income,
-            SUM(CASE WHEN type = 'expense' THEN ABS(amount) ELSE 0 END) AS expense,
-            SUM(CASE WHEN type = 'transfer' THEN ABS(amount) ELSE 0 END) AS transfer,
-            SUM(CASE WHEN type = 'income' THEN amount WHEN type = 'expense' THEN amount ELSE 0 END) AS savings
+            SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS income,
+            SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS expense,
+            SUM(CASE WHEN type = 'transfer' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS transfer,
+            SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                     WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                     ELSE 0 END) AS savings
         FROM transactions
         WHERE deleted_at IS NULL
           AND is_pending = 0
@@ -57,7 +66,11 @@ async def monthly_cashflow(
         period = r[0]
 
         cat_stmt = text("""
-            SELECT c.name, c.kind, SUM(t.amount) AS total, COUNT(*) AS cnt
+            SELECT
+                c.name,
+                c.kind,
+                SUM(ABS(COALESCE(t.base_amount, t.amount * t.fx_rate_to_base, t.amount))) AS total,
+                COUNT(*) AS cnt
             FROM transactions t
             LEFT JOIN categories c ON t.category_id = c.id
             WHERE t.deleted_at IS NULL
@@ -65,7 +78,7 @@ async def monthly_cashflow(
               AND substr(t.occurred_at, 1, 7) = :period
               AND t.category_id IS NOT NULL
             GROUP BY t.category_id
-            ORDER BY ABS(total) DESC
+            ORDER BY total DESC
         """)
         cat_result = await db.execute(cat_stmt, {"period": period})
         cat_rows = cat_result.all()
@@ -73,6 +86,7 @@ async def monthly_cashflow(
 
         monthly_data.append(CashFlowMonthly(
             period=period,
+            base_currency=settings.base_currency,
             income=str(r[1] or Decimal("0")),
             expense=str(r[2] or Decimal("0")),
             transfer=str(r[3] or Decimal("0")),
@@ -89,13 +103,13 @@ async def cashflow_by_category(
     db: AsyncSession = Depends(get_db),
     period: str = Query(..., description="Period in YYYY-MM format"),
 ):
-    """Aggregate spending/income by category for a specific month."""
+    """Aggregate spending/income by category for a specific month (folded to BASE_CURRENCY)."""
     stmt = text("""
         SELECT
             c.id,
             COALESCE(c.name, 'Uncategorized'),
             COALESCE(c.kind, 'expense'),
-            SUM(t.amount) AS total,
+            SUM(ABS(COALESCE(t.base_amount, t.amount * t.fx_rate_to_base, t.amount))) AS total,
             COUNT(*) AS count
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
@@ -103,7 +117,7 @@ async def cashflow_by_category(
           AND t.is_pending = 0
           AND substr(t.occurred_at, 1, 7) = :period
         GROUP BY t.category_id
-        ORDER BY ABS(SUM(t.amount)) DESC
+        ORDER BY total DESC
     """)
     result = await db.execute(stmt, {"period": period})
     rows = result.all()
@@ -127,13 +141,15 @@ async def cashflow_timeseries(
     start_period: str | None = Query(None, alias="from", description="Start period YYYY-MM"),
     end_period: str | None = Query(None, alias="to", description="End period YYYY-MM"),
 ):
-    """Income/expense/savings three-line timeseries."""
+    """Income/expense/savings three-line timeseries (folded to BASE_CURRENCY)."""
     stmt = text("""
         SELECT
             substr(occurred_at, 1, 7) AS period,
-            SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) AS income,
-            SUM(CASE WHEN type = 'expense' THEN ABS(amount) ELSE 0 END) AS expense,
-            SUM(CASE WHEN type = 'income' THEN amount WHEN type = 'expense' THEN amount ELSE 0 END) AS savings
+            SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS income,
+            SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS expense,
+            SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                     WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                     ELSE 0 END) AS savings
         FROM transactions
         WHERE deleted_at IS NULL
           AND is_pending = 0
@@ -185,11 +201,13 @@ async def recompute_cashflow(
             CAST(substr(occurred_at, 1, 4) AS INTEGER),
             CAST(substr(occurred_at, 6, 2) AS INTEGER),
             :base_currency,
-            SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END),
-            SUM(CASE WHEN type = 'expense' THEN ABS(amount) ELSE 0 END),
-            SUM(CASE WHEN type = 'transfer' THEN ABS(amount) ELSE 0 END),
-            SUM(CASE WHEN type = 'income' THEN amount WHEN type = 'expense' THEN amount ELSE 0 END),
-            SUM(CASE WHEN type = 'adjustment' THEN amount ELSE 0 END),
+            SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END),
+            SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END),
+            SUM(CASE WHEN type = 'transfer' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END),
+            SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                     WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                     ELSE 0 END),
+            SUM(CASE WHEN type = 'adjustment' THEN COALESCE(base_amount, amount * fx_rate_to_base, amount) ELSE 0 END),
             NULL,
             :now
         FROM transactions

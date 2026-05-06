@@ -30,20 +30,29 @@ def parse_period(occurred_at: str | None) -> tuple[int, int] | None:
         return None
 
 
-_RECOMPUTE_SQL = text("""
+# FIX-3 (multi-currency): use base_amount when available, else apply
+# fx_rate_to_base, else fall back to raw amount (best effort — same-currency
+# rows or rows where the parser couldn't resolve FX).
+# FIX-2 (savings): savings = ABS(income) − ABS(expense). Previously the
+# formula summed `amount` for both income AND expense, which (because amount
+# is stored as a positive magnitude) added expense to savings instead of
+# subtracting it.
+_AMOUNT_BASE_EXPR = "COALESCE(base_amount, amount * fx_rate_to_base, amount)"
+
+_RECOMPUTE_SQL = text(f"""
     INSERT OR REPLACE INTO cash_flow_snapshots
         (period_year, period_month, base_currency,
          income_total, expense_total, transfer_total, savings_total, other_total,
          by_category_json, by_account_json, computed_at)
     SELECT
         :year, :month, :base_currency,
-        COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS(amount) ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS(amount) ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'income' THEN amount
-                          WHEN type = 'expense' THEN amount
+        COALESCE(SUM(CASE WHEN type = 'income'  THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS({_AMOUNT_BASE_EXPR}) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'income'  THEN  ABS({_AMOUNT_BASE_EXPR})
+                          WHEN type = 'expense' THEN -ABS({_AMOUNT_BASE_EXPR})
                           ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'adjustment' THEN amount ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'adjustment' THEN {_AMOUNT_BASE_EXPR} ELSE 0 END), 0),
         NULL,
         NULL,
         :now

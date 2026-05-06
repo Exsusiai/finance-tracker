@@ -13,12 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth import require_auth
-from app.core.errors import NotFoundError
+from app.core.errors import InvalidInputError, NotFoundError
 from app.db import get_db
 from app.models import Transaction, Account, Category
 from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
+    MarkTransferIn,
     PaginationMeta,
     TransactionBatchCreate,
     TransactionCreate,
@@ -378,17 +379,21 @@ async def delete_transaction(
 @router.post("/{transaction_id}/mark-transfer", response_model=ApiSuccess[TransactionOut])
 async def mark_as_transfer(
     transaction_id: int,
+    body: MarkTransferIn,
     _token: _auth,
     db: AsyncSession = Depends(get_db),
-    counter_transaction_id: int | None = Query(None,
-        description="If known, the matching tx in the other account. Both rows get type='transfer' and cross-link."),
 ):
     """Mark a single tx as a transfer; optionally pair with a counter-leg.
 
-    Without `counter_transaction_id`: just flips type → 'transfer' (useful when
-    only one side of the transfer was recorded, e.g. a one-off SEPA).
-    With `counter_transaction_id`: also flips that side and cross-links the two.
+    Without `counter_transaction_id`: requires `transfer_direction`, flips type →
+    'transfer' and tags direction in metadata_json so the balance view applies the
+    correct sign.
+    With `counter_transaction_id`: routes through pair_transactions() which tags
+    both legs correctly. `transfer_direction` describes the URL tx (the out/in
+    leg); if omitted, falls back to tx.type heuristic.
     """
+    from app.services.transfer_matcher.engine import _merge_meta, pair_transactions
+
     stmt = (
         select(Transaction)
         .options(selectinload(Transaction.account), selectinload(Transaction.category))
@@ -399,27 +404,53 @@ async def mark_as_transfer(
         raise NotFoundError("Transaction", transaction_id)
 
     old_period = parse_period(tx.occurred_at)
-    tx.type = "transfer"
-    tx.is_pending = False
 
-    if counter_transaction_id is not None:
+    if body.counter_transaction_id is not None:
         ctr = (await db.execute(
             select(Transaction).where(
-                Transaction.id == counter_transaction_id,
+                Transaction.id == body.counter_transaction_id,
                 Transaction.deleted_at.is_(None),
             )
         )).scalar_one_or_none()
         if not ctr:
-            raise NotFoundError("Counter Transaction", counter_transaction_id)
-        ctr.type = "transfer"
-        ctr.is_pending = False
-        tx.counter_account_id = ctr.account_id
-        ctr.counter_account_id = tx.account_id
-        # Recompute both periods (counter may be on a different month)
+            raise NotFoundError("Counter Transaction", body.counter_transaction_id)
+
+        # Determine which leg is out and which is in.
+        if body.transfer_direction == "out":
+            out_tx, in_tx = tx, ctr
+        elif body.transfer_direction == "in":
+            out_tx, in_tx = ctr, tx
+        else:
+            # Fallback: use tx.type heuristic
+            if tx.type == "expense":
+                out_tx, in_tx = tx, ctr
+            elif tx.type == "income":
+                out_tx, in_tx = ctr, tx
+            elif ctr.type == "expense":
+                out_tx, in_tx = ctr, tx
+            elif ctr.type == "income":
+                out_tx, in_tx = tx, ctr
+            else:
+                raise InvalidInputError(
+                    "Cannot determine transfer direction automatically. "
+                    "Please supply transfer_direction."
+                )
+
+        await pair_transactions(db, out_tx, in_tx)
+        out_tx.is_pending = False
+        in_tx.is_pending = False
         ctr_period = parse_period(ctr.occurred_at)
         await db.flush()
         await recompute_for_periods(db, [old_period, ctr_period])
     else:
+        # Single-leg: direction is required so the balance view signs correctly.
+        if not body.transfer_direction:
+            raise InvalidInputError(
+                "transfer_direction is required when no counter_transaction_id is given."
+            )
+        tx.type = "transfer"
+        tx.is_pending = False
+        tx.metadata_json = _merge_meta(tx.metadata_json, {"transfer_direction": body.transfer_direction})
         await db.flush()
         await recompute_for_periods(db, [old_period])
 

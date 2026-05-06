@@ -592,13 +592,18 @@ async def get_cashflow(
 ) -> dict[str, Any]:
     conn = _get_conn()
     try:
+        # FIX-2/3 (review V1 §P1-1, §P1-2): savings = ABS(income) − ABS(expense);
+        # all amounts folded to BASE_CURRENCY via base_amount → fx_rate_to_base
+        # → raw amount fallback.
         rows = conn.execute("""
             SELECT
                 substr(occurred_at, 1, 7) AS period,
-                SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) AS income,
-                SUM(CASE WHEN type = 'expense' THEN ABS(amount) ELSE 0 END) AS expense,
-                SUM(CASE WHEN type = 'transfer' THEN ABS(amount) ELSE 0 END) AS transfer,
-                SUM(CASE WHEN type = 'income' THEN amount WHEN type = 'expense' THEN amount ELSE 0 END) AS savings
+                SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS income,
+                SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS expense,
+                SUM(CASE WHEN type = 'transfer' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS transfer,
+                SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                         WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                         ELSE 0 END) AS savings
             FROM transactions
             WHERE deleted_at IS NULL AND is_pending = 0
               AND (? IS NULL OR substr(occurred_at, 1, 7) >= ?)
@@ -611,15 +616,19 @@ async def get_cashflow(
         months = []
         for r in rows:
             period = r["period"]
-            # Per-category breakdown
+            # Per-category breakdown (folded to BASE_CURRENCY)
             cats = conn.execute("""
-                SELECT c.name, c.kind, SUM(t.amount) AS total, COUNT(*) AS cnt
+                SELECT
+                    c.name,
+                    c.kind,
+                    SUM(ABS(COALESCE(t.base_amount, t.amount * t.fx_rate_to_base, t.amount))) AS total,
+                    COUNT(*) AS cnt
                 FROM transactions t
                 LEFT JOIN categories c ON t.category_id = c.id
                 WHERE t.deleted_at IS NULL AND t.is_pending = 0
                   AND substr(t.occurred_at, 1, 7) = ? AND t.category_id IS NOT NULL
                 GROUP BY t.category_id
-                ORDER BY ABS(total) DESC
+                ORDER BY total DESC
             """, (period,)).fetchall()
 
             by_category = {c["name"]: _dec(c["total"]) for c in cats if c["name"]}

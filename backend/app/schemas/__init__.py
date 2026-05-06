@@ -214,6 +214,11 @@ class TransactionBatchCreate(BaseModel):
     transactions: list[TransactionCreate]
 
 
+class MarkTransferIn(BaseModel):
+    counter_transaction_id: int | None = None
+    transfer_direction: str | None = Field(None, pattern=r"^(in|out)$")
+
+
 # ─── PDF Import ─────────────────────────────────────────────────────────────
 
 class PdfImportOut(BaseModel):
@@ -387,6 +392,7 @@ class MarketRefreshStatus(BaseModel):
 
 class CashFlowMonthly(BaseModel):
     period: str  # "YYYY-MM"
+    base_currency: str = "CNY"  # All numeric fields below are folded to this currency
     income: str
     expense: str
     transfer: str

@@ -61,12 +61,7 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
     setError(null);
     try {
       setSubmitting(true);
-      // Backend mark-transfer: if counterTxId is provided it cross-links and
-      // tags both directions; otherwise just flips this tx and we still tag
-      // the direction via metadata locally (backend default).
-      // For now we only send counter_transaction_id when chosen — the backend
-      // pair_transactions function tags directions automatically.
-      await markAsTransfer(tx.id, counterTxId ?? undefined);
+      await markAsTransfer(tx.id, { counterTransactionId: counterTxId ?? undefined, direction: direction ?? undefined });
       onSuccess();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "标记失败");

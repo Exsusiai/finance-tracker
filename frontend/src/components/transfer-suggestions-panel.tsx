@@ -76,7 +76,7 @@ function SuggestionCard({ suggestion: s, outAccountName, inAccountName, onDone }
     setError(null);
     try {
       setSubmitting(true);
-      await markAsTransfer(s.out_transaction_id, s.in_transaction_id);
+      await markAsTransfer(s.out_transaction_id, { counterTransactionId: s.in_transaction_id, direction: "out" });
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "确认失败");

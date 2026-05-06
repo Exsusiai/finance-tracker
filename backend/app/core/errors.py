@@ -36,6 +36,11 @@ class ParserError(AppError):
         super().__init__(code="PARSER_ERROR", message=message, status_code=422, details=details)
 
 
+class InvalidInputError(AppError):
+    def __init__(self, message: str, details: dict | None = None):
+        super().__init__(code="INVALID_INPUT", message=message, status_code=422, details=details)
+
+
 class MarketDataError(AppError):
     def __init__(self, message: str):
         super().__init__(code="MARKET_DATA_ERROR", message=message, status_code=502)

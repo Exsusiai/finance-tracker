@@ -616,13 +616,14 @@ export async function fetchTransferSuggestions(): Promise<TransferSuggestion[]> 
 
 export async function markAsTransfer(
   id: number,
-  counterTransactionId?: number,
+  options?: { counterTransactionId?: number; direction?: "in" | "out" }
 ): Promise<TransactionOut> {
-  const params = counterTransactionId
-    ? `?counter_transaction_id=${counterTransactionId}`
-    : "";
-  return request(`/api/v1/transactions/${id}/mark-transfer${params}`, {
+  return request(`/api/v1/transactions/${id}/mark-transfer`, {
     method: "POST",
+    body: JSON.stringify({
+      counter_transaction_id: options?.counterTransactionId ?? null,
+      transfer_direction: options?.direction ?? null,
+    }),
   });
 }
 

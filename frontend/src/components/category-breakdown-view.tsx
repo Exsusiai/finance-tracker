@@ -32,6 +32,16 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
   const [selectedParentId, setSelectedParentId] = useState<number | null>(null);
   const [selectedChildId, setSelectedChildId] = useState<number | null>(null);
 
+  // FIX-3 (review V1 §P1-2): the previous version hard-coded EUR for display
+  // even when the user's chosen display / base currency was something else.
+  // Read the user's preference (shared with /assets and /dashboard via
+  // localStorage); fall back to CNY which is the project's BASE_CURRENCY default.
+  const [displayCurrency, setDisplayCurrency] = useState<string>("CNY");
+  useEffect(() => {
+    const saved = typeof window !== "undefined" ? window.localStorage.getItem("display_currency") : null;
+    if (saved) setDisplayCurrency(saved);
+  }, []);
+
   const { data: categories } = useCategories();
   // Pull ALL transactions for the month (including pending) — pending tx
   // already have categories assigned by the auto-categorizer and the user
@@ -44,7 +54,11 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
     limit: 500,
   });
 
-  // Aggregate sub-cat totals up into parents.
+  // Aggregate sub-cat totals up into parents. FIX-3: prefer base_amount (folded
+  // to base_currency by the ingestion pipeline) over raw amount. Falls back
+  // to amount if base_amount is missing — same-currency rows are still correct;
+  // foreign-currency rows without base_amount fall through with a known caveat
+  // (Sprint 1 FIX-4 will guarantee base_amount on every ingested row).
   const tree = useMemo(
     () => buildTreeFromTx(categories ?? [], txResp?.data ?? [], kind),
     [categories, txResp, kind],
@@ -77,6 +91,7 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
           setSelectedChildId(null);
         }}
         grandTotal={grandTotal}
+        displayCurrency={displayCurrency}
       />
 
       {byCatLoading ? (
@@ -95,6 +110,7 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
               setSelectedParentId(id);
               setSelectedChildId(null);
             }}
+            displayCurrency={displayCurrency}
           />
           {selectedParent && (
             <ParentDetail
@@ -105,6 +121,7 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
               selectedChildId={selectedChildId}
               onSelectChild={(id) => setSelectedChildId(id === selectedChildId ? null : id)}
               allCategories={categories ?? []}
+              displayCurrency={displayCurrency}
             />
           )}
         </div>
@@ -121,9 +138,10 @@ interface HeaderProps {
   kind: "expense" | "income" | "transfer";
   onKindChange: (k: "expense" | "income" | "transfer") => void;
   grandTotal: number;
+  displayCurrency: string;
 }
 
-function Header({ period, onPeriodChange, kind, onKindChange, grandTotal }: HeaderProps) {
+function Header({ period, onPeriodChange, kind, onKindChange, grandTotal, displayCurrency }: HeaderProps) {
   const months = useMemo(() => last12Months(), []);
   return (
     <div className="rounded-xl border border-border bg-card p-4">
@@ -178,7 +196,7 @@ function Header({ period, onPeriodChange, kind, onKindChange, grandTotal }: Head
         <div className="text-right">
           <p className="text-xs text-muted-foreground">总{kindLabel(kind)}</p>
           <p className="text-2xl font-bold tabular-nums">
-            {grandTotal > 0 ? formatCurrency(grandTotal, "EUR") : "—"}
+            {grandTotal > 0 ? formatCurrency(grandTotal, displayCurrency) : "—"}
           </p>
         </div>
       </div>
@@ -193,9 +211,10 @@ interface ParentListProps {
   grandTotal: number;
   selectedId: number | null;
   onSelect: (id: number) => void;
+  displayCurrency: string;
 }
 
-function ParentList({ parents, grandTotal, selectedId, onSelect }: ParentListProps) {
+function ParentList({ parents, grandTotal, selectedId, onSelect, displayCurrency }: ParentListProps) {
   return (
     <div className="rounded-xl border border-border bg-card overflow-hidden">
       <div className="px-3 py-2 border-b border-border bg-muted/30">
@@ -221,7 +240,7 @@ function ParentList({ parents, grandTotal, selectedId, onSelect }: ParentListPro
                   {p.name}
                 </span>
                 <span className="text-xs tabular-nums text-foreground shrink-0">
-                  {formatCurrency(p.total, "EUR")}
+                  {formatCurrency(p.total, displayCurrency)}
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -259,9 +278,10 @@ interface ParentDetailProps {
   selectedChildId: number | null;
   onSelectChild: (id: number) => void;
   allCategories: CategoryOut[];
+  displayCurrency: string;
 }
 
-function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSelectChild, allCategories }: ParentDetailProps) {
+function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSelectChild, allCategories, displayCurrency }: ParentDetailProps) {
   const parentPct = grandTotal > 0 ? (parent.total / grandTotal) * 100 : 0;
 
   return (
@@ -270,7 +290,7 @@ function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSel
         <div className="flex items-baseline justify-between gap-3">
           <h3 className="text-base font-semibold">{parent.name}</h3>
           <div className="text-right">
-            <p className="text-lg font-bold tabular-nums">{formatCurrency(parent.total, "EUR")}</p>
+            <p className="text-lg font-bold tabular-nums">{formatCurrency(parent.total, displayCurrency)}</p>
             <p className="text-[10px] text-muted-foreground">
               占总{kindLabel(kind)} {parentPct.toFixed(1)}%
             </p>
@@ -310,7 +330,7 @@ function ParentDetail({ parent, grandTotal, period, kind, selectedChildId, onSel
                       </span>
                     </div>
                     <span className="text-sm tabular-nums font-medium shrink-0">
-                      {formatCurrency(c.total, "EUR")}
+                      {formatCurrency(c.total, displayCurrency)}
                     </span>
                   </div>
                   <div className="flex items-center gap-2 ml-5">
@@ -439,12 +459,16 @@ function buildTreeFromTx(
     childrenByParent.set(c.parent_id, arr);
   }
 
-  // Aggregate transactions by category_id
+  // Aggregate transactions by category_id. FIX-3: prefer base_amount (already
+  // folded to BASE_CURRENCY by the parser / ingestion); fall back to amount
+  // for rows that don't have it yet (handled fully in Sprint 1 FIX-4).
   const aggByCat = new Map<number, { total: number; count: number }>();
   for (const t of txs) {
     if (t.category_id == null) continue;
     if (t.type !== kind) continue;
-    const amt = Math.abs(parseFloat(t.amount) || 0);
+    const baseAmt = (t as { base_amount?: string | null }).base_amount;
+    const raw = baseAmt != null ? parseFloat(baseAmt) : parseFloat(t.amount);
+    const amt = Math.abs(raw || 0);
     const cur = aggByCat.get(t.category_id) ?? { total: 0, count: 0 };
     cur.total += amt;
     cur.count += 1;
