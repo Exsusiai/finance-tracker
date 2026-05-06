@@ -122,49 +122,86 @@ export function PdfImportPanel() {
     [refreshStatements, uploadResult]
   );
 
+  // 2026-05-06 UX: require an account to be picked before allowing upload.
+  // Bypassing this used to land us in the awaiting_account flow which
+  // sometimes confused users; making the precondition explicit at the
+  // entry point removes the ambiguity entirely.
+  const accountRequired = !selectedAccountId;
+
   return (
     <div className="space-y-6">
       {/* ─── Upload area ─────────────────────────────────────────── */}
       <div className="rounded-xl border border-border bg-card p-6">
         <div className="mb-4">
-          <label className="block text-sm font-medium mb-2">关联账户（可选）</label>
+          <label className="block text-sm font-medium mb-2">
+            关联账户 <span className="text-destructive">*</span>
+          </label>
           <select
             value={selectedAccountId || ""}
             onChange={(e) =>
               setSelectedAccountId(e.target.value ? Number(e.target.value) : undefined)
             }
-            className="w-full sm:w-auto px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            className={cn(
+              "w-full sm:w-auto px-3 py-2 text-sm rounded-lg border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring",
+              accountRequired ? "border-destructive/40" : "border-border",
+            )}
           >
-            <option value="">未选择</option>
+            <option value="">请先选择账户…</option>
             {accounts?.map((a) => (
               <option key={a.id} value={a.id}>
                 {a.name} ({a.currency})
               </option>
             ))}
           </select>
+          {accountRequired && (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              请先选择该 PDF 对应的账户，再上传文件。
+            </p>
+          )}
         </div>
 
         <div
           onDragOver={(e) => {
             e.preventDefault();
-            setDragOver(true);
+            if (!accountRequired) setDragOver(true);
           }}
           onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
+          onDrop={(e) => {
+            // Always swallow the browser default (otherwise it navigates
+            // to the file). Only forward to the handler when an account
+            // is selected.
+            e.preventDefault();
+            setDragOver(false);
+            if (accountRequired) {
+              setUploadError("请先在上方选择关联账户后再上传 PDF。");
+              return;
+            }
+            handleDrop(e);
+          }}
+          onClick={() => {
+            if (accountRequired) {
+              setUploadError("请先在上方选择关联账户后再上传 PDF。");
+              return;
+            }
+            fileInputRef.current?.click();
+          }}
           className={cn(
-            "relative flex flex-col items-center justify-center gap-3 py-12 rounded-xl border-2 border-dashed cursor-pointer transition-all",
-            dragOver
-              ? "border-primary bg-primary/5"
-              : "border-border hover:border-muted-foreground/30 hover:bg-muted/30",
-            uploading && "pointer-events-none opacity-60"
+            "relative flex flex-col items-center justify-center gap-3 py-12 rounded-xl border-2 border-dashed transition-all",
+            accountRequired
+              ? "border-border/60 bg-muted/30 cursor-not-allowed opacity-60"
+              : dragOver
+                ? "border-primary bg-primary/5 cursor-pointer"
+                : "border-border hover:border-muted-foreground/30 hover:bg-muted/30 cursor-pointer",
+            uploading && "pointer-events-none opacity-60",
           )}
+          aria-disabled={accountRequired}
         >
           <input
             ref={fileInputRef}
             type="file"
             accept=".pdf"
             onChange={handleInputChange}
+            disabled={accountRequired || uploading}
             className="hidden"
           />
 
@@ -178,7 +215,11 @@ export function PdfImportPanel() {
               <svg
                 className={cn(
                   "h-10 w-10",
-                  dragOver ? "text-primary" : "text-muted-foreground/50"
+                  accountRequired
+                    ? "text-muted-foreground/30"
+                    : dragOver
+                      ? "text-primary"
+                      : "text-muted-foreground/50",
                 )}
                 fill="none"
                 stroke="currentColor"
@@ -192,8 +233,13 @@ export function PdfImportPanel() {
                 />
               </svg>
               <div className="text-center">
-                <p className="text-sm font-medium text-foreground">
-                  拖拽 PDF 文件到这里，或点击上传
+                <p className={cn(
+                  "text-sm font-medium",
+                  accountRequired ? "text-muted-foreground" : "text-foreground",
+                )}>
+                  {accountRequired
+                    ? "请先选择关联账户"
+                    : "拖拽 PDF 文件到这里，或点击上传"}
                 </p>
                 <p className="text-xs text-muted-foreground mt-1">
                   支持：N26、Revolut、TFBank、advanzia、AMEX等格式
