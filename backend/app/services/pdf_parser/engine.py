@@ -341,6 +341,43 @@ def _make_tx(
     }
 
 
+# ─── IBAN extraction helper (2026-05-06) ───────────────────────────────
+# Most non-Revolut bank statements put the counterparty IBAN on the line
+# AFTER the transaction row. The single-line regex parsers below would
+# normally drop that text, leaving the transfer matcher unable to score
+# the +40-pt IBAN-match bonus. This helper looks for an IBAN-shaped token
+# in the gap between two consecutive transaction matches and stitches it
+# onto the row's raw_description so the matcher can see it later.
+_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9 ]{13,30}\b")
+
+
+def _extract_iban_in_window(text: str, start: int, end: int) -> str | None:
+    """Return the cleaned IBAN (uppercase, no spaces) found between
+    ``text[start:end]`` (i.e. the continuation lines that follow a
+    transaction row), or None if none is present."""
+    if start >= end:
+        return None
+    snippet = text[start:end]
+    for m in _IBAN_RE.finditer(snippet):
+        candidate = re.sub(r"\s+", "", m.group(0).upper())
+        # IBAN length sanity: real IBANs are 15-34 chars with a known
+        # 2-letter country prefix.
+        if 15 <= len(candidate) <= 34:
+            return candidate
+    return None
+
+
+def _attach_iban_to_tx(tx: dict, iban: str | None) -> None:
+    """Append `IBAN <X>` to a tx dict's raw_description if we found one.
+    Idempotent: doesn't duplicate the IBAN if already present."""
+    if not iban:
+        return
+    raw = tx.get("raw_description") or ""
+    if iban in raw.upper().replace(" ", ""):
+        return
+    tx["raw_description"] = (raw + f" | IBAN {iban}").strip(" |")
+
+
 # ─── AMEX-DE ────────────────────────────────────────────────────────────
 
 
@@ -358,7 +395,8 @@ def _parse_amex_de(text: str) -> list[dict]:
     year = 2000 + int(yr_match.group(3)) if yr_match else datetime.now(timezone.utc).year
 
     seq = 0
-    for m in _AMEX_ROW.finditer(text):
+    matches = list(_AMEX_ROW.finditer(text))
+    for i, m in enumerate(matches):
         d_book, _d_post, desc, amt = m.groups()
         if any(skip in desc for skip in ["Saldo", "Karten-Nr", "Abrechnung"]):
             continue
@@ -379,10 +417,14 @@ def _parse_amex_de(text: str) -> list[dict]:
         except Exception:
             continue
         seq += 1
-        txs.append(_make_tx(
+        tx = _make_tx(
             date_iso=date_iso, amount=amount, tx_type=tx_type,
             description=desc, counterparty="AMEX-DE", seq=seq,
-        ))
+        )
+        tail_start = m.end()
+        tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        _attach_iban_to_tx(tx, _extract_iban_in_window(text, tail_start, tail_end))
+        txs.append(tx)
     return txs
 
 
@@ -398,7 +440,8 @@ _N26_ROW = re.compile(
 def _parse_n26(text: str) -> list[dict]:
     txs: list[dict] = []
     seq = 0
-    for m in _N26_ROW.finditer(text):
+    matches = list(_N26_ROW.finditer(text))
+    for i, m in enumerate(matches):
         desc, date_str, amt = m.groups()
         try:
             amount = _de_amount(amt)
@@ -410,10 +453,17 @@ def _parse_n26(text: str) -> list[dict]:
         date_iso = f"{yyyy}-{mm}-{dd}T00:00:00Z"
         tx_type = "income" if amount > 0 else "expense"
         seq += 1
-        txs.append(_make_tx(
+        tx = _make_tx(
             date_iso=date_iso, amount=amount, tx_type=tx_type,
             description=desc, counterparty="N26", seq=seq,
-        ))
+        )
+        # Look for an IBAN in the continuation lines that follow this row
+        # but precede the next match — typical N26 layout puts
+        # counterparty IBAN one line below the date/amount row.
+        tail_start = m.end()
+        tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        _attach_iban_to_tx(tx, _extract_iban_in_window(text, tail_start, tail_end))
+        txs.append(tx)
     return txs
 
 
@@ -593,7 +643,8 @@ _TFBANK_ROW = re.compile(
 def _parse_tfbank(text: str) -> list[dict]:
     txs: list[dict] = []
     seq = 0
-    for m in _TFBANK_ROW.finditer(text):
+    matches = list(_TFBANK_ROW.finditer(text))
+    for i, m in enumerate(matches):
         _txid, d_book, _d_post, desc, _amt_orig, amt_eur, dc = m.groups()
         try:
             amount = _de_amount(amt_eur)
@@ -608,10 +659,14 @@ def _parse_tfbank(text: str) -> list[dict]:
         # Strip "Wechselkurs 1.00000" tail from desc
         desc = re.sub(r"\s*Wechselkurs\s+[\d.]+\s*$", "", desc).strip()
         seq += 1
-        txs.append(_make_tx(
+        tx = _make_tx(
             date_iso=date_iso, amount=amount, tx_type=tx_type,
             description=desc, counterparty="TFBank", seq=seq,
-        ))
+        )
+        tail_start = m.end()
+        tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        _attach_iban_to_tx(tx, _extract_iban_in_window(text, tail_start, tail_end))
+        txs.append(tx)
     return txs
 
 
@@ -628,7 +683,8 @@ _ADVANZIA_SKIP = ("ALTER SALDO", "NEUER SALDO", "MINDESTBETRAG")
 def _parse_advanzia(text: str) -> list[dict]:
     txs: list[dict] = []
     seq = 0
-    for m in _ADVANZIA_ROW.finditer(text):
+    matches = list(_ADVANZIA_ROW.finditer(text))
+    for i, m in enumerate(matches):
         date_str, desc, amt = m.groups()
         if any(skip in desc.upper() for skip in _ADVANZIA_SKIP):
             continue
@@ -643,10 +699,15 @@ def _parse_advanzia(text: str) -> list[dict]:
         # Negative amount = credit (e.g. EINZAHLUNG repayment); positive = purchase (expense).
         tx_type = "income" if amount < 0 else "expense"
         seq += 1
-        txs.append(_make_tx(
+        _adv_tail_start = m.end()
+        _adv_tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        _adv_iban = _extract_iban_in_window(text, _adv_tail_start, _adv_tail_end)
+        tx = _make_tx(
             date_iso=date_iso, amount=amount, tx_type=tx_type,
             description=desc, counterparty="Advanzia", seq=seq,
-        ))
+        )
+        _attach_iban_to_tx(tx, _adv_iban)
+        txs.append(tx)
     return txs
 
 
