@@ -1,13 +1,23 @@
 # Finance Tracker — 项目进度
 
-> 修订日期: 2026-05-05
+> 修订日期: 2026-05-06
 > 根据"是否真正闭环并验证过"打分；详细分析见 `docx/REQUIREMENT_GAP.md`，剩余优先级见 `docx/ROADMAP.md`。
 
 ## 项目信息
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` branch
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: P0 全部完成；P1 已完成 P1-1b 用户备注 + 多项 P0 后衍生需求（跨账户转账 / IBAN / 级联学习 / 子账户管理 / 内联编辑等）；剩余 P1-1a/c/d (LLM)、P1-2 (GoCardless)、P1-3 (Notion)、P1-4 (链上钱包 + CEX)、P1-5 (储蓄口径)
+- **当前阶段**: ✅ **Sprint 0 R0 资金正确性已完成**（FIX-1/2/3，5/5 mark-transfer 测试 + cashflow smoke test 全过）。下一步：Sprint 1（数据一致性 + 测试基础设施）→ Sprint 2（GitHub 公开前安全加固）→ P1-4（链上钱包）→ P1-1（LLM）→ P1-2/3（GoCardless / Notion）
+
+---
+
+## ✅ Sprint 0 — R0 资金正确性（已完成 2026-05-06）
+
+| FIX | 内容 | 来源 | 状态 |
+|---|---|---|---|
+| **FIX-1** | mark-transfer 持久化 transfer_direction（5 个测试覆盖：单边 in/out/missing-422、双边配对、跨月配对+cashflow 重算） | review V1 §P0-3 | ✅ |
+| **FIX-2** | savings 公式 4 处统一为 `ABS(income) − ABS(expense)` | review V1 §P1-1 | ✅ |
+| **FIX-3** | cashflow `COALESCE(base_amount, amount*fx_rate, amount)` 多币种折算 + `CashFlowMonthly.base_currency` + 前端 displayCurrency | review V1 §P1-2 | ✅ |
 
 ## 状态图例
 - ✅ 闭环可用（验证通过）

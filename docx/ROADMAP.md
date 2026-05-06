@@ -1,8 +1,59 @@
 # Finance Tracker — 开发任务优先级 ROADMAP
 
-> 修订日期: 2026-05-05
-> 来源: `docx/PRD.md` 与 `docx/REQUIREMENT_GAP.md`
-> 排序原则: ① PRD 明文要求 + ② 用户当下感受得到的破窗 + ③ 解锁后续功能的依赖度
+> 修订日期: 2026-05-06
+> 来源: `docx/PRD.md`、`docx/REQUIREMENT_GAP.md`、`code review/review V1.md`
+> 排序原则: ① 现行资金正确性 > ② 公开发布前安全 > ③ PRD 明文功能 > ④ 工程化债务
+
+---
+
+## ✅ Sprint 0 — R0 紧急资金正确性修复（已完成 2026-05-06）
+
+> 来源：`code review/review V1.md` 实地验证。这些 bug **当前每次操作都在产生错数据**，必须先修。
+
+| # | 任务 | 来源 | 状态 |
+|---|---|---|---|
+| **FIX-1** | `mark-transfer` 持久化 `transfer_direction`（counter→`pair_transactions`，单边→`metadata.transfer_direction`）；前端 dialog/suggestions panel 把 `direction` 真正发送；新加 `MarkTransferIn` schema + `InvalidInputError`；5/5 backend tests pass | review P0-3 | ✅ |
+| **FIX-2** | Savings 公式 4 处统一为 `ABS(income) − ABS(expense)`（cashflow/engine.py + cashflow.py 三处 + mcp server.py） | review P1-1 | ✅ |
+| **FIX-3** | cashflow SQL 用 `COALESCE(base_amount, amount * fx_rate_to_base, amount)` 折算；`CashFlowMonthly` 响应加 `base_currency`；前端 CategoryBreakdownView 去掉硬编码 EUR + 改读 displayCurrency + 优先使用 `base_amount` | review P1-2 | ✅ |
+
+**验收（已通过）**：
+- ✅ 5/5 mark-transfer 测试：单边 in / 单边 out / 单边缺 direction→422 / 双边配对余额一致 / 跨月配对 cashflow 重算
+- ✅ smoke test：3000 income(CNY) + 1000 expense(CNY) + 100 EUR(base=800) expense + 50 USD(fx=7.2) income → income=3360 expense=1800 **savings=1560** ✓
+
+---
+
+## Sprint 1 — R1 数据一致性 + 测试基础设施（2-3 天）
+
+| # | 任务 | 来源 | 估时 |
+|---|---|---|---|
+| **FIX-4** | 抽 `services/ingestion/` 统一管道，upload / reparse / batch / bank_sync / mcp add_transaction 共用：normalize amount → categorize → transfer match → recompute periods | review P1-3, P1-5 | 1d |
+| **FIX-5** | 后端校验 `Category.kind == Transaction.type`；创建子分类校验 parent 存在 + 同 kind | review P1-4 | 0.3d |
+| **FIX-6** | ORM 加 Index + partial unique `(account_id, external_id) WHERE deleted_at IS NULL` | review P1-6 | 0.3d |
+| **FIX-7** | 测试基础设施恢复：装 pytest，删旧测试，给 5 家欧洲 parser + R0 修复加最小测试 | review P3-2 | 1d |
+
+---
+
+## Sprint 2 — R2 公开 GitHub 前安全加固（0.5-1 天）
+
+| # | 任务 | 来源 | 估时 |
+|---|---|---|---|
+| **FIX-8** | Notion router 加 `Depends(require_auth)` + 鉴权回归测试 | review P0-1 | 0.2d |
+| **FIX-9** | 默认 `BACKEND_HOST=127.0.0.1`；CORS 改用 `ALLOWED_ORIGINS` 配置；`AUTH_DISABLED=true` 且 host 非 loopback 时启动 fail | review P0-2 | 0.3d |
+| **FIX-10** | PDF 上传：`MAX_PDF_SIZE_MB=10` + magic bytes 校验 | review P2-1 | 0.2d |
+| **FIX-11** | regex 规则：保存时复杂度校验 + 运行时线程池 timeout | review P2-8 | 0.3d |
+| **FIX-12** | 顺手清理：SCHEMA.sql 视图同步 / 删 valuation 死 helper / list count 过滤补全 / 删坏掉的 layout token bootstrap | review P2-5/6/7, P3-1 | 0.3d |
+
+> ✅ Sprint 2 完成后无致命 bug，可以 push 到公开 GitHub。
+
+---
+
+## Sprint 3+ — R3 子系统启用前修（按需触发）
+
+| 启用项 | 必须先修 | 来源 |
+|---|---|---|
+| **GoCardless**（原 P1-2） | FIX-13 bank_sync 复用统一 ingestion；FIX-14 凭据走 body 不走 query；FIX-15 country 字段独立修复 | review P1-7, P2-2, P2-3 |
+| **Notion**（原 P1-3） | FIX-16 资产摘要改读 `v_account_balance` | review P1-8 |
+| 手动 cashflow recompute 跨年范围 | FIX-17 改用 period 字符串比较 | review P2-4 |
 
 ---
 
@@ -64,17 +115,18 @@
 
 ---
 
-## 修订后的执行序列（2026-05-05）
+## 修订后的执行序列（2026-05-06）
 
-| 顺序 | 任务 | 估时 | 依赖你 |
+| 顺序 | 阶段 | 估时 | 依赖你 |
 |---|---|---|---|
-| 1 | **P1-1a + P1-1c** LLM fallback + 知识库注入 | 2-3 天 | LLM provider + 月预算 |
-| 2 | **P1-1d** 知识库管理 UI | 0.5 天 | P1-1a/c 完成 |
-| 3 | **P1-4** 链上钱包 + Binance/Bitget CEX | 3-4 天 | 无（决策已敲定） |
-| 4 | **P1-5** 储蓄口径 | 0.5 天 | 你给口径定义 |
-| 5 | **P1-2** GoCardless | 1-2 天 | GoCardless 账号 |
-| 6 | **P1-3** Notion 同步 | 1-2 天 | Notion token + 库结构 |
-| 7+ | **P2** 工程化债务 | 视优先级 | |
+| 1 | **Sprint 0** R0 资金正确性修复（FIX-1/2/3） | 1-2 天 | 无 |
+| 2 | **Sprint 1** R1 数据一致性 + 测试（FIX-4~7） | 2-3 天 | 无 |
+| 3 | **Sprint 2** R2 GitHub 公开前安全（FIX-8~12） | 0.5-1 天 | 无 |
+| 4 | **P1-4** 链上钱包 + Binance/Bitget CEX | 3-4 天 | 无（决策已敲定） |
+| 5 | **P1-1a/c/d** LLM fallback + 知识库 | 2-3 天 | LLM provider + 月预算 |
+| 6 | **P1-2** GoCardless（含 FIX-13/14/15） | 1-2 天 | GoCardless 账号 |
+| 7 | **P1-3** Notion 同步（含 FIX-16） | 1-2 天 | Notion token + 库结构 |
+| 8+ | **P2** 工程化债务（Alembic / Dockerfile / E2E / CI） | 视优先级 | |
 
 ---
 
