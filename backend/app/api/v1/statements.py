@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.auth import require_auth
 from app.core.config import get_settings
-from app.core.errors import NotFoundError, ConflictError, ParserError
+from app.core.errors import ConflictError, InvalidInputError, NotFoundError, ParserError
 from app.db import get_db
 from app.models import Transaction, PdfImport
 from app.services.cashflow import parse_period, recompute_for_periods
@@ -174,11 +174,69 @@ async def upload_pdf(
         pdf_import.error_message = result.get("error")
         pdf_import.status = "success" if not result.get("error") else "failed"
 
+        # 2026-05-06 fix: previously when caller didn't pass `account_id` we
+        # fell back to `tx_data.get("account_id", 0)` which writes 0 — that
+        # violates the FK on accounts (RESTRICT) and the whole import 500s.
+        # Resolve a sensible account *before* inserting any tx:
+        #   1) caller-supplied wins
+        #   2) if exactly one active account exists, auto-pick it
+        #   3) try to match the parser's detected_bank against
+        #      Account.institution (case-insensitive contains)
+        #   4) otherwise raise a clear 422 listing the available choices
+        if account_id is None and result.get("transactions"):
+            from app.models import Account
+
+            active = (await db.execute(
+                select(Account).where(
+                    Account.deleted_at.is_(None), Account.is_active == True  # noqa: E712
+                )
+            )).scalars().all()
+            if len(active) == 1:
+                account_id = active[0].id
+            elif active and pdf_import.detected_bank:
+                bank = pdf_import.detected_bank.lower()
+                matches = [
+                    a for a in active
+                    if (a.institution or "").lower().replace(" ", "").startswith(
+                        bank.replace("_", "").replace("-", "")
+                    )
+                    or bank in (a.institution or "").lower()
+                    or bank in (a.name or "").lower()
+                ]
+                if len(matches) == 1:
+                    account_id = matches[0].id
+
+            if account_id is None:
+                pdf_import.status = "failed"
+                pdf_import.error_message = (
+                    f"Cannot auto-select an account for this PDF "
+                    f"(detected_bank={pdf_import.detected_bank!r}). "
+                    f"Please retry with `?account_id=<id>`."
+                )
+                await db.flush()
+                raise InvalidInputError(
+                    pdf_import.error_message,
+                    details={
+                        "detected_bank": pdf_import.detected_bank,
+                        "available_accounts": [
+                            {"id": a.id, "name": a.name, "institution": a.institution,
+                             "currency": a.currency, "type": a.type}
+                            for a in active
+                        ],
+                    },
+                )
+
+            # Persist the resolved account on the import record so the user
+            # can see it in /statements list.
+            pdf_import.account_id = account_id
+
         if result.get("transactions"):
             new_txs: list[Transaction] = []
             for tx_data in result["transactions"]:
                 tx = Transaction(
-                    account_id=account_id or tx_data.get("account_id", 0),
+                    # 2026-05-06: account_id is now guaranteed non-None by the
+                    # block above; the old `or 0` fallback silently violated FK.
+                    account_id=account_id,
                     occurred_at=tx_data.get("occurred_at", ""),
                     amount=Decimal(str(tx_data.get("amount", 0))),
                     currency=tx_data.get("currency", "CNY"),
@@ -216,6 +274,11 @@ async def upload_pdf(
 
         return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
 
+    except (InvalidInputError, ConflictError, NotFoundError, ParserError):
+        # Don't double-wrap our own structured AppErrors — they already carry
+        # status_code + details (e.g. account-resolution 422 with the list of
+        # available accounts).
+        raise
     except Exception as e:
         pdf_import.status = "failed"
         pdf_import.error_message = str(e)
