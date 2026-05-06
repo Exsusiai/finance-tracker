@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -486,11 +486,19 @@ async def confirm_statement(
     if not pdf_import:
         raise NotFoundError("PdfImport", import_id)
 
+    # 2026-05-06 fix: previously this endpoint翻了 ALL is_pending rows
+    # 不论是否分类，结果未分类 tx 跑出了 inbox（用户报告："明明很多未
+    # 分类的没有放在待确认里让我确认"）。新语义：
+    #   - 已分类的 pending → 翻 false（自动通过）
+    #   - 未分类的 pending → 保留 is_pending=True 留在 inbox 等用户操作
+    # 这与 Sprint 0/1 的 inbox 工作流（FIX-7 / "高置信度自动通过 inbox"）
+    # 一致：ingestion 命中规则的已经被自动通过，未命中的应该进 inbox。
     tx_stmt = (
         select(Transaction)
         .where(
             Transaction.pdf_import_id == import_id,
             Transaction.is_pending.is_(True),
+            Transaction.category_id.is_not(None),  # 仅已分类
         )
     )
     tx_result = await db.execute(tx_stmt)
@@ -503,10 +511,25 @@ async def confirm_statement(
         count += 1
         affected_periods.append(parse_period(tx.occurred_at))
 
+    # Count uncategorized rows that stayed in inbox so caller can show
+    # "X confirmed, Y still in inbox awaiting category".
+    inbox_remaining = (await db.execute(
+        select(func.count(Transaction.id)).where(
+            Transaction.pdf_import_id == import_id,
+            Transaction.is_pending.is_(True),
+            Transaction.category_id.is_(None),
+            Transaction.deleted_at.is_(None),
+        )
+    )).scalar() or 0
+
     await db.flush()
     # Confirmed transactions now contribute to cashflow — refresh affected snapshots
     await recompute_for_periods(db, affected_periods)
-    return ApiSuccess(data={"import_id": import_id, "confirmed": count})
+    return ApiSuccess(data={
+        "import_id": import_id,
+        "confirmed": count,
+        "inbox_remaining": int(inbox_remaining),
+    })
 
 
 @router.post("/{import_id}/reparse", response_model=ApiSuccess[PdfImportOut])
