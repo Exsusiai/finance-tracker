@@ -268,21 +268,36 @@ async def pair_transactions(
     out_tx.metadata_json = _merge_meta(out_tx.metadata_json, {"transfer_direction": "out"})
     in_tx.metadata_json = _merge_meta(in_tx.metadata_json, {"transfer_direction": "in"})
 
-    for leg in (out_tx, in_tx):
+    # Resolve auto-category once based on the counter account's type
+    # (e.g. credit_card → 信用卡还款, bank → 跨行划转).
+    out_acct = (await db.execute(
+        _select(Account).where(Account.id == out_tx.account_id)
+    )).scalar_one_or_none()
+    in_acct = (await db.execute(
+        _select(Account).where(Account.id == in_tx.account_id)
+    )).scalar_one_or_none()
+    out_default = await _resolve_transfer_category(db, kind="auto", counter_account=in_acct)
+    in_default = await _resolve_transfer_category(db, kind="auto", counter_account=out_acct)
+
+    for leg, default_cat in ((out_tx, out_default), (in_tx, in_default)):
         if leg.category_id is None:
+            # Bug 1: previously left None → row appeared as "未分类" in
+            # the breakdown view. Now auto-pick a transfer-kind category.
+            leg.category_id = default_cat
             continue
         cat = (await db.execute(
             _select(Category).where(Category.id == leg.category_id)
         )).scalar_one_or_none()
         if cat is None or cat.kind == "transfer":
-            continue  # already valid (or category gone)
-        # Try a transfer-kind category with the same name.
+            continue  # already valid
+        # Try a transfer-kind category with the same name (preserve user's
+        # learned classification when possible).
         replacement = (await db.execute(
             _select(Category).where(
                 Category.kind == "transfer", Category.name == cat.name
             )
         )).scalar_one_or_none()
-        leg.category_id = replacement.id if replacement is not None else None
+        leg.category_id = replacement.id if replacement is not None else default_cat
 
 
 def _merge_meta(existing: str | None, new: dict) -> str:
@@ -338,18 +353,165 @@ async def auto_pair_after_import(
     # cross-account pairing — leaving the user to hand-confirm these.
     single_leg_paired = await detect_single_leg_iban(db, candidate_ids=new_tx_ids)
 
-    if paired_ids or same_paired_ids or single_leg_paired:
+    # Step 4 (2026-05-06, Bug 2): pair orphan single-leg transfers with
+    # the now-uploaded counter-account income/expense rows. After PDF A
+    # is processed and one row is promoted to single-leg transfer (Step
+    # 3), the counterpart income on PDF B doesn't reach the regular
+    # cross-account matcher because the orphan's counter_account_id is
+    # already set (so _is_eligible skips it). Walk every orphan after
+    # the new batch lands and look for its counterpart.
+    orphan_paired = await pair_orphan_single_legs(db)
+
+    if paired_ids or same_paired_ids or single_leg_paired or orphan_paired:
         await db.flush()
 
     return {
         "auto_paired": paired_ids,
         "subaccount_paired": same_paired_ids,
         "single_leg_iban": single_leg_paired,
+        "orphan_paired": orphan_paired,
         "suggested": [
             {"out_id": c.a.id, "in_id": c.b.id, "score": c.score, "reasons": c.reasons}
             for c in suggested
         ],
     }
+
+
+async def pair_orphan_single_legs(db: AsyncSession) -> list[dict]:
+    """For every transfer row that was promoted to a single-leg transfer
+    via IBAN match but whose counter-leg was not yet in the DB, look
+    again — the counterpart PDF may have arrived since.
+
+    Match criteria:
+      orphan.counter_account_id == candidate.account_id
+      candidate is income/expense (not yet a transfer)
+      |orphan.amount| ≈ |candidate.amount|  (currency must match)
+      occurred_at within ±WINDOW_DAYS
+
+    On hit:
+      orphan: metadata.paired_with_tx_id = candidate.id
+              (matched_by stays so we know how it found its partner)
+      candidate: type='transfer'
+                 counter_account_id = orphan.account_id
+                 transfer_direction = inverse of orphan's
+                 metadata.paired_with_tx_id = orphan.id
+                 metadata.matched_by = 'iban_orphan_pair'
+                 is_pending = False
+                 category remapped to transfer-kind
+    """
+    orphans = (await db.execute(
+        select(Transaction).where(
+            Transaction.deleted_at.is_(None),
+            Transaction.type == "transfer",
+            Transaction.counter_account_id.is_not(None),
+        )
+    )).scalars().all()
+
+    paired: list[dict] = []
+    for orphan in orphans:
+        # Need to re-parse metadata each iteration.
+        try:
+            meta = json.loads(orphan.metadata_json) if orphan.metadata_json else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("paired_with_tx_id"):
+            continue  # already paired with a real counterpart
+        if meta.get("subaccount"):
+            continue  # in-bank, no cross-account counterpart needed
+        # Look for the counterpart in the orphan's counter_account.
+        try:
+            orphan_date = _date_only(orphan.occurred_at)
+        except (ValueError, TypeError):
+            continue
+        amount = abs(orphan.amount) if orphan.amount is not None else None
+        if amount is None or amount == 0:
+            continue
+        currency = orphan.currency
+        # opposite leg's required type
+        orphan_dir = meta.get("transfer_direction")
+        if orphan_dir == "out":
+            wanted_type = "income"
+        elif orphan_dir == "in":
+            wanted_type = "expense"
+        else:
+            continue
+
+        candidates = (await db.execute(
+            select(Transaction).where(
+                Transaction.deleted_at.is_(None),
+                Transaction.account_id == orphan.counter_account_id,
+                Transaction.type == wanted_type,
+                Transaction.currency == currency,
+                Transaction.amount == amount,
+            )
+        )).scalars().all()
+        # Pick the closest by date within window
+        best = None
+        for cand in candidates:
+            try:
+                days = abs((_date_only(cand.occurred_at) - orphan_date).days)
+            except (ValueError, TypeError):
+                continue
+            if days > WINDOW_DAYS:
+                continue
+            if best is None or days < best[1]:
+                best = (cand, days)
+        if best is None:
+            continue
+        cand_tx = best[0]
+
+        # Promote candidate to transfer + cross-link both sides.
+        cand_dir = "in" if orphan_dir == "out" else "out"
+        cand_tx.type = "transfer"
+        cand_tx.counter_account_id = orphan.account_id
+        cand_tx.is_pending = False
+        cand_tx.metadata_json = _merge_meta(cand_tx.metadata_json, {
+            "transfer_direction": cand_dir,
+            "matched_by": "iban_orphan_pair",
+            "paired_with_tx_id": orphan.id,
+        })
+        # Update orphan to record the new counterpart.
+        orphan.metadata_json = _merge_meta(orphan.metadata_json, {
+            "paired_with_tx_id": cand_tx.id,
+        })
+
+        # Remap candidate's category to transfer kind (Bug 1: don't leave
+        # 未分类). Use the orphan's account as counter to choose subcat.
+        own_account = (await db.execute(
+            select(Account).where(Account.id == orphan.account_id)
+        )).scalar_one_or_none()
+        default_cat_id = await _resolve_transfer_category(
+            db, kind="auto", counter_account=own_account,
+        )
+        if cand_tx.category_id is None:
+            cand_tx.category_id = default_cat_id
+        else:
+            cat = (await db.execute(
+                select(Category).where(Category.id == cand_tx.category_id)
+            )).scalar_one_or_none()
+            if cat is not None and cat.kind != "transfer":
+                replacement = (await db.execute(
+                    select(Category).where(
+                        Category.kind == "transfer", Category.name == cat.name
+                    )
+                )).scalar_one_or_none()
+                cand_tx.category_id = replacement.id if replacement is not None else default_cat_id
+
+        paired.append({
+            "orphan_id": orphan.id,
+            "counterpart_id": cand_tx.id,
+            "direction_orphan": orphan_dir,
+            "direction_counterpart": cand_dir,
+        })
+        logger.info(
+            "iban_orphan_paired",
+            orphan_id=orphan.id,
+            counterpart_id=cand_tx.id,
+            orphan_dir=orphan_dir,
+        )
+    return paired
 
 
 async def detect_single_leg_iban(
@@ -433,19 +595,26 @@ async def detect_single_leg_iban(
             "matched_by": "iban_single_leg",
             "matched_iban": hit_account.iban,
         })
-        # Re-map category to transfer kind if needed (same logic as
-        # pair_transactions).
-        if tx.category_id is not None:
+        # Bug 1 fix: auto-pick a transfer-kind sub-category based on the
+        # counter account's type so the row is not stuck as "未分类".
+        default_cat_id = await _resolve_transfer_category(
+            db, kind="auto", counter_account=hit_account,
+        )
+        if tx.category_id is None:
+            tx.category_id = default_cat_id
+        else:
             cat = (await db.execute(
                 select(Category).where(Category.id == tx.category_id)
             )).scalar_one_or_none()
             if cat is not None and cat.kind != "transfer":
+                # Try preserving the user-learned name first, fall back to
+                # auto-resolved.
                 replacement = (await db.execute(
                     select(Category).where(
                         Category.kind == "transfer", Category.name == cat.name
                     )
                 )).scalar_one_or_none()
-                tx.category_id = replacement.id if replacement is not None else None
+                tx.category_id = replacement.id if replacement is not None else default_cat_id
         matched.append({
             "tx_id": tx.id,
             "counter_account_id": hit_account.id,
@@ -578,3 +747,64 @@ async def mark_subaccount_pair(
         {"subaccount": True, "matched": "amount_match_heuristic", "source": "same_account_pair",
          "transfer_direction": "in", "paired_with_tx_id": out_tx.id},
     )
+    # 2026-05-06 (Bug 1): subaccount transfers should be auto-categorised so
+    # the user doesn't see "未分类" in the breakdown view.
+    cat_id = await _resolve_transfer_category(db, kind="subaccount")
+    if cat_id is not None:
+        if out_tx.category_id is None:
+            out_tx.category_id = cat_id
+        if in_tx.category_id is None:
+            in_tx.category_id = cat_id
+
+
+async def _resolve_transfer_category(
+    db: AsyncSession,
+    *,
+    kind: str,
+    counter_account: "Account | None" = None,
+) -> int | None:
+    """Pick a sensible transfer-kind sub-category by intent (Bug 1 fix).
+
+    `kind`:
+      - "subaccount"          → "内部储蓄"
+      - "credit_card_payback" → "信用卡还款"
+      - "investing"           → "投资划转"
+      - "cross_bank"          → "跨行划转"
+      - "other"               → "其他转账"
+
+    If `counter_account` is supplied and `kind` is "auto", we infer the
+    sub-category from the counter_account.type:
+      credit_card → "信用卡还款"
+      brokerage / crypto_wallet → "投资划转"
+      bank / cash → "跨行划转"
+      else → "其他转账"
+    """
+    name_map = {
+        "subaccount": "内部储蓄",
+        "credit_card_payback": "信用卡还款",
+        "investing": "投资划转",
+        "cross_bank": "跨行划转",
+        "other": "其他转账",
+    }
+    if kind == "auto":
+        if counter_account is None:
+            kind = "other"
+        else:
+            t = (counter_account.type or "").lower()
+            if t == "credit_card":
+                kind = "credit_card_payback"
+            elif t in ("brokerage", "crypto_wallet"):
+                kind = "investing"
+            elif t in ("bank", "cash"):
+                kind = "cross_bank"
+            else:
+                kind = "other"
+    target_name = name_map.get(kind)
+    if not target_name:
+        return None
+    row = (await db.execute(
+        select(Category).where(
+            Category.kind == "transfer", Category.name == target_name
+        )
+    )).scalar_one_or_none()
+    return row.id if row else None

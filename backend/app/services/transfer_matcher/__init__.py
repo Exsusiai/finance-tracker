@@ -7,6 +7,7 @@ from app.services.transfer_matcher.engine import (
     detect_single_leg_iban,
     find_transfer_pairs,
     mark_subaccount_pair,
+    pair_orphan_single_legs,
     pair_transactions,
 )
 
@@ -16,6 +17,7 @@ __all__ = [
     "auto_pair_after_import",
     "detect_same_account_pairs",
     "detect_single_leg_iban",
+    "pair_orphan_single_legs",
     "mark_subaccount_pair",
     "SCORE_THRESHOLD_AUTO",
     "SCORE_THRESHOLD_SUGGEST",
