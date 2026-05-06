@@ -174,29 +174,33 @@ async def upload_pdf(
         pdf_import.error_message = result.get("error")
         pdf_import.status = "success" if not result.get("error") else "failed"
 
-        # 2026-05-06 fix: previously when caller didn't pass `account_id` we
-        # fell back to `tx_data.get("account_id", 0)` which writes 0 — that
-        # violates the FK on accounts (RESTRICT) and the whole import 500s.
-        # Resolve a sensible account *before* inserting any tx:
+        # 2026-05-06: previously `account_id or tx_data.get("account_id", 0)`
+        # silently wrote 0 → FK violation. Resolve a sensible account
+        # *before* inserting any tx:
         #   1) caller-supplied wins
-        #   2) if exactly one active account exists, auto-pick it
-        #   3) try to match the parser's detected_bank against
-        #      Account.institution (case-insensitive contains)
-        #   4) otherwise raise a clear 422 listing the available choices
+        #   2) if exactly one active account exists → auto-pick
+        #   3) detected_bank matches Account.institution / Account.name
+        #      uniquely (case-insensitive contains) → auto-pick
+        #   4) otherwise: don't fail, don't write transactions — leave the
+        #      pdf_import in `awaiting_account` status with a warning. The
+        #      front-end shows the user a chooser; once they pick, they call
+        #      POST /statements/{id}/assign-account?account_id=X to commit.
+        active_accounts: list = []
+        awaiting_account = False
         if account_id is None and result.get("transactions"):
             from app.models import Account
 
-            active = (await db.execute(
+            active_accounts = (await db.execute(
                 select(Account).where(
                     Account.deleted_at.is_(None), Account.is_active == True  # noqa: E712
                 )
             )).scalars().all()
-            if len(active) == 1:
-                account_id = active[0].id
-            elif active and pdf_import.detected_bank:
+            if len(active_accounts) == 1:
+                account_id = active_accounts[0].id
+            elif active_accounts and pdf_import.detected_bank:
                 bank = pdf_import.detected_bank.lower()
                 matches = [
-                    a for a in active
+                    a for a in active_accounts
                     if (a.institution or "").lower().replace(" ", "").startswith(
                         bank.replace("_", "").replace("-", "")
                     )
@@ -207,30 +211,52 @@ async def upload_pdf(
                     account_id = matches[0].id
 
             if account_id is None:
-                pdf_import.status = "failed"
+                # Don't insert transactions yet; let the user confirm which
+                # account this statement belongs to. Persist the parser
+                # output on `pdf_import.raw_text` so the assign-account
+                # endpoint can reconstruct + insert later.
+                awaiting_account = True
+                pdf_import.status = "awaiting_account"
                 pdf_import.error_message = (
-                    f"Cannot auto-select an account for this PDF "
-                    f"(detected_bank={pdf_import.detected_bank!r}). "
-                    f"Please retry with `?account_id=<id>`."
+                    f"⚠ 检测到这是 {pdf_import.detected_bank or '未知'} 银行的账单 "
+                    f"(共 {len(result['transactions'])} 笔交易)。请确认对应的本地账户。"
                 )
+                pdf_import.transactions_count = len(result["transactions"])
                 await db.flush()
-                raise InvalidInputError(
-                    pdf_import.error_message,
-                    details={
-                        "detected_bank": pdf_import.detected_bank,
-                        "available_accounts": [
-                            {"id": a.id, "name": a.name, "institution": a.institution,
-                             "currency": a.currency, "type": a.type}
-                            for a in active
-                        ],
-                    },
+                preview_txs_data = [
+                    {
+                        "occurred_at": t.get("occurred_at"),
+                        "amount": str(t.get("amount", "0")),
+                        "currency": t.get("currency"),
+                        "type": t.get("type"),
+                        "description": t.get("description"),
+                    }
+                    for t in result["transactions"][:5]
+                ]
+                meta = {
+                    "awaiting_account": True,
+                    "detected_bank": pdf_import.detected_bank,
+                    "warning": pdf_import.error_message,
+                    "available_accounts": [
+                        {"id": a.id, "name": a.name, "institution": a.institution,
+                         "currency": a.currency, "type": a.type}
+                        for a in active_accounts
+                    ],
+                    "preview_transactions": preview_txs_data,
+                    "assign_endpoint": (
+                        f"/api/v1/statements/{pdf_import.id}/assign-account"
+                        f"?account_id=<your-account-id>"
+                    ),
+                }
+                return ApiSuccess(
+                    data=_pdf_to_out(pdf_import, []),
+                    meta=meta,
                 )
 
-            # Persist the resolved account on the import record so the user
-            # can see it in /statements list.
+            # Persist the resolved account on the import record.
             pdf_import.account_id = account_id
 
-        if result.get("transactions"):
+        if not awaiting_account and result.get("transactions"):
             new_txs: list[Transaction] = []
             for tx_data in result["transactions"]:
                 tx = Transaction(
@@ -325,6 +351,126 @@ async def get_statement(
     preview_txs = [_tx_to_out(t) for t in tx_result.scalars().all()]
 
     return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
+
+
+@router.post("/{import_id}/assign-account", response_model=ApiSuccess[PdfImportOut])
+async def assign_account_to_statement(
+    import_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    account_id: int = Query(..., description="Target account_id for the statement's transactions"),
+):
+    """Finish a PDF import that was left in `awaiting_account` status.
+
+    The /upload endpoint stops short of writing transactions when it can't
+    confidently auto-pick an account (e.g. user has multiple accounts and
+    none has a name matching the parser's detected_bank). This endpoint
+    re-parses the stored PDF, binds it to the user-chosen account, and runs
+    the full ingestion pipeline.
+    """
+    from app.models import Account
+
+    pdf_import = (await db.execute(
+        select(PdfImport).where(PdfImport.id == import_id)
+    )).scalar_one_or_none()
+    if not pdf_import:
+        raise NotFoundError("PdfImport", import_id)
+
+    if pdf_import.status != "awaiting_account":
+        raise InvalidInputError(
+            f"This statement is in status '{pdf_import.status}'; "
+            "assign-account only applies to 'awaiting_account' rows.",
+            details={"current_status": pdf_import.status},
+        )
+
+    target = (await db.execute(
+        select(Account).where(
+            Account.id == account_id, Account.deleted_at.is_(None)
+        )
+    )).scalar_one_or_none()
+    if not target:
+        raise NotFoundError("Account", account_id)
+
+    # Reload the stored PDF and re-parse with the resolved account.
+    if not os.path.exists(pdf_import.storage_path):
+        raise ParserError(f"PDF file not found at {pdf_import.storage_path}")
+    with open(pdf_import.storage_path, "rb") as f:
+        content = f.read()
+
+    # Pull sub-account hints from the chosen account (same as upload).
+    subaccount_names: list[str] = []
+    if target.metadata_json:
+        try:
+            meta = json.loads(target.metadata_json)
+            raw_names = meta.get("subaccount_names") if isinstance(meta, dict) else None
+            if isinstance(raw_names, list):
+                subaccount_names = [str(n) for n in raw_names if str(n).strip()]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    from app.services.pdf_parser.engine import parse_pdf_statement
+
+    pdf_import.status = "parsing"
+    pdf_import.account_id = account_id
+    await db.flush()
+
+    try:
+        result = await parse_pdf_statement(
+            db, pdf_import, content, subaccount_names=subaccount_names,
+        )
+        pdf_import.detected_bank = result.get("detected_bank")
+        pdf_import.parser_version = result.get("parser_version")
+        pdf_import.statement_period = result.get("statement_period")
+        pdf_import.raw_text = result.get("raw_text")
+        pdf_import.error_message = None  # clear the warning
+        pdf_import.status = "success" if not result.get("error") else "failed"
+
+        if result.get("transactions"):
+            new_txs: list[Transaction] = []
+            for tx_data in result["transactions"]:
+                tx = Transaction(
+                    account_id=account_id,
+                    occurred_at=tx_data.get("occurred_at", ""),
+                    amount=Decimal(str(tx_data.get("amount", 0))),
+                    currency=tx_data.get("currency", "CNY"),
+                    type=tx_data.get("type", "expense"),
+                    description=tx_data.get("description"),
+                    raw_description=tx_data.get("raw_description"),
+                    counterparty=tx_data.get("counterparty"),
+                    source="pdf_import",
+                    pdf_import_id=pdf_import.id,
+                    external_id=tx_data.get("external_id"),
+                    metadata_json=tx_data.get("metadata_json"),
+                    is_pending=True,
+                )
+                db.add(tx)
+                new_txs.append(tx)
+
+            from app.services.ingestion import ingest_transactions
+
+            await ingest_transactions(db, new_txs, auto_pair=True)
+
+        pdf_import.transactions_count = len(result.get("transactions", []))
+
+        preview_stmt = (
+            select(Transaction)
+            .options(selectinload(Transaction.account), selectinload(Transaction.category))
+            .where(Transaction.pdf_import_id == pdf_import.id)
+            .order_by(Transaction.occurred_at)
+            .limit(5)
+        )
+        preview_result = await db.execute(preview_stmt)
+        preview_txs = [_tx_to_out(t) for t in preview_result.scalars().all()]
+
+        return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
+
+    except (InvalidInputError, ConflictError, NotFoundError, ParserError):
+        raise
+    except Exception as e:
+        pdf_import.status = "failed"
+        pdf_import.error_message = str(e)
+        await db.flush()
+        raise ParserError(f"Failed to assign account and import: {e}")
 
 
 @router.post("/{import_id}/confirm", response_model=ApiSuccess[dict])
