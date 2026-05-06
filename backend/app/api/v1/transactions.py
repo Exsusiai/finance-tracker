@@ -347,6 +347,18 @@ async def update_transaction(
     if "base_amount" in update_data and update_data["base_amount"] is not None:
         update_data["base_amount"] = Decimal(update_data["base_amount"])
 
+    # Sprint 4 FIX-19 (review V3 §V3-P0-2): when amount or currency changes,
+    # the previously stored base_amount and fx_rate_to_base become stale.
+    # Clear both so the ingestion pipeline Step 1.5 can recompute them via
+    # resolve_fx_to_base. If the caller explicitly patches fx_rate_to_base /
+    # base_amount they take precedence (no clearing for those fields).
+    amount_or_currency_changed = "amount" in update_data or "currency" in update_data
+    if amount_or_currency_changed:
+        if "base_amount" not in update_data:
+            update_data["base_amount"] = None
+        if "fx_rate_to_base" not in update_data:
+            update_data["fx_rate_to_base"] = None
+
     # Sprint 1 FIX-5: enforce kind invariant on the *resulting* (type, category)
     # pair — one or both fields may be in the patch.
     final_type = update_data.get("type", tx.type)
@@ -365,6 +377,12 @@ async def update_transaction(
 
     touch_updated_at(tx)
     await db.flush()
+
+    # Re-fold FX after the patch lands (idempotent; ingest_transactions Step 1.5
+    # fills base_amount/fx_rate_to_base when they're NULL).
+    if amount_or_currency_changed:
+        from app.services.ingestion import ingest_transactions
+        await ingest_transactions(db, [tx], auto_pair=False, skip_categorize=True)
 
     # Auto-learn: if user changed the category, derive (or strengthen) a rule
     new_category_id = tx.category_id
@@ -608,6 +626,15 @@ async def confirm_inbox_item(
     update_data = body.model_dump(exclude_unset=True)
     new_category_id = update_data.get("category_id", old_category_id)
 
+    # Sprint 4 FIX-19 (review V3 §V3-P0-2): clear stale FX fields when amount
+    # or currency changes, so the re-fold pass below recomputes them cleanly.
+    inbox_amount_or_currency_changed = "amount" in update_data or "currency" in update_data
+    if inbox_amount_or_currency_changed:
+        if "base_amount" not in update_data:
+            update_data["base_amount"] = None
+        if "fx_rate_to_base" not in update_data:
+            update_data["fx_rate_to_base"] = None
+
     # Sprint 1 FIX-5: enforce kind invariant on the resulting (type, category).
     final_type = update_data.get("type", tx.type)
     await _validate_kind_match(db, tx_type=final_type, category_id=new_category_id)
@@ -626,6 +653,12 @@ async def confirm_inbox_item(
     tx.is_pending = False
     touch_updated_at(tx)
     await db.flush()
+
+    # Re-fold FX after the confirm lands (idempotent; ingest_transactions Step 1.5
+    # fills base_amount/fx_rate_to_base when they're NULL).
+    if inbox_amount_or_currency_changed:
+        from app.services.ingestion import ingest_transactions
+        await ingest_transactions(db, [tx], auto_pair=False, skip_categorize=True)
 
     # Learn ONLY when user actually changed (or chose) the category.
     # Confirming an auto-suggested category that wasn't changed → don't strengthen

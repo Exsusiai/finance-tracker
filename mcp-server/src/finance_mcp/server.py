@@ -220,12 +220,16 @@ async def get_total_assets(
 
         total_portfolio = Decimal("0")
         by_class: dict[str, Decimal] = {}
-        by_currency: dict[str, Decimal] = {}
+        # Sprint 4 FIX-22 (review V3 §V3-P1-8): track original_value and
+        # base_value separately so callers can distinguish "100 EUR" from
+        # "780 CNY worth of EUR holdings".
+        by_currency: dict[str, dict] = {}
 
         for h in holdings:
             if h["price"] is None:
                 continue
-            value = Decimal(str(h["quantity"])) * Decimal(str(h["price"]))
+            original_value = Decimal(str(h["quantity"])) * Decimal(str(h["price"]))
+            value = original_value
             price_cur = h["price_currency"]
 
             # Convert to base currency if needed
@@ -238,17 +242,29 @@ async def get_total_assets(
             total_portfolio += value
             ac = h["asset_class"] or "other"
             by_class[ac] = by_class.get(ac, Decimal("0")) + value
-            by_currency[price_cur or "unknown"] = by_currency.get(price_cur or "unknown", Decimal("0")) + value
+            cur_key = price_cur or "unknown"
+            bucket = by_currency.setdefault(cur_key, {"original_value": Decimal("0"), "base_value": Decimal("0")})
+            bucket["original_value"] += original_value
+            bucket["base_value"] += value
 
         # 3. Cash account balance total
+        # Sprint 4 FIX-22 (review V3 §V3-P1-8): when there's no FX path, the
+        # original currency amount is NOT comparable to base_currency. Don't mix
+        # it into total — track it separately and surface it in the response.
         total_cash = Decimal("0")
-        cash_by_currency: dict[str, Decimal] = {}
+        fx_missing_cash: list[dict] = []
+        cash_by_currency: dict[str, dict] = {}
         for a in accounts:
             amt = Decimal(a["balance"])
             cur = a["currency"]
-            converted = _convert_fx(conn, amt, cur, base_currency)
-            total_cash += converted if converted is not None else amt
-            cash_by_currency[cur] = cash_by_currency.get(cur, Decimal("0")) + amt
+            converted = _convert_fx(conn, amt, cur, base_currency) if cur != base_currency else amt
+            cbucket = cash_by_currency.setdefault(cur, {"original_value": Decimal("0"), "base_value": Decimal("0")})
+            cbucket["original_value"] += amt
+            if converted is not None:
+                cbucket["base_value"] += converted
+                total_cash += converted
+            else:
+                fx_missing_cash.append({"currency": cur, "amount": str(amt), "account": a.get("account_name")})
 
         total_assets = total_cash + total_portfolio
 
@@ -258,15 +274,22 @@ async def get_total_assets(
                 "total_assets": _dec(total_assets),
                 "base_currency": base_currency,
                 "as_of": _now_iso(),
+                "fx_missing_cash": fx_missing_cash,
                 "cash": {
                     "total": _dec(total_cash),
-                    "by_currency": {k: _dec(v) for k, v in cash_by_currency.items()},
+                    "by_currency": {
+                        k: {"original_value": _dec(v["original_value"]), "base_value": _dec(v["base_value"])}
+                        for k, v in cash_by_currency.items()
+                    },
                     "accounts": accounts,
                 },
                 "portfolio": {
                     "total": _dec(total_portfolio),
                     "by_class": {k: _dec(v) for k, v in by_class.items()},
-                    "by_currency": {k: _dec(v) for k, v in by_currency.items()},
+                    "by_currency": {
+                        k: {"original_value": _dec(v["original_value"]), "base_value": _dec(v["base_value"])}
+                        for k, v in by_currency.items()
+                    },
                 },
             },
         }
@@ -441,16 +464,42 @@ async def add_transaction(
                     ),
                 }
 
+        # Sprint 4 FIX-20 (review V3 §V3-P1-1): mirror ingestion Step 1.5 — fold
+        # foreign-currency rows to base_currency so cashflow doesn't have to
+        # fallback. Use the existing sync _convert_fx() helper.
+        fx_rate_to_base_val = None
+        base_amount_val = None
+        metadata_json_val = None
+        if currency != settings.base_currency and amount_decimal != 0:
+            converted = _convert_fx(conn, amount_decimal, currency, settings.base_currency)
+            if converted is not None:
+                # Multiplier so amount_in_src * rate = amount_in_base
+                fx_rate_to_base_val = converted / amount_decimal
+                base_amount_val = converted
+            else:
+                # No FX path — mark as fx_missing in metadata so cashflow /
+                # dashboards can flag it. Don't fail the insert.
+                metadata_json_val = json.dumps({
+                    "fx_missing": True,
+                    "fx_src": currency,
+                    "fx_base": settings.base_currency,
+                })
+
         cur = conn.execute("""
             INSERT INTO transactions
                 (account_id, amount, currency, type, occurred_at, description,
                  counterparty, category_id, tags_json, source, is_pending,
+                 fx_rate_to_base, base_amount, metadata_json,
                  created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mcp_agent', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mcp_agent', ?, ?, ?, ?, ?, ?)
         """, (
             account_id, str(amount_decimal), currency, type, occurred,
             description, counterparty, category_id, tags_json,
-            1 if is_pending else 0, now, now,
+            1 if is_pending else 0,
+            str(fx_rate_to_base_val) if fx_rate_to_base_val is not None else None,
+            str(base_amount_val) if base_amount_val is not None else None,
+            metadata_json_val,
+            now, now,
         ))
         tx_id = cur.lastrowid
 
@@ -480,6 +529,8 @@ async def add_transaction(
                 "description": description,
                 "source": "mcp_agent",
                 "is_pending": is_pending,
+                "fx_rate_to_base": str(fx_rate_to_base_val) if fx_rate_to_base_val is not None else None,
+                "base_amount": str(base_amount_val) if base_amount_val is not None else None,
             },
         }
     except Exception as e:
@@ -513,6 +564,19 @@ async def parse_bank_statement(
         content = path.read_bytes()
         if not content:
             return {"success": False, "error": "Empty file"}
+
+        # Sprint 4 FIX-20 (V3-P1-1): mirror REST upload guards (Sprint 2 FIX-10).
+        MAX_PDF_SIZE_MB = 10
+        if len(content) > MAX_PDF_SIZE_MB * 1024 * 1024:
+            return {
+                "success": False,
+                "error": f"PDF too large ({len(content)} bytes; max {MAX_PDF_SIZE_MB} MiB)",
+            }
+        if not content.startswith(b"%PDF-"):
+            return {
+                "success": False,
+                "error": "Uploaded file is not a valid PDF (missing %PDF- magic bytes)",
+            }
 
         # Resolve account_id: if not provided, auto-pick when there's exactly one
         # active account; otherwise require the caller to choose explicitly.
@@ -625,10 +689,16 @@ async def parse_bank_statement(
                 if pt == "starts_with":
                     return v.startswith(p.lower())
                 if pt == "regex":
+                    # Sprint 4 FIX-20 (V3-P1-1): mirror backend _safe_regex_search
+                    # ReDoS protection. Run inside a thread pool with a 1-second
+                    # timeout so a catastrophic-backtracking pattern can't hang MCP.
                     import re as _re
+                    import concurrent.futures
                     try:
-                        return bool(_re.search(p, value, _re.IGNORECASE))
-                    except _re.error:
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                            fut = ex.submit(_re.search, p, value, _re.IGNORECASE)
+                            return bool(fut.result(timeout=1.0))
+                    except (_re.error, concurrent.futures.TimeoutError):
                         return False
                 return False
 
@@ -697,6 +767,59 @@ async def parse_bank_statement(
                 WHERE id = ?
             """, (detected_bank, statement_period, raw_text[:10000],
                   len(transactions), now, import_id))
+
+            # Sprint 4 FIX-20 (V3-P1-1): mirror transfer_matcher.detect_same_account_pairs
+            # at sync level — pair +X/−X rows in the same account within ±3 days as
+            # in-bank sub-account moves so they don't double-count in cashflow.
+            fresh_rows = conn.execute("""
+                SELECT id, occurred_at, amount, type, description, metadata_json
+                FROM transactions WHERE pdf_import_id = ?
+                ORDER BY occurred_at, id
+            """, (import_id,)).fetchall()
+
+            from collections import defaultdict
+            from datetime import date as _date
+            buckets: dict = defaultdict(list)
+            for r in fresh_rows:
+                buckets[str(abs(Decimal(r["amount"])))].append(r)
+
+            WINDOW_DAYS = 3
+            already_paired: set = set()
+            for amt_key, bucket_rows in buckets.items():
+                if len(bucket_rows) < 2:
+                    continue
+                for i, a in enumerate(bucket_rows):
+                    if a["id"] in already_paired:
+                        continue
+                    for b in bucket_rows[i + 1:]:
+                        if b["id"] in already_paired:
+                            continue
+                        if a["type"] == b["type"]:
+                            continue  # need one income + one expense
+                        try:
+                            d_a = _date.fromisoformat(a["occurred_at"][:10])
+                            d_b = _date.fromisoformat(b["occurred_at"][:10])
+                            if abs((d_a - d_b).days) > WINDOW_DAYS:
+                                continue
+                        except (ValueError, IndexError):
+                            continue
+                        for row in (a, b):
+                            meta = {}
+                            if row["metadata_json"]:
+                                try:
+                                    meta = json.loads(row["metadata_json"]) or {}
+                                except (json.JSONDecodeError, TypeError):
+                                    meta = {}
+                            if not isinstance(meta, dict):
+                                meta = {}
+                            meta["subaccount"] = True
+                            meta["source"] = "amount_match"
+                            conn.execute(
+                                "UPDATE transactions SET type='transfer', metadata_json=? WHERE id=?",
+                                (json.dumps(meta), row["id"]),
+                            )
+                        already_paired.update({a["id"], b["id"]})
+                        break
 
             # 5) recompute cashflow snapshots for every month touched.
             for (year, month) in affected_periods:
@@ -856,13 +979,16 @@ async def get_asset_allocation(
 
         total_value = Decimal("0")
         by_class: dict[str, list[dict]] = {}
-        by_currency: dict[str, Decimal] = {}
+        # Sprint 4 FIX-22 (review V3 §V3-P1-8): track original and base values
+        # separately so callers can distinguish currency amounts from converted values.
+        by_currency: dict[str, dict] = {}
 
         for h in holdings:
             if h["price"] is None:
                 continue
 
-            value = Decimal(str(h["quantity"])) * Decimal(str(h["price"]))
+            original_value = Decimal(str(h["quantity"])) * Decimal(str(h["price"]))
+            value = original_value
             price_cur = h["price_currency"] or h["asset_currency"]
 
             # FX conversion
@@ -887,7 +1013,10 @@ async def get_asset_allocation(
                 "avg_cost": _dec(h["avg_cost"]) if h["avg_cost"] else None,
             })
 
-            by_currency[price_cur] = by_currency.get(price_cur, Decimal("0")) + value
+            cur_key = price_cur or "unknown"
+            alloc_bucket = by_currency.setdefault(cur_key, {"original_value": Decimal("0"), "base_value": Decimal("0")})
+            alloc_bucket["original_value"] += original_value
+            alloc_bucket["base_value"] += value
 
         # Calculate percentages
         class_summary = {}
@@ -935,7 +1064,10 @@ async def get_asset_allocation(
                     "total": _dec(total_value),
                     "percentage": f"{float(total_value / grand_total * 100):.1f}%" if grand_total > 0 else "0%",
                     "by_class": class_summary,
-                    "by_currency": {k: _dec(v) for k, v in by_currency.items()},
+                    "by_currency": {
+                        k: {"original_value": _dec(v["original_value"]), "base_value": _dec(v["base_value"])}
+                        for k, v in by_currency.items()
+                    },
                 },
             },
         }

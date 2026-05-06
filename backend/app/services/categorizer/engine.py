@@ -16,7 +16,7 @@ import concurrent.futures
 import re
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import InvalidInputError
@@ -223,13 +223,21 @@ async def apply_to_similar_pending(
     norm_desc = seed_tx.description.strip()
     if not norm_desc:
         return 0
+    # Sprint 4 FIX-24 (review V3 §V3-P2-1): the previous filter
+    # `category_id != category_id` evaluates to NULL (not TRUE) for unset
+    # categories, so pending rows with `category_id IS NULL` were silently
+    # excluded — the "改 1 笔，同描述兄弟全跟着改" feature didn't actually
+    # cover the most common case (un-categorised pending sibling).
     stmt = (
         select(Transaction)
         .where(
             Transaction.id != seed_tx.id,
             Transaction.deleted_at.is_(None),
             Transaction.description == norm_desc,
-            Transaction.category_id != category_id,  # skip same-category no-ops
+            or_(
+                Transaction.category_id.is_(None),
+                Transaction.category_id != category_id,
+            ),
             Transaction.source != "manual",
             Transaction.type != "transfer",
             # Only cascade within the same kind. When the user crosses kinds

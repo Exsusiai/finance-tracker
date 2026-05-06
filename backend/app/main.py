@@ -81,6 +81,10 @@ _index_migrations: list[tuple[str, str]] = [
 # the user does NOT want sub-accounts as separate entities, so an in-bank move
 # should leave the bank's overall balance unchanged. We tag those rows with
 # `metadata_json LIKE %"subaccount":true%` and the view skips them.
+# Sprint 4 FIX-23 (review V3 §V3-P1-6): wrap every metadata_json read in
+# `json_valid()` so a single malformed row can't take down the whole balance
+# view. SQLite's `json_extract` raises "malformed JSON" on bad input, which
+# would surface as a 500 to every account-balance query in the system.
 _BALANCE_VIEW_SQL = """
 CREATE VIEW v_account_balance AS
 SELECT
@@ -90,15 +94,19 @@ SELECT
     a.initial_balance + COALESCE(SUM(
         CASE
             -- In-bank sub-account moves: ignore (money stays inside the bank)
-            WHEN json_extract(t.metadata_json, '$.subaccount') = 1 THEN 0
+            WHEN json_valid(t.metadata_json)
+                 AND json_extract(t.metadata_json, '$.subaccount') = 1 THEN 0
             -- Cross-account transfer with explicit direction tag
             WHEN t.type = 'transfer'
+                 AND json_valid(t.metadata_json)
                  AND json_extract(t.metadata_json, '$.transfer_direction') = 'in'
                  THEN  ABS(t.amount)
             WHEN t.type = 'transfer'
+                 AND json_valid(t.metadata_json)
                  AND json_extract(t.metadata_json, '$.transfer_direction') = 'out'
                  THEN -ABS(t.amount)
-            -- Untagged transfer (one-sided / unmatched): default to outflow
+            -- Untagged transfer (one-sided / unmatched / malformed metadata):
+            -- default to outflow
             WHEN t.type = 'transfer'   THEN -ABS(t.amount)
             WHEN t.type = 'expense'    THEN -ABS(t.amount)
             WHEN t.type = 'income'     THEN  ABS(t.amount)

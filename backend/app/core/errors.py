@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
+
+logger = logging.getLogger(__name__)
 
 
 class AppError(Exception):
@@ -63,40 +67,53 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(IntegrityError)
     async def _integrity_error_handler(request: Request, exc: IntegrityError):
+        # Sprint 4 FIX-25 (review V3 §V3-P3-1): the previous handler returned
+        # `details.original = str(exc.orig)`, which leaks table/column/index
+        # names and raw DBAPI strings to the client. Log them server-side
+        # for debugging, but only return a stable generic message + a high-
+        # level violation kind to callers.
         msg = str(exc.orig) if exc.orig else str(exc)
-        # Try to detect unique constraint violations
+        path = request.url.path
+
         if "UNIQUE constraint failed" in msg:
+            logger.warning(
+                "integrity_unique_violation", path=path, db_message=msg
+            )
             return JSONResponse(
                 status_code=409,
                 content={
                     "success": False,
                     "error": {
                         "code": "CONFLICT",
-                        "message": "Unique constraint violation",
-                        "details": {"original": msg},
+                        "message": "Resource already exists or violates uniqueness constraint.",
+                        "details": {"kind": "unique_violation"},
                     },
                 },
             )
         if "FOREIGN KEY constraint failed" in msg:
+            logger.warning(
+                "integrity_fk_violation", path=path, db_message=msg
+            )
             return JSONResponse(
                 status_code=422,
                 content={
                     "success": False,
                     "error": {
                         "code": "INVALID_INPUT",
-                        "message": "Referenced resource does not exist",
-                        "details": {"original": msg},
+                        "message": "Referenced resource does not exist.",
+                        "details": {"kind": "foreign_key_violation"},
                     },
                 },
             )
+        logger.warning("integrity_generic", path=path, db_message=msg)
         return JSONResponse(
             status_code=400,
             content={
                 "success": False,
                 "error": {
                     "code": "INVALID_INPUT",
-                    "message": "Database integrity error",
-                    "details": {"original": msg},
+                    "message": "Database integrity error.",
+                    "details": {"kind": "integrity_error"},
                 },
             },
         )

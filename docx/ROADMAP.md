@@ -87,20 +87,20 @@ V1 21 项问题修复进度：
 
 ---
 
-## 🔥 Sprint 4 — review V3 派生：当前 P0/P1 + 安全（待启动 2026-05-06）
+## ✅ Sprint 4 — review V3 派生：当前 P0/P1 + 安全（已完成 2026-05-06）
 
 > 来源：`code review/review V3.md` 实地核查后属实的 14 项问题中，按用户范围（"目前正在关注的 P0/P1 + 安全"）筛出 7 项。半成品（GoCardless / Notion / bank encryption key 配置链）和 UX 优化（持仓跨币种市值、账户删除一致性）按用户约定推迟到对应子系统启用时一起修。
-> 估时 2-3 天。
+> **测试**：`pytest backend/tests/ --ignore=test_api.py` → **75 passed** (+8 from 67)。
 
-| # | 任务 | 来源 | 范围 |
+| # | 任务 | 来源 | 状态 |
 |---|---|---|---|
-| **FIX-19** | base_amount 生命周期：cashflow SQL 缺汇率不再 fallback raw amount（改为剔除外币缺 FX 行 + 返回 `fx_missing_count` warning）；PATCH/inbox 改 amount/currency/fx 字段时清空旧 `base_amount` 触发重算 | V3-P0-1 + V3-P0-2 | 资金正确性 |
-| **FIX-20** | MCP 写入路径完整 mirror：`add_transaction` 加 sync `_convert_fx` 折算 + 写 base_amount；`parse_bank_statement` 改 `_safe_regex_search` + PDF size/magic guard + 同账户 amount-match 镜像 | V3-P1-1 | 一致性 + 安全 |
-| **FIX-21** | `/cashflow/recompute` 跨年范围：改 `substr(occurred_at, 1, 7)` period 字符串比较 | V3-P1-4 | 功能 |
-| **FIX-22** | 资产/净值币种语义：`by_currency` entry 拆分 `original_value` + `base_value`，明确 key 是报价币种 + 值是 base 折算；MCP `get_total_assets` 缺 FX 不计入 base total，返回 missing_fx 列表 | V3-P1-5 + V3-P1-8 | 资产展示 |
-| **FIX-23** | metadata_json 校验：Pydantic schema 校验输入是 JSON object；`v_account_balance` SQL 加 `json_valid()` 防护 | V3-P1-6 | 安全可用性 |
-| **FIX-24** | 同描述级联 NULL category：`apply_to_similar_pending` 改 `or_(category_id.is_(None), category_id != X)` | V3-P2-1 | 功能 |
-| **FIX-25** | IntegrityError 响应脱敏：客户端只返回通用 message，原始 `exc.orig` 写日志 | V3-P3-1 | 安全 |
+| **FIX-19** | base_amount 生命周期：cashflow SQL CASE 表达式（外币缺 FX → NULL 被 SUM 跳过）+ `fx_missing_count`；PATCH/inbox 清空 `base_amount` + `fx_rate_to_base` 后调 `ingest_transactions` 重折算 | V3-P0-1 + V3-P0-2 | ✅ |
+| **FIX-20** | MCP 完整 mirror：`add_transaction` 用 `_convert_fx` 写 base_amount/fx_rate_to_base；`parse_bank_statement` 加 PDF size/magic guard + ThreadPool timeout regex + 同账户 amount-match 镜像 | V3-P1-1 | ✅ |
+| **FIX-21** | `/cashflow/recompute` 改 `from`/`to` (YYYY-MM) period 字符串比较，跨年范围正确；旧 `from_year/from_month` 仍兼容 | V3-P1-4 | ✅ |
+| **FIX-22** | 资产/净值 by_currency 拆 `{original_value, base_value}` (PortfolioSummary/Breakdown/NetWorth)；MCP `get_total_assets` 缺 FX 不计入 base total，返回 `fx_missing_cash` | V3-P1-5 + V3-P1-8 | ✅ |
+| **FIX-23** | TransactionCreate/Update.metadata_json `field_validator` 强制 JSON object；v_account_balance SQL 加 `json_valid()` 防护 | V3-P1-6 | ✅ |
+| **FIX-24** | apply_to_similar_pending 改 `or_(category_id.is_(None), category_id != X)`，未分类 pending sibling 现在也能被级联 | V3-P2-1 | ✅ |
+| **FIX-25** | IntegrityError handler 不再回传 `str(exc.orig)`，原始 db 错误只写日志 | V3-P3-1 | ✅ |
 
 按用户约定**跳过**（启用对应子系统时一起修）：
 - V3-P1-2 GoCardless query/country bug → 启用 GoCardless 时

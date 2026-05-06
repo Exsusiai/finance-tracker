@@ -5,13 +5,38 @@ All amounts use str to preserve decimal precision across JSON round-trips.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Generic, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 T = TypeVar("T")
+
+
+def _validate_metadata_json(value: str | None) -> str | None:
+    """Sprint 4 FIX-23 (review V3 §V3-P1-6): metadata_json must parse as a
+    JSON object so v_account_balance / cashflow SQL can safely call
+    ``json_extract`` on it. The previous schema accepted any string, which
+    let one bad write break every balance query for the whole DB.
+
+    Returns the canonicalised JSON string (re-serialised after parsing) so
+    callers can rely on the row being well-formed.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(f"metadata_json must be valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"metadata_json must be a JSON object, got {type(parsed).__name__}"
+        )
+    # Re-serialise so the stored form is always canonical (sorted keys make
+    # subsequent equality / json_extract behaviour stable).
+    return json.dumps(parsed, sort_keys=True, ensure_ascii=False)
 
 
 # ─── Envelope ───────────────────────────────────────────────────────────────
@@ -156,6 +181,11 @@ class TransactionCreate(BaseModel):
     metadata_json: str | None = None
     user_note: str | None = None
 
+    @field_validator("metadata_json")
+    @classmethod
+    def _check_metadata_json(cls, v: str | None) -> str | None:
+        return _validate_metadata_json(v)
+
 
 class TransactionUpdate(BaseModel):
     account_id: int | None = None
@@ -177,6 +207,11 @@ class TransactionUpdate(BaseModel):
     is_pending: bool | None = None
     metadata_json: str | None = None
     user_note: str | None = None
+
+    @field_validator("metadata_json")
+    @classmethod
+    def _check_metadata_json(cls, v: str | None) -> str | None:
+        return _validate_metadata_json(v)
 
 
 class TransactionOut(BaseModel):
@@ -338,7 +373,14 @@ class PortfolioSummary(BaseModel):
     total_value: str
     as_of: str
     by_class: dict[str, str] = {}
-    by_currency: dict[str, str] = {}
+    # Sprint 4 FIX-22 (review V3 §V3-P1-5): each entry now carries both the
+    # original-currency total AND the base-currency value, so callers reading
+    # by_currency["EUR"] get unambiguous semantics. Previously the dict
+    # key/value units mismatched (key was quote currency but value was
+    # already in base currency).
+    by_currency: dict[str, dict[str, str]] = {}
+    # Holdings excluded from totals because no FX path resolved.
+    fx_missing: list[dict[str, str]] = []
 
 
 class PortfolioBreakdown(BaseModel):
@@ -352,7 +394,10 @@ class NetWorthOut(BaseModel):
     investment_total: str
     net_worth: str
     cash_by_currency: dict[str, dict[str, str]] = {}
-    investment_by_currency: dict[str, str] = {}
+    # Sprint 4 FIX-22 (review V3 §V3-P1-5): same shape as PortfolioSummary —
+    # each entry exposes both the original-currency total and the base-
+    # currency total to remove the previous key/value unit mismatch.
+    investment_by_currency: dict[str, dict[str, str]] = {}
     as_of: str
 
 
@@ -397,6 +442,7 @@ class CashFlowMonthly(BaseModel):
     expense: str
     transfer: str
     savings: str
+    fx_missing_count: int = 0  # Sprint 4 FIX-19 (§V3-P0-1): foreign rows excluded due to missing FX
     by_category: dict[str, str] = {}
     by_account: dict[str, str] = {}
 

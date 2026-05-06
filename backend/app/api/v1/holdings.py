@@ -246,7 +246,13 @@ async def portfolio_summary(
     rows = result.all()
 
     by_class: dict[str, Decimal] = {}
-    by_currency: dict[str, Decimal] = {}
+    # Sprint 4 FIX-22 (review V3 §V3-P1-5): the previous shape was
+    # `by_currency[quote_currency] = base_value`, which mislabelled values:
+    # callers reading `by_currency["EUR"]` got CNY-equivalent numbers.
+    # New shape: `{quote_currency: {original_value, base_value}}`. Total
+    # only counts rows with a successful FX path.
+    by_currency: dict[str, dict[str, Decimal]] = {}
+    fx_missing: list[dict[str, str]] = []
     total = Decimal("0")
 
     for holding, asset in rows:
@@ -261,21 +267,30 @@ async def portfolio_summary(
         latest = price_result.scalar_one_or_none()
 
         if latest is None:
-            # No price data — skip or use 0
             continue
 
-        # Value in price currency
-        value = holding.quantity * latest.price
+        original_value = holding.quantity * latest.price
+        bucket = by_currency.setdefault(
+            latest.currency, {"original_value": Decimal("0"), "base_value": Decimal("0")}
+        )
+        bucket["original_value"] += original_value
 
-        # Convert to base currency if needed
-        converted = await _convert_to_base(db, value, latest.currency, base_currency)
+        if latest.currency == base_currency:
+            converted = original_value
+        else:
+            converted = await _convert_to_base(db, original_value, latest.currency, base_currency)
         if converted is None:
+            fx_missing.append({
+                "asset_id": str(asset.id),
+                "symbol": asset.symbol,
+                "quote_currency": latest.currency,
+                "original_value": str(original_value),
+            })
             continue
-        value = converted
 
-        total += value
-        by_class[asset.asset_class] = by_class.get(asset.asset_class, Decimal("0")) + value
-        by_currency[latest.currency] = by_currency.get(latest.currency, Decimal("0")) + value
+        bucket["base_value"] += converted
+        total += converted
+        by_class[asset.asset_class] = by_class.get(asset.asset_class, Decimal("0")) + converted
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ApiSuccess(data=PortfolioSummary(
@@ -283,7 +298,11 @@ async def portfolio_summary(
         total_value=str(total),
         as_of=now,
         by_class={k: str(v) for k, v in by_class.items()},
-        by_currency={k: str(v) for k, v in by_currency.items()},
+        by_currency={
+            k: {"original_value": str(v["original_value"]), "base_value": str(v["base_value"])}
+            for k, v in by_currency.items()
+        },
+        fx_missing=fx_missing,
     ))
 
 
@@ -314,13 +333,18 @@ async def portfolio_breakdown(
         if not latest:
             continue
 
-        value = holding.quantity * latest.price
-        converted = await _convert_to_base(db, value, latest.currency, base_currency)
+        # Sprint 4 FIX-22: track original_value (in quote currency) and
+        # base_value separately so callers don't conflate the two.
+        original_value = holding.quantity * latest.price
+        if latest.currency == base_currency:
+            converted = original_value
+        else:
+            converted = await _convert_to_base(db, original_value, latest.currency, base_currency)
         if converted is None:
             continue
         value = converted
 
-        # By class
+        # By class (sums in base currency)
         if asset.asset_class not in class_data:
             class_data[asset.asset_class] = {"value": Decimal("0"), "count": 0, "assets": []}
         class_data[asset.asset_class]["value"] += value
@@ -329,19 +353,26 @@ async def portfolio_breakdown(
             "symbol": asset.symbol,
             "name": asset.name,
             "value": str(value),
+            "currency": latest.currency,
         })
 
-        # By currency
+        # By currency (key = quote currency; values split into original + base)
         if latest.currency not in currency_data:
-            currency_data[latest.currency] = {"value": Decimal("0"), "count": 0}
-        currency_data[latest.currency]["value"] += value
+            currency_data[latest.currency] = {
+                "original_value": Decimal("0"),
+                "base_value": Decimal("0"),
+                "count": 0,
+            }
+        currency_data[latest.currency]["original_value"] += original_value
+        currency_data[latest.currency]["base_value"] += value
         currency_data[latest.currency]["count"] += 1
 
     # Convert Decimal values to str for JSON serialization
     for data in class_data.values():
         data["value"] = str(data["value"])
     for data in currency_data.values():
-        data["value"] = str(data["value"])
+        data["original_value"] = str(data["original_value"])
+        data["base_value"] = str(data["base_value"])
 
     return ApiSuccess(data=PortfolioBreakdown(
         by_class=class_data,
@@ -451,10 +482,13 @@ async def net_worth(
             }
 
     # 2. Investments: reuse portfolio_summary logic (skip rows missing price/FX)
+    # Sprint 4 FIX-22 (review V3 §V3-P1-5): track original_value AND
+    # base_value per quote currency, so callers reading
+    # investment_by_currency["EUR"] aren't surprised that the value is in CNY.
     inv_stmt = select(AssetHolding, Asset).join(Asset, AssetHolding.asset_id == Asset.id)
     inv_result = await db.execute(inv_stmt)
     investment_total = Decimal("0")
-    investment_by_currency: dict[str, Decimal] = {}
+    investment_by_currency: dict[str, dict[str, Decimal]] = {}
     for holding, asset in inv_result.all():
         price_stmt = (
             select(MarketPrice)
@@ -466,14 +500,20 @@ async def net_worth(
         latest = price_result.scalar_one_or_none()
         if latest is None:
             continue
-        value = holding.quantity * latest.price
-        converted = await _convert_to_base(db, value, latest.currency, base_currency)
+        original_value = holding.quantity * latest.price
+        bucket = investment_by_currency.setdefault(
+            latest.currency,
+            {"original_value": Decimal("0"), "base_value": Decimal("0")},
+        )
+        bucket["original_value"] += original_value
+        if latest.currency == base_currency:
+            converted = original_value
+        else:
+            converted = await _convert_to_base(db, original_value, latest.currency, base_currency)
         if converted is None:
             continue
+        bucket["base_value"] += converted
         investment_total += converted
-        investment_by_currency[latest.currency] = (
-            investment_by_currency.get(latest.currency, Decimal("0")) + converted
-        )
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ApiSuccess(data=NetWorthOut(
@@ -482,6 +522,9 @@ async def net_worth(
         investment_total=str(investment_total),
         net_worth=str(cash_total + investment_total),
         cash_by_currency=cash_details,
-        investment_by_currency={k: str(v) for k, v in investment_by_currency.items()},
+        investment_by_currency={
+            k: {"original_value": str(v["original_value"]), "base_value": str(v["base_value"])}
+            for k, v in investment_by_currency.items()
+        },
         as_of=now,
     ))

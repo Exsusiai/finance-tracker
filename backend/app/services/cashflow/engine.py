@@ -37,7 +37,19 @@ def parse_period(occurred_at: str | None) -> tuple[int, int] | None:
 # formula summed `amount` for both income AND expense, which (because amount
 # is stored as a positive magnitude) added expense to savings instead of
 # subtracting it.
-_AMOUNT_BASE_EXPR = "COALESCE(base_amount, amount * fx_rate_to_base, amount)"
+# Sprint 4 FIX-19 (review V3 §V3-P0-1): no longer fall back to raw `amount`
+# when both base_amount and fx_rate_to_base are NULL — that silently mixed
+# foreign currencies. Same-currency rows (currency = base_currency) bypass
+# the FX path; everything else needs an explicit FX field, otherwise the
+# row is NULL and excluded from the SUM.
+_AMOUNT_BASE_EXPR = (
+    "CASE "
+    "  WHEN currency = :base_currency THEN amount "
+    "  WHEN base_amount IS NOT NULL THEN base_amount "
+    "  WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base "
+    "  ELSE NULL "
+    "END"
+)
 
 _RECOMPUTE_SQL = text(f"""
     INSERT OR REPLACE INTO cash_flow_snapshots
