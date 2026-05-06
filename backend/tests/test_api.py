@@ -1,7 +1,13 @@
 """End-to-end API tests for Finance Tracker backend.
 
-Run: pytest tests/test_api.py -v
-Requires: FINANCE_TRACKER_API_TOKEN env var, running uvicorn server.
+Integration suite — requires a running uvicorn instance on
+``BASE_URL`` and the ``FINANCE_TRACKER_API_TOKEN`` env var.
+
+Auto-skipped when no server is reachable, so unit-test runs stay green
+without manual flag wrangling. Run explicitly with:
+
+    .venv/bin/uvicorn app.main:app --port 8199 &
+    .venv/bin/pytest backend/tests/test_api.py
 """
 
 from __future__ import annotations
@@ -19,6 +25,25 @@ import httpx
 
 BASE_URL = "http://127.0.0.1:8199/api/v1"
 TOKEN = os.environ.get("FINANCE_TRACKER_API_TOKEN", os.environ.get("TEST_API_TOKEN", ""))
+
+
+def _server_reachable() -> bool:
+    """Probe the integration server so the suite skips when it's not running."""
+    try:
+        with httpx.Client(timeout=0.5) as c:
+            r = c.get(f"{BASE_URL}/health")
+            return r.status_code < 500
+    except Exception:
+        return False
+
+
+# Sprint 1 FIX-7: auto-skip the whole module when the server isn't up so
+# `pytest backend/tests/` runs cleanly without flags. Run integration mode by
+# starting uvicorn first (see docstring).
+pytestmark = pytest.mark.skipif(
+    not _server_reachable(),
+    reason="Integration suite requires a running backend on " + BASE_URL,
+)
 
 
 @pytest.fixture(scope="session")

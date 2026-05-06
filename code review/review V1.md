@@ -109,7 +109,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 优先使用 `base_amount`；缺失时按交易币种通过 FX 折算。
 - cashflow API 返回币种元信息，前端不要硬编码 EUR。
 
-### P1-3. PDF upload / confirm / reparse / delete 路径会留下 stale cashflow 或丢失分类与转账逻辑
+### P1-3. PDF upload / confirm / reparse / delete 路径会留下 stale cashflow 或丢失分类与转账逻辑 ✅ FIX-4（2026-05-06）
 
 证据：
 - upload 路径会自动分类和转账匹配，但没有对导入时已变成 non-pending 的交易重算 cashflow：`backend/app/api/v1/statements.py:163-207`。
@@ -127,7 +127,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - upload / reparse / delete 后重算所有新旧受影响月份。
 - reparse 时保留 parser metadata，并重新跑 categorizer 和 transfer matcher。
 
-### P1-4. 交易 type 与分类 kind 没有后端一致性校验
+### P1-4. 交易 type 与分类 kind 没有后端一致性校验 ✅ FIX-5（2026-05-06）
 
 证据：
 - Transaction schema 允许独立传入 `type` 和 `category_id`：`backend/app/schemas/__init__.py:137-157`、`:160-179`。
@@ -143,7 +143,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 创建子分类时校验 parent 存在，且 parent.kind 与 child.kind 相同。
 - 添加服务层测试，不依赖前端过滤来保证数据正确。
 
-### P1-5. amount 正负号约定在不同写入路径中不一致
+### P1-5. amount 正负号约定在不同写入路径中不一致 ✅ FIX-4（2026-05-06）
 
 证据：
 - 文档和 PDF parser 约定非 adjustment 金额存正数；`_make_tx` 返回 `abs(amount)`。
@@ -159,7 +159,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 强制统一 invariant：非 adjustment 的 `amount = ABS(input)`，方向只由 `type` 和 transfer metadata 决定。
 - 如果需要兼容历史 signed rows，应做迁移和兼容测试。
 
-### P1-6. 文档中的 transaction 去重和索引没有在 ORM 中实现
+### P1-6. 文档中的 transaction 去重和索引没有在 ORM 中实现 ✅ FIX-6（2026-05-06）
 
 证据：
 - `docs/SCHEMA.sql:129-134` 写了 transaction indexes 和 `(account_id, external_id)` 去重索引。
@@ -174,7 +174,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 在 ORM 或 Alembic migration 中添加真实索引和 partial unique index。
 - 加测试验证同一账户 active transaction 的重复 `external_id` 会失败。
 
-### P1-7. Bank sync 绕过核心记账流水线
+### P1-7. Bank sync 绕过核心记账流水线 ✅ FIX-4（2026-05-06）
 
 证据：
 - Bank sync 直接创建 `Transaction`：`backend/app/services/bank_sync/engine.py:364-388`。
@@ -313,7 +313,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 更新 schema 文档，使其与 runtime view 一致。
 - 更好的做法是由 migration / ORM 自动生成 schema 文档。
 
-### P3-2. 后端测试陈旧，且当前本地无法运行
+### P3-2. 后端测试陈旧，且当前本地无法运行 ✅ FIX-7（2026-05-06）
 
 证据：
 - `python3 -m pytest` 和 `.venv/bin/python -m pytest` 都失败，因为没有安装 `pytest`。

@@ -220,6 +220,16 @@ class Transaction(Base):
             "source IN ('manual','pdf_import','bank_api','mcp_agent')",
             name="ck_tx_source",
         ),
+        # Composite index for the most common filter combo (account + date range)
+        Index("ix_transactions_account_id_occurred_at", "account_id", "occurred_at"),
+        # Index for per-category cashflow aggregation
+        Index("ix_transactions_category_id", "category_id"),
+        # Index for upload preview / reparse / delete by PDF import
+        Index("ix_transactions_pdf_import_id", "pdf_import_id"),
+        # NOTE: the partial unique index on (account_id, external_id) WHERE
+        # deleted_at IS NULL AND external_id IS NOT NULL cannot be expressed
+        # cleanly as a SQLAlchemy UniqueConstraint — it is created at runtime
+        # via idempotent DDL in app/main.py lifespan (_index_migrations).
     )
 
 

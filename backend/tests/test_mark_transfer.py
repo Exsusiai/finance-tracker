@@ -45,8 +45,6 @@ async def override_get_db():
             raise
 
 
-app.dependency_overrides[get_db] = override_get_db
-
 AUTH_HEADERS = {
     "Authorization": f"Bearer {_TEST_TOKEN}",
     "Content-Type": "application/json",
@@ -55,7 +53,13 @@ AUTH_HEADERS = {
 
 @pytest_asyncio.fixture(scope="module", autouse=True)
 async def create_tables():
-    """Create all ORM tables (and the v_account_balance view) once per module."""
+    """Create all ORM tables (and the v_account_balance view) once per module.
+
+    Save & restore `dependency_overrides[get_db]` so concurrent test modules
+    don't leak each other's in-memory engines (Sprint 1 FIX-7).
+    """
+    previous = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # Create the balance view (normally done in app lifespan)
@@ -65,6 +69,10 @@ async def create_tables():
     yield
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+    if previous is None:
+        app.dependency_overrides.pop(get_db, None)
+    else:
+        app.dependency_overrides[get_db] = previous
 
 
 @pytest_asyncio.fixture()

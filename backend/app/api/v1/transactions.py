@@ -44,6 +44,37 @@ def _normalize_amount(val) -> str:
     return format(n, 'f')
 
 
+async def _validate_kind_match(
+    db: AsyncSession,
+    *,
+    tx_type: str,
+    category_id: int | None,
+) -> None:
+    """Sprint 1 FIX-5 (review V1 §P1-4) invariant: when a transaction has
+    a category assigned, the category's kind must match the transaction's
+    type. Otherwise dashboards / breakdown views silently hide rows.
+
+    Raises ``InvalidInputError`` (HTTP 422) if mismatched. Categories that
+    don't exist also raise.
+    """
+    if category_id is None:
+        return
+    cat = (await db.execute(
+        select(Category).where(Category.id == category_id)
+    )).scalar_one_or_none()
+    if cat is None:
+        raise InvalidInputError(
+            f"Category {category_id} does not exist.",
+            details={"category_id": category_id},
+        )
+    if cat.kind != tx_type:
+        raise InvalidInputError(
+            f"Category kind '{cat.kind}' does not match transaction type "
+            f"'{tx_type}'. Pick a category whose kind == type.",
+            details={"category_id": category_id, "category_kind": cat.kind, "tx_type": tx_type},
+        )
+
+
 def _tx_to_out(t: Transaction) -> TransactionOut:
     tags = []
     if t.tags_json:
@@ -185,6 +216,8 @@ async def create_transaction(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
+    # Sprint 1 FIX-5 (review V1 §P1-4): Category.kind must match Transaction.type.
+    await _validate_kind_match(db, tx_type=body.type, category_id=body.category_id)
     tx = Transaction(
         account_id=body.account_id,
         counter_account_id=body.counter_account_id,
@@ -207,11 +240,12 @@ async def create_transaction(
         metadata_json=body.metadata_json,
     )
     db.add(tx)
-    await db.flush()
-    # Auto-refresh cashflow snapshot for the affected period
-    period = parse_period(tx.occurred_at)
-    if period:
-        await recompute_period(db, period[0], period[1])
+    # Sprint 1 FIX-4: route through unified ingestion (amount normalize +
+    # categorize + cashflow recompute). `auto_pair=False` — running the full
+    # matcher for one row is wasteful; users can hit /transfers/suggestions.
+    from app.services.ingestion import ingest_transactions
+
+    await ingest_transactions(db, [tx], auto_pair=False)
     # Re-fetch with relationships loaded
     fetch = select(Transaction).options(selectinload(Transaction.account), selectinload(Transaction.category)).where(Transaction.id == tx.id)
     result = await db.execute(fetch)
@@ -225,6 +259,9 @@ async def batch_create_transactions(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
+    # Sprint 1 FIX-5: validate kind invariant for every row before creating any.
+    for t_data in body.transactions:
+        await _validate_kind_match(db, tx_type=t_data.type, category_id=t_data.category_id)
     created = []
     for t_data in body.transactions:
         tx = Transaction(
@@ -250,9 +287,11 @@ async def batch_create_transactions(
         )
         db.add(tx)
         created.append(tx)
-    await db.flush()
-    # Auto-refresh cashflow snapshots for all affected periods (deduplicated)
-    await recompute_for_periods(db, [parse_period(t.occurred_at) for t in created])
+    # Sprint 1 FIX-4: unified ingestion (amount normalize + categorize +
+    # transfer match across the batch + cashflow recompute).
+    from app.services.ingestion import ingest_transactions
+
+    await ingest_transactions(db, created, auto_pair=True)
     # Batch re-fetch with relationships
     if created:
         ids = [tx.id for tx in created]
@@ -313,6 +352,12 @@ async def update_transaction(
         update_data["fx_rate_to_base"] = Decimal(update_data["fx_rate_to_base"])
     if "base_amount" in update_data and update_data["base_amount"] is not None:
         update_data["base_amount"] = Decimal(update_data["base_amount"])
+
+    # Sprint 1 FIX-5: enforce kind invariant on the *resulting* (type, category)
+    # pair — one or both fields may be in the patch.
+    final_type = update_data.get("type", tx.type)
+    final_cat_id = update_data.get("category_id", tx.category_id)
+    await _validate_kind_match(db, tx_type=final_type, category_id=final_cat_id)
 
     for key, value in update_data.items():
         setattr(tx, key, value)
@@ -561,6 +606,10 @@ async def confirm_inbox_item(
     old_category_id = tx.category_id
     update_data = body.model_dump(exclude_unset=True)
     new_category_id = update_data.get("category_id", old_category_id)
+
+    # Sprint 1 FIX-5: enforce kind invariant on the resulting (type, category).
+    final_type = update_data.get("type", tx.type)
+    await _validate_kind_match(db, tx_type=final_type, category_id=new_category_id)
 
     # Apply user overrides (description / category / etc.)
     for key, value in update_data.items():

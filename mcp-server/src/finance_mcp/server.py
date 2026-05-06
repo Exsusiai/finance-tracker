@@ -71,6 +71,43 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Sprint 1 FIX-4 (sync mirror of backend cashflow recompute SQL).
+# Keep formula identical to `app.services.cashflow.engine._RECOMPUTE_SQL`
+# so MCP-driven inserts produce snapshots matching the backend.
+_RECOMPUTE_SNAPSHOT_SQL_SYNC = """
+    INSERT OR REPLACE INTO cash_flow_snapshots
+        (period_year, period_month, base_currency,
+         income_total, expense_total, transfer_total, savings_total, other_total,
+         by_category_json, by_account_json, computed_at)
+    SELECT
+        ?, ?, ?,
+        COALESCE(SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                          WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                          ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN type = 'adjustment' THEN COALESCE(base_amount, amount * fx_rate_to_base, amount) ELSE 0 END), 0),
+        NULL,
+        NULL,
+        ?
+    FROM transactions
+    WHERE deleted_at IS NULL
+      AND is_pending = 0
+      AND CAST(substr(occurred_at, 1, 4) AS INTEGER) = ?
+      AND CAST(substr(occurred_at, 6, 2) AS INTEGER) = ?
+"""
+
+
+def _recompute_period_sync(conn, year: int, month: int) -> None:
+    """Sync mirror of backend recompute_period — used by MCP after inserts."""
+    now = _now_iso()
+    conn.execute(
+        _RECOMPUTE_SNAPSHOT_SQL_SYNC,
+        (year, month, settings.base_currency, now, year, month),
+    )
+
+
 def _fx_rate_lookup(conn, base: str, quote: str):
     """Latest fx_rates row for (base→quote) or None."""
     return conn.execute(
@@ -379,6 +416,31 @@ async def add_transaction(
         occurred = occurred_at or now
         tags_json = json.dumps(tags) if tags else None
 
+        # Sprint 1 FIX-4 / FIX-5 (review V1 §P1-5, §P1-4): apply the same
+        # invariants that the backend ingestion service enforces. MCP runs in a
+        # separate process on sync sqlite3, so we can't share the async pipeline
+        # — but we CAN share the rules.
+        # 1) amount sign: non-adjustment rows are stored as ABS(amount).
+        amount_decimal = Decimal(amount)
+        if type != "adjustment" and amount_decimal < 0:
+            amount_decimal = -amount_decimal
+        # 2) category_id ↔ type kind consistency: reject mismatched pairs.
+        if category_id is not None:
+            row = conn.execute(
+                "SELECT kind FROM categories WHERE id = ?", (category_id,)
+            ).fetchone()
+            if row is None:
+                return {"success": False, "error": f"Category {category_id} not found"}
+            cat_kind = row["kind"] if isinstance(row, sqlite3.Row) else row[0]
+            if cat_kind != type:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Category kind '{cat_kind}' does not match transaction type "
+                        f"'{type}' (review V1 §P1-4 invariant)."
+                    ),
+                }
+
         cur = conn.execute("""
             INSERT INTO transactions
                 (account_id, amount, currency, type, occurred_at, description,
@@ -386,19 +448,32 @@ async def add_transaction(
                  created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mcp_agent', ?, ?, ?)
         """, (
-            account_id, str(Decimal(amount)), currency, type, occurred,
+            account_id, str(amount_decimal), currency, type, occurred,
             description, counterparty, category_id, tags_json,
             1 if is_pending else 0, now, now,
         ))
-        conn.commit()
         tx_id = cur.lastrowid
+
+        # 3) Refresh the cashflow snapshot for the affected month so dashboard
+        # reads stay in sync after MCP-driven inserts. Mirrors
+        # backend.app.services.cashflow.engine._RECOMPUTE_SQL.
+        if len(occurred) >= 7 and not is_pending:
+            try:
+                year = int(occurred[0:4])
+                month = int(occurred[5:7])
+                _recompute_period_sync(conn, year, month)
+            except (ValueError, sqlite3.Error) as e:
+                # Snapshot refresh is best-effort; the row is already inserted.
+                pass
+
+        conn.commit()
 
         return {
             "success": True,
             "data": {
                 "id": tx_id,
                 "account_id": account_id,
-                "amount": amount,
+                "amount": str(amount_decimal),
                 "currency": currency,
                 "type": type,
                 "occurred_at": occurred,

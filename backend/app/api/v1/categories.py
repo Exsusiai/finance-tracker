@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
-from app.core.errors import NotFoundError, AppError
+from app.core.errors import NotFoundError, AppError, InvalidInputError
 from app.db import get_db
 from app.models import Category, CategorizationRule
 from app.models import touch_updated_at
@@ -92,6 +92,23 @@ async def create_category(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
+    # Sprint 1 FIX-5 (review V1 §P1-4): when creating a sub-category, the
+    # parent must exist and share the same kind. A child can't flip the
+    # spending/income/transfer hierarchy mid-tree without breaking dashboards.
+    if body.parent_id is not None:
+        parent = (await db.execute(
+            select(Category).where(Category.id == body.parent_id)
+        )).scalar_one_or_none()
+        if parent is None:
+            raise InvalidInputError(
+                f"Parent category {body.parent_id} does not exist.",
+                details={"parent_id": body.parent_id},
+            )
+        if parent.kind != body.kind:
+            raise InvalidInputError(
+                f"Sub-category kind '{body.kind}' must match parent kind '{parent.kind}'.",
+                details={"parent_id": body.parent_id, "parent_kind": parent.kind, "kind": body.kind},
+            )
     cat = Category(
         name=body.name,
         kind=body.kind,

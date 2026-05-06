@@ -7,17 +7,26 @@
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` branch
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ **Sprint 0 R0 资金正确性已完成**（FIX-1/2/3，5/5 mark-transfer 测试 + cashflow smoke test 全过）。下一步：Sprint 1（数据一致性 + 测试基础设施）→ Sprint 2（GitHub 公开前安全加固）→ P1-4（链上钱包）→ P1-1（LLM）→ P1-2/3（GoCardless / Notion）
+- **当前阶段**: ✅ **Sprint 0 + Sprint 1 已完成**（review V1 R0 + R1 全部）。`pytest backend/tests/` → **27 passed, 15 skipped**。下一步：Sprint 2（GitHub 公开前安全加固，0.5-1 天）→ P1-4（链上钱包）→ P1-1（LLM）→ P1-2/3（GoCardless / Notion）
 
 ---
 
 ## ✅ Sprint 0 — R0 资金正确性（已完成 2026-05-06）
 
-| FIX | 内容 | 来源 | 状态 |
-|---|---|---|---|
-| **FIX-1** | mark-transfer 持久化 transfer_direction（5 个测试覆盖：单边 in/out/missing-422、双边配对、跨月配对+cashflow 重算） | review V1 §P0-3 | ✅ |
-| **FIX-2** | savings 公式 4 处统一为 `ABS(income) − ABS(expense)` | review V1 §P1-1 | ✅ |
-| **FIX-3** | cashflow `COALESCE(base_amount, amount*fx_rate, amount)` 多币种折算 + `CashFlowMonthly.base_currency` + 前端 displayCurrency | review V1 §P1-2 | ✅ |
+| FIX | 内容 | 来源 |
+|---|---|---|
+| **FIX-1** | mark-transfer 持久化 transfer_direction | review V1 §P0-3 |
+| **FIX-2** | savings 公式 4 处统一为 `ABS(income) − ABS(expense)` | review V1 §P1-1 |
+| **FIX-3** | cashflow `COALESCE(base_amount, amount*fx_rate, amount)` + 前端去 EUR 硬编码 | review V1 §P1-2 |
+
+## ✅ Sprint 1 — R1 数据一致性 + 测试基础设施（已完成 2026-05-06）
+
+| FIX | 内容 | 来源 |
+|---|---|---|
+| **FIX-4** | 新增 `services/ingestion/` 统一管道（amount normalize → categorize → matcher → recompute），upload/reparse/batch/bank_sync/mcp 全部接入；reparse 保留 metadata + 跑分类/matcher（之前丢）；delete 重算 | review V1 §P1-3, §P1-5, §P1-7 |
+| **FIX-5** | Category.kind ↔ Transaction.type 后端 invariant（create/update/inbox-confirm/categories-create） | review V1 §P1-4 |
+| **FIX-6** | Transaction 3 个 Index + `(account_id, external_id)` partial unique（lifespan idempotent） | review V1 §P1-6 |
+| **FIX-7** | pytest 已恢复；test_pdf_parser 重写（5 家欧洲 PDF round-trip）；test_api 转 integration；新增 test_ingestion + test_kind_invariant + test_index_invariants | review V1 §P3-2 |
 
 ## 状态图例
 - ✅ 闭环可用（验证通过）

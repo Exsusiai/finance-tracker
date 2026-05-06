@@ -341,6 +341,7 @@ class BankSyncEngine:
             new_count = 0
             existing_count = 0
             pending_count = 0
+            new_txs: list[Transaction] = []
 
             for tx in transactions:
                 # Check for existing transaction
@@ -361,7 +362,10 @@ class BankSyncEngine:
                     existing_count += 1
                     continue
 
-                # Create new transaction
+                # Create new transaction. The ingestion service will normalise
+                # the amount sign (review V1 §P1-5 — bank API delivers signed
+                # amounts; the rest of the system stores positives + uses
+                # `type` for direction).
                 tx_type = _determine_tx_type(tx.amount, tx.counterparty)
                 new_tx = Transaction(
                     account_id=local_account_id,
@@ -390,11 +394,21 @@ class BankSyncEngine:
                     ),
                 )
                 self.db.add(new_tx)
+                new_txs.append(new_tx)
 
                 if tx.status == "pending":
                     pending_count += 1
                 else:
                     new_count += 1
+
+            # Sprint 1 FIX-4 (review V1 §P1-7): bank-sync was bypassing
+            # categorisation, transfer matching, amount normalisation, and
+            # cashflow recompute. Route through the unified ingestion pipeline
+            # so the same invariants apply across PDF / manual / bank API.
+            if new_txs:
+                from app.services.ingestion import ingest_transactions
+
+                await ingest_transactions(self.db, new_txs, auto_pair=True)
 
             result.success = True
             result.transactions_new = new_count

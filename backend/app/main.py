@@ -45,6 +45,33 @@ logger = structlog.get_logger(__name__)
 # ─── Lifespan ───────────────────────────────────────────────────────────────
 
 _BALANCE_VIEW_DROP_SQL = "DROP VIEW IF EXISTS v_account_balance"
+
+# Idempotent index DDL — applied in lifespan; also imported by tests.
+# The partial unique index on (account_id, external_id) cannot be expressed
+# cleanly as a SQLAlchemy UniqueConstraint, so it lives here as raw DDL only.
+_index_migrations: list[tuple[str, str]] = [
+    (
+        "ix_transactions_account_id_occurred_at",
+        "CREATE INDEX IF NOT EXISTS ix_transactions_account_id_occurred_at "
+        "ON transactions (account_id, occurred_at)",
+    ),
+    (
+        "ix_transactions_category_id",
+        "CREATE INDEX IF NOT EXISTS ix_transactions_category_id "
+        "ON transactions (category_id)",
+    ),
+    (
+        "ix_transactions_pdf_import_id",
+        "CREATE INDEX IF NOT EXISTS ix_transactions_pdf_import_id "
+        "ON transactions (pdf_import_id)",
+    ),
+    (
+        "uq_transactions_external_id_per_account",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_transactions_external_id_per_account "
+        "ON transactions (account_id, external_id) "
+        "WHERE deleted_at IS NULL AND external_id IS NOT NULL",
+    ),
+]
 # `transactions.amount` is stored as a positive magnitude across PDF imports,
 # but historically also accepted signed values for `manual` rows. We derive the
 # direction from `type` so all writers behave consistently and the view stays
@@ -121,6 +148,15 @@ async def lifespan(app: FastAPI):
             if column not in existing_cols:
                 await conn.execute(text(ddl))
                 logger.info("schema_column_added", table=table, column=column)
+
+    # Idempotent index creation (until Alembic is wired up — P2-4).
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        for name, ddl in _index_migrations:
+            try:
+                await conn.execute(text(ddl))
+            except Exception as e:
+                logger.warning("schema_index_create_failed", name=name, error=str(e))
 
     # Seed default expense categories + starter matching rules (idempotent)
     from app.services.categorizer.seed import seed_categories

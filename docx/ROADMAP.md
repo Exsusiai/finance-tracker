@@ -22,14 +22,23 @@
 
 ---
 
-## Sprint 1 — R1 数据一致性 + 测试基础设施（2-3 天）
+## ✅ Sprint 1 — R1 数据一致性 + 测试基础设施（已完成 2026-05-06）
 
-| # | 任务 | 来源 | 估时 |
+| # | 任务 | 来源 | 状态 |
 |---|---|---|---|
-| **FIX-4** | 抽 `services/ingestion/` 统一管道，upload / reparse / batch / bank_sync / mcp add_transaction 共用：normalize amount → categorize → transfer match → recompute periods | review P1-3, P1-5 | 1d |
-| **FIX-5** | 后端校验 `Category.kind == Transaction.type`；创建子分类校验 parent 存在 + 同 kind | review P1-4 | 0.3d |
-| **FIX-6** | ORM 加 Index + partial unique `(account_id, external_id) WHERE deleted_at IS NULL` | review P1-6 | 0.3d |
-| **FIX-7** | 测试基础设施恢复：装 pytest，删旧测试，给 5 家欧洲 parser + R0 修复加最小测试 | review P3-2 | 1d |
+| **FIX-4** | 新增 `services/ingestion/`，upload / reparse / batch / bank_sync 共用统一管道：amount normalize（非 adjustment ABS）→ categorize → transfer match → recompute affected periods。MCP 用 sync mirror（共享 SQL 公式）。reparse 现在会保留 metadata、跑分类/matcher、重算。delete 也重算。| review P1-3, P1-5, P1-7 | ✅ |
+| **FIX-5** | `_validate_kind_match` 在 transactions create/update + inbox confirm 强制；categories create 校验 parent 存在 + kind 一致 | review P1-4 | ✅ |
+| **FIX-6** | Transaction 加 3 个 Index（account+occurred / category / pdf_import）+ partial unique `(account_id, external_id) WHERE deleted_at IS NULL AND external_id IS NOT NULL`；lifespan 用 CREATE INDEX IF NOT EXISTS 兜住 | review P1-6 | ✅ |
+| **FIX-7** | pytest 已装；test_pdf_parser 重写（5 家真实 PDF 解析全过 + 检测器测试）；test_api 改为 integration（无服务器自动 skip）；新增 test_ingestion + test_kind_invariant + test_index_invariants | review P3-2 | ✅ |
+
+**测试结果**：`pytest backend/tests/ -v` → **27 passed, 15 skipped**
+- 5/5 mark-transfer
+- 4/4 ingestion 管道（amount normalize / adjustment 保留符号 / 规则命中自动通过 / 跨月重算）
+- 6/6 kind invariant（mismatch→422 / match→OK / patch flip→422 / parent kind / unknown parent / nested ok）
+- 5/5 index invariants（4 个索引存在 / 重复 external_id 同账户失败 / 跨账户允许 / 软删可复用 / NULL 不冲突）
+- 5/5 PDF parser（5 家欧洲银行真实 PDF round-trip）
+- 2/2 detector + import smoke
+- 15 integration（server 未起跳过）
 
 ---
 
