@@ -31,6 +31,8 @@ router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
 settings = get_settings()
 
+MAX_PDF_SIZE_MB = 10
+
 
 def _pdf_to_out(p: PdfImport, preview_txs: list[TransactionOut] | None = None) -> PdfImportOut:
     return PdfImportOut(
@@ -101,6 +103,18 @@ async def upload_pdf(
     content = await file.read()
     if not content:
         raise ParserError("Empty file uploaded")
+
+    # Guard: reject oversized files before touching disk or the parser
+    _max_bytes = MAX_PDF_SIZE_MB * 1024 * 1024
+    if len(content) > _max_bytes:
+        raise ParserError(
+            f"Uploaded file exceeds the {MAX_PDF_SIZE_MB} MiB limit",
+            details={"max_mb": MAX_PDF_SIZE_MB, "got_bytes": len(content)},
+        )
+
+    # Guard: require PDF magic bytes — reject non-PDF blobs early
+    if not content.startswith(b"%PDF-"):
+        raise ParserError("Uploaded file is not a valid PDF (missing %PDF- magic bytes)")
 
     file_hash = hashlib.sha256(content).hexdigest()
 

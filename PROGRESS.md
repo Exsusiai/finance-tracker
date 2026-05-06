@@ -7,7 +7,7 @@
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` branch
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ **Sprint 0 + Sprint 1 已完成**（review V1 R0 + R1 全部）。`pytest backend/tests/` → **27 passed, 15 skipped**。下一步：Sprint 2（GitHub 公开前安全加固，0.5-1 天）→ P1-4（链上钱包）→ P1-1（LLM）→ P1-2/3（GoCardless / Notion）
+- **当前阶段**: ✅ **Sprint 0 + 1 + 2 全部完成**（review V1 R0 + R1 + R2 全部，21 项问题修了 13 项）。`pytest backend/tests/ --ignore=test_api.py` → **53 passed**。**可以 push 到公开 GitHub**。下一步：P1-4（链上钱包）→ P1-1（LLM）→ Sprint 3（启用 GoCardless / Notion 时再修 R3 P1-7/8/P2-2/3/4）
 
 ---
 
@@ -27,6 +27,16 @@
 | **FIX-5** | Category.kind ↔ Transaction.type 后端 invariant（create/update/inbox-confirm/categories-create） | review V1 §P1-4 |
 | **FIX-6** | Transaction 3 个 Index + `(account_id, external_id)` partial unique（lifespan idempotent） | review V1 §P1-6 |
 | **FIX-7** | pytest 已恢复；test_pdf_parser 重写（5 家欧洲 PDF round-trip）；test_api 转 integration；新增 test_ingestion + test_kind_invariant + test_index_invariants | review V1 §P3-2 |
+
+## ✅ Sprint 2 — R2 GitHub 公开前安全加固（已完成 2026-05-06）
+
+| FIX | 内容 | 来源 |
+|---|---|---|
+| **FIX-8** | Notion router 加 router 级 `Depends(require_auth)`，6 个 endpoint 一次性闭合；test_notion_auth.py 5 用例 | review V1 §P0-1 |
+| **FIX-9** | `BACKEND_HOST` 默认 127.0.0.1；CORS 收紧到 `ALLOWED_ORIGINS` 列表；lifespan 拒启 AUTH_DISABLED+非 loopback 组合 | review V1 §P0-2 |
+| **FIX-10** | PDF 上传 `MAX_PDF_SIZE_MB=10` + `%PDF-` magic bytes 双重校验 | review V1 §P2-1 |
+| **FIX-11** | regex 规则写入时复杂度校验（长度 + 嵌套量词检测 + 编译验证）+ 运行时线程池 timeout | review V1 §P2-8 |
+| **FIX-12** | SCHEMA.sql 视图同步真值；删 valuation 死 helper；transactions list 过滤共享 helper（count/data 一致）；layout.tsx 改 next/script | review V1 §P2-5/6/7, §P3-1 |
 
 ## 状态图例
 - ✅ 闭环可用（验证通过）

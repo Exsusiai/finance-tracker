@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth import require_auth
-from app.core.errors import NotFoundError
+from app.core.errors import InvalidInputError, NotFoundError  # noqa: F401 (InvalidInputError re-raised by validator)
 from app.db import get_db
 from app.models import CategorizationRule, Transaction, Category
 from app.models import touch_updated_at
+from app.services.categorizer.engine import validate_regex_complexity
 from app.schemas import (
     ApiSuccess,
     RuleCreate,
@@ -85,6 +86,9 @@ async def create_rule(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
+    if body.pattern_type == "regex":
+        validate_regex_complexity(body.pattern)
+
     rule = CategorizationRule(
         pattern=body.pattern,
         pattern_type=body.pattern_type,
@@ -119,7 +123,13 @@ async def update_rule(
     if not rule:
         raise NotFoundError("CategorizationRule", rule_id)
 
-    for key, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    new_pattern_type = updates.get("pattern_type", rule.pattern_type)
+    new_pattern = updates.get("pattern", rule.pattern)
+    if new_pattern_type == "regex":
+        validate_regex_complexity(new_pattern)
+
+    for key, value in updates.items():
         setattr(rule, key, value)
 
     touch_updated_at(rule)

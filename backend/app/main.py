@@ -118,6 +118,18 @@ GROUP BY a.id;
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
+    # Sprint 2 FIX-9 (review §P0-2): refuse to start if auth is disabled while
+    # bound to a non-loopback interface. AUTH_DISABLED is intended *only* for
+    # local single-user dev; combining it with 0.0.0.0 / public IPs exposes
+    # all account / transaction / PDF routes to the LAN.
+    if settings.auth_disabled and not settings.host_is_loopback:
+        raise RuntimeError(
+            "Refusing to start: AUTH_DISABLED=true is only allowed when "
+            f"BACKEND_HOST is loopback (127.0.0.1 / ::1 / localhost). "
+            f"Current host = {settings.backend_host!r}. Set "
+            "AUTH_DISABLED=false or bind to localhost."
+        )
+
     # Ensure data directories exist
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.pdf_storage_dir.mkdir(parents=True, exist_ok=True)
@@ -189,13 +201,15 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# CORS — allow all origins in local dev
+# Sprint 2 FIX-9 (review §P0-2): scope CORS to an explicit allow-list instead
+# of the previous `*` (which combined with allow_credentials=True is also
+# spec-invalid in browsers). Override via ALLOWED_ORIGINS env var.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_origins_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Error handlers

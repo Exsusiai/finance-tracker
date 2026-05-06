@@ -25,7 +25,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 2. P0 - 严重问题 / 真实使用前必须修复
 
-### P0-1. Notion API 路由完全没有鉴权
+### P0-1. Notion API 路由完全没有鉴权 ✅ FIX-8（2026-05-06）
 
 证据：
 - `backend/app/api/v1/notion.py:44`、`:84`、`:101`、`:117`、`:133`、`:160` 定义的路由都没有 `Depends(require_auth)`。
@@ -39,7 +39,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 给 Notion router 添加 `dependencies=[Depends(require_auth)]`，或给每个 Notion endpoint 加 `_token: _auth`。
 - 增加鉴权回归测试：无 token 访问 `/api/v1/notion/status` 和所有 Notion mutation route 应返回 401。
 
-### P0-2. 本地运行配置关闭鉴权，同时 backend 监听所有网卡并开放通配 CORS
+### P0-2. 本地运行配置关闭鉴权，同时 backend 监听所有网卡并开放通配 CORS ✅ FIX-9（2026-05-06）
 
 证据：
 - 本地 `.env` 中 `AUTH_DISABLED=true`，`BACKEND_HOST=0.0.0.0`。本报告没有复制任何 secret 值。
@@ -201,7 +201,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 4. P2 - 中优先级安全 / 稳定性问题
 
-### P2-1. PDF 上传没有大小和类型限制
+### P2-1. PDF 上传没有大小和类型限制 ✅ FIX-10（2026-05-06）
 
 证据：
 - 上传接口直接把整个文件读入内存并写盘，再交给 parser：`backend/app/api/v1/statements.py:100-117`。
@@ -248,7 +248,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 建议：
 - 使用单个 `YYYY-MM` period 字符串比较，或构造真实日期边界。
 
-### P2-5. 未使用的 valuation helper 汇率方向是反的
+### P2-5. 未使用的 valuation helper 汇率方向是反的 ✅ FIX-12（2026-05-06）
 
 证据：
 - `compute_holding_value` 查询 `(base_currency -> latest.currency)`，然后返回 `value * fx.rate`：`backend/app/services/valuation/engine.py:37-49`。
@@ -259,7 +259,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 建议：
 - 删除重复实现，复用 holdings / MCP 中更完整的 `_convert_to_base` 逻辑。
 
-### P2-6. Transaction 列表分页 total 没有应用全部过滤条件
+### P2-6. Transaction 列表分页 total 没有应用全部过滤条件 ✅ FIX-12（2026-05-06）
 
 证据：
 - list 查询支持 min/max/search/tags/source/is_pending 等过滤。
@@ -271,7 +271,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 建议：
 - 把 filters 构建成一个共享函数，同时应用到 data query 和 count query。
 
-### P2-7. 前端 token bootstrap 有问题，且 token 存储方式较弱
+### P2-7. 前端 token bootstrap 有问题，且 token 存储方式较弱 ✅ FIX-12（2026-05-06，token 存储改进延到 P3 真正 auth flow）
 
 证据：
 - `DevTokenBootstrap` 没有被渲染；inline script 在浏览器中引用 `process.env`：`frontend/src/app/layout.tsx:10-19`、`:26-29`。
@@ -286,7 +286,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 - 使用真正的 auth flow，或由服务端安全地注入 public env。
 - 如果后续会暴露在非纯本地环境，优先使用 HttpOnly cookie。
 
-### P2-8. 用户自定义 regex 分类规则可能阻塞服务
+### P2-8. 用户自定义 regex 分类规则可能阻塞服务 ✅ FIX-11（2026-05-06）
 
 证据：
 - regex rule 直接用 Python `re.search` 执行：`backend/app/services/categorizer/engine.py:66`。
@@ -300,7 +300,7 @@ Review 范围：本地仓库代码、README / PROGRESS / PRD / 架构 / API / Sc
 
 ## 5. P3 - 文档 / 测试 / 可维护性问题
 
-### P3-1. `docs/SCHEMA.sql` 中的余额视图已经过期，作为参考有风险
+### P3-1. `docs/SCHEMA.sql` 中的余额视图已经过期，作为参考有风险 ✅ FIX-12（2026-05-06）
 
 证据：
 - 文档仍写着 `initial_balance + SUM(t.amount)`：`docs/SCHEMA.sql:257-262`。

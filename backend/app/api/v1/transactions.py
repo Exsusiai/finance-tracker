@@ -130,46 +130,52 @@ async def list_transactions(
     limit: int = Query(50, ge=1, le=1000),
     cursor: int | None = Query(None),
 ):
+    # Sprint 2 FIX-12 (review §P2-6): build the filter clause once and apply it
+    # to BOTH the data query and the count query, so the front-end's pagination
+    # `total` actually reflects the filtered set.
+    def _apply_filters(s):
+        if account_id is not None:
+            s = s.where(Transaction.account_id == account_id)
+        if category_id is not None:
+            s = s.where(Transaction.category_id == category_id)
+        if type is not None:
+            s = s.where(Transaction.type == type)
+        if from_date is not None:
+            s = s.where(Transaction.occurred_at >= from_date)
+        if to_date is not None:
+            s = s.where(Transaction.occurred_at < to_date + "T23:59:59Z")
+        if min_amount is not None:
+            s = s.where(Transaction.amount >= Decimal(min_amount))
+        if max_amount is not None:
+            s = s.where(Transaction.amount <= Decimal(max_amount))
+        if search is not None:
+            pattern = f"%{search}%"
+            s = s.where(
+                or_(
+                    Transaction.description.ilike(pattern),
+                    Transaction.counterparty.ilike(pattern),
+                    Transaction.raw_description.ilike(pattern),
+                )
+            )
+        if tags is not None:
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+            for tag in tag_list:
+                s = s.where(Transaction.tags_json.contains(tag))
+        if source is not None:
+            s = s.where(Transaction.source == source)
+        if is_pending is not None:
+            s = s.where(Transaction.is_pending == (1 if is_pending else 0))
+        return s
+
     stmt = (
         select(Transaction)
         .options(selectinload(Transaction.account), selectinload(Transaction.category))
         .where(Transaction.deleted_at.is_(None))
         .order_by(Transaction.occurred_at.desc(), Transaction.id.desc())
     )
+    stmt = _apply_filters(stmt)
 
-    if account_id is not None:
-        stmt = stmt.where(Transaction.account_id == account_id)
-    if category_id is not None:
-        stmt = stmt.where(Transaction.category_id == category_id)
-    if type is not None:
-        stmt = stmt.where(Transaction.type == type)
-    if from_date is not None:
-        stmt = stmt.where(Transaction.occurred_at >= from_date)
-    if to_date is not None:
-        stmt = stmt.where(Transaction.occurred_at < to_date + "T23:59:59Z")
-    if min_amount is not None:
-        stmt = stmt.where(Transaction.amount >= Decimal(min_amount))
-    if max_amount is not None:
-        stmt = stmt.where(Transaction.amount <= Decimal(max_amount))
-    if search is not None:
-        pattern = f"%{search}%"
-        stmt = stmt.where(
-            or_(
-                Transaction.description.ilike(pattern),
-                Transaction.counterparty.ilike(pattern),
-                Transaction.raw_description.ilike(pattern),
-            )
-        )
-    if tags is not None:
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-        for tag in tag_list:
-            stmt = stmt.where(Transaction.tags_json.contains(tag))
-    if source is not None:
-        stmt = stmt.where(Transaction.source == source)
-    if is_pending is not None:
-        stmt = stmt.where(Transaction.is_pending == (1 if is_pending else 0))
-
-    # Cursor-based pagination
+    # Cursor-based pagination — applies only to the page query, not the count.
     if cursor is not None:
         stmt = stmt.where(Transaction.id < cursor)
 
@@ -181,22 +187,10 @@ async def list_transactions(
     if has_more:
         rows = rows[:limit]
 
-    # Count total
-    count_stmt = (
-        select(func.count(Transaction.id))
-        .where(Transaction.deleted_at.is_(None))
+    # Count total — same filter clause, no cursor.
+    count_stmt = _apply_filters(
+        select(func.count(Transaction.id)).where(Transaction.deleted_at.is_(None))
     )
-    # Apply same filters for count
-    if account_id is not None:
-        count_stmt = count_stmt.where(Transaction.account_id == account_id)
-    if category_id is not None:
-        count_stmt = count_stmt.where(Transaction.category_id == category_id)
-    if type is not None:
-        count_stmt = count_stmt.where(Transaction.type == type)
-    if from_date is not None:
-        count_stmt = count_stmt.where(Transaction.occurred_at >= from_date)
-    if to_date is not None:
-        count_stmt = count_stmt.where(Transaction.occurred_at < to_date + "T23:59:59Z")
 
     total_result = await db.execute(count_stmt)
     total = total_result.scalar() or 0

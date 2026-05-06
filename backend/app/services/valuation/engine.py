@@ -1,50 +1,17 @@
-"""Valuation service — asset portfolio valuation helpers."""
+"""Valuation service — placeholder.
+
+The previous ``compute_holding_value`` helper here was buggy (review V1 §P2-5:
+inverted FX direction) and unreferenced — the real portfolio aggregation lives
+in ``backend/app/api/v1/holdings.py`` and ``mcp-server/src/finance_mcp/server.py``,
+both of which use ``_convert_to_base`` with proper direct → inverse → triangulate
+fall-back.
+
+If you find yourself reaching for a helper here, extract the logic from one of
+those callers rather than re-implementing.
+
+Sprint 2 FIX-12 (review V1 §P2-5): dead code removed.
+"""
 
 from __future__ import annotations
 
-from decimal import Decimal
-
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models import AssetHolding, Asset, MarketPrice, FxRate
-
-
-async def compute_holding_value(
-    db: AsyncSession,
-    holding: AssetHolding,
-    base_currency: str = "CNY",
-) -> Decimal | None:
-    """Compute the base-currency value of a single holding."""
-    # Get latest price
-    price_stmt = (
-        select(MarketPrice)
-        .where(MarketPrice.asset_id == holding.asset_id)
-        .order_by(MarketPrice.quoted_at.desc())
-        .limit(1)
-    )
-    result = await db.execute(price_stmt)
-    latest = result.scalar_one_or_none()
-    if not latest:
-        return None
-
-    value = holding.quantity * latest.price
-
-    if latest.currency == base_currency:
-        return value
-
-    # Convert via FX
-    fx_stmt = (
-        select(FxRate)
-        .where(
-            FxRate.base_currency == base_currency,
-            FxRate.quote_currency == latest.currency,
-        )
-        .order_by(FxRate.quoted_at.desc())
-        .limit(1)
-    )
-    fx_result = await db.execute(fx_stmt)
-    fx = fx_result.scalar_one_or_none()
-    if fx:
-        return value * fx.rate
-    return None
+# Intentionally empty.

@@ -10,12 +10,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.services.notion_sync import NotionSyncService
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 
 class SyncResponse(BaseModel):

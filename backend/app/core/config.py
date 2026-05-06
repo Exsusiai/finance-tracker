@@ -32,9 +32,16 @@ class Settings(BaseSettings):
 
     # --- Base ---
     base_currency: str = "CNY"
-    backend_host: str = "0.0.0.0"
+    # Sprint 2 FIX-9 (review §P0-2): default to loopback so the API isn't
+    # accidentally exposed to the LAN. Override via BACKEND_HOST env var when
+    # you really mean to bind 0.0.0.0 (and keep AUTH_DISABLED=false there!).
+    backend_host: str = "127.0.0.1"
     backend_port: int = 8000
     log_level: str = "INFO"
+
+    # CORS allow-list. Comma-separated origin URLs. Default covers the local
+    # dev frontends on common ports. Production deployments should override.
+    allowed_origins: str = "http://localhost:3000,http://localhost:3010,http://127.0.0.1:3000,http://127.0.0.1:3010"
 
     # --- Personal hints (kept out of source code; loaded from .env) ---
     # Comma-separated list of the account-holder's name variants. Used by
@@ -93,6 +100,17 @@ class Settings(BaseSettings):
         """Parsed owner-name variants for self-transfer detection (lower-cased)."""
         raw = self.finance_tracker_owner_names or ""
         return [n.strip().lower() for n in raw.split(",") if n.strip()]
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        """Parsed CORS origin allow-list."""
+        raw = self.allowed_origins or ""
+        return [o.strip() for o in raw.split(",") if o.strip()]
+
+    @property
+    def host_is_loopback(self) -> bool:
+        """Whether ``backend_host`` is restricted to localhost."""
+        return self.backend_host in {"127.0.0.1", "::1", "localhost"}
 
     @property
     def data_dir(self) -> Path:

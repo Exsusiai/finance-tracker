@@ -253,13 +253,33 @@ CREATE INDEX idx_rules_priority ON categorization_rules(priority DESC, enabled);
 
 -- ---------------------------------------------------------------------
 -- 视图: v_account_balance (账户实时余额, 派生)
+--   方向由 type / metadata.transfer_direction 决定，不依赖 amount 符号。
+--   subaccount=true 的 transfer 不影响银行总余额（同行内部搬运）。
+--   未配对 transfer 默认 -ABS（单边视角假定为出账）。
+--   Sprint 2 FIX-12 (review §P3-1): 与 backend/app/main.py 的 lifespan
+--   实际创建语句保持一致。
 -- ---------------------------------------------------------------------
 CREATE VIEW v_account_balance AS
 SELECT
     a.id              AS account_id,
     a.name            AS account_name,
     a.currency        AS currency,
-    a.initial_balance + COALESCE(SUM(t.amount), 0) AS balance
+    a.initial_balance + COALESCE(SUM(
+        CASE
+            WHEN json_extract(t.metadata_json, '$.subaccount') = 1 THEN 0
+            WHEN t.type = 'transfer'
+                 AND json_extract(t.metadata_json, '$.transfer_direction') = 'in'
+                 THEN  ABS(t.amount)
+            WHEN t.type = 'transfer'
+                 AND json_extract(t.metadata_json, '$.transfer_direction') = 'out'
+                 THEN -ABS(t.amount)
+            WHEN t.type = 'transfer'   THEN -ABS(t.amount)
+            WHEN t.type = 'expense'    THEN -ABS(t.amount)
+            WHEN t.type = 'income'     THEN  ABS(t.amount)
+            WHEN t.type = 'adjustment' THEN  t.amount
+            ELSE 0
+        END
+    ), 0) AS balance
 FROM accounts a
 LEFT JOIN transactions t
     ON t.account_id = a.id

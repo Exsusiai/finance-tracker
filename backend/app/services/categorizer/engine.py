@@ -12,15 +12,65 @@ Reverse direction (`learn_from_user_assignment`):
 
 from __future__ import annotations
 
+import concurrent.futures
 import re
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import InvalidInputError
 from app.models import CategorizationRule, Transaction
 
 logger = structlog.get_logger(__name__)
+
+# Maximum allowed regex pattern length (chars)
+_MAX_REGEX_LEN = 200
+# Heuristic pattern: nested quantifiers like (a+)+, (.*)+, (a|b)*  etc.
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]{0,40}[+*]\)[+*?]")
+# Reusable single-thread pool for regex timeout isolation
+_regex_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="regex_guard")
+
+
+def validate_regex_complexity(pattern: str) -> None:
+    """Validate a regex pattern for safety before storing it.
+
+    Raises InvalidInputError when the pattern is too long, has catastrophic
+    backtracking shapes, or fails to compile.
+    """
+    if len(pattern) > _MAX_REGEX_LEN:
+        raise InvalidInputError(
+            f"Regex pattern too long ({len(pattern)} chars); maximum is {_MAX_REGEX_LEN}"
+        )
+    if _NESTED_QUANTIFIER_RE.search(pattern):
+        raise InvalidInputError(
+            "Regex pattern has nested quantifiers; would cause catastrophic backtracking"
+        )
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise InvalidInputError(f"Invalid regex: {exc}") from exc
+
+
+def _safe_regex_search(pattern: str, value: str, *, timeout_sec: float = 1.0) -> bool:
+    """Run re.search inside a thread with a wall-clock timeout.
+
+    Returns False (no match) if the pattern times out or is invalid,
+    so a misbehaving rule degrades gracefully instead of hanging the process.
+    """
+    try:
+        future = _regex_executor.submit(re.search, pattern, value, re.IGNORECASE)
+        result = future.result(timeout=timeout_sec)
+        return bool(result)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "regex_timeout",
+            pattern=pattern[:80],
+            value_len=len(value),
+        )
+        return False
+    except re.error:
+        return False
 
 
 # ─── Forward: rule-based categorization ────────────────────────────────
@@ -62,10 +112,7 @@ def _match(rule: CategorizationRule, value: str) -> bool:
     elif rule.pattern_type == "starts_with":
         return value.lower().startswith(rule.pattern.lower())
     elif rule.pattern_type == "regex":
-        try:
-            return bool(re.search(rule.pattern, value, re.IGNORECASE))
-        except re.error:
-            return False
+        return _safe_regex_search(rule.pattern, value)
     return False
 
 

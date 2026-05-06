@@ -42,17 +42,27 @@
 
 ---
 
-## Sprint 2 — R2 公开 GitHub 前安全加固（0.5-1 天）
+## ✅ Sprint 2 — R2 公开 GitHub 前安全加固（已完成 2026-05-06）
 
-| # | 任务 | 来源 | 估时 |
+| # | 任务 | 来源 | 状态 |
 |---|---|---|---|
-| **FIX-8** | Notion router 加 `Depends(require_auth)` + 鉴权回归测试 | review P0-1 | 0.2d |
-| **FIX-9** | 默认 `BACKEND_HOST=127.0.0.1`；CORS 改用 `ALLOWED_ORIGINS` 配置；`AUTH_DISABLED=true` 且 host 非 loopback 时启动 fail | review P0-2 | 0.3d |
-| **FIX-10** | PDF 上传：`MAX_PDF_SIZE_MB=10` + magic bytes 校验 | review P2-1 | 0.2d |
-| **FIX-11** | regex 规则：保存时复杂度校验 + 运行时线程池 timeout | review P2-8 | 0.3d |
-| **FIX-12** | 顺手清理：SCHEMA.sql 视图同步 / 删 valuation 死 helper / list count 过滤补全 / 删坏掉的 layout token bootstrap | review P2-5/6/7, P3-1 | 0.3d |
+| **FIX-8** | Notion router 加 `dependencies=[Depends(require_auth)]`（一次覆盖 6 个 endpoint）+ test_notion_auth.py 5 个用例 | review P0-1 | ✅ |
+| **FIX-9** | 默认 `BACKEND_HOST=127.0.0.1`；CORS 改用 `ALLOWED_ORIGINS` 列表配置（默认本机 3000/3010）+ 收紧 methods/headers；lifespan 在 AUTH_DISABLED+非 loopback 时 RuntimeError 拒启 | review P0-2 | ✅ |
+| **FIX-10** | PDF upload `MAX_PDF_SIZE_MB=10` + 校验 `%PDF-` magic bytes，违例 ParserError 422 | review P2-1 | ✅ |
+| **FIX-11** | `validate_regex_complexity` 写入时校验（长度 ≤200 + 嵌套量词检测 + 编译验证）；`_safe_regex_search` 用线程池+1s timeout 兜运行时（GIL 限制：写入时校验是主防线） | review P2-8 | ✅ |
+| **FIX-12** | docs/SCHEMA.sql v_account_balance 同步实际公式；删 valuation/engine.py 死 helper；transactions list 抽 `_apply_filters` 共享 11 个过滤条件给 data+count；layout.tsx 改用 next/script + JSON.stringify 注入 token | review P2-5/6/7, P3-1 | ✅ |
 
-> ✅ Sprint 2 完成后无致命 bug，可以 push 到公开 GitHub。
+**测试结果**：`pytest backend/tests/ -v --ignore=test_api.py` → **53 passed**
+- 5/5 mark-transfer (FIX-1)
+- 4/4 ingestion (FIX-4)
+- 6/6 kind invariant (FIX-5)
+- 5/5 index invariants (FIX-6)
+- 7/7 PDF parser real-PDF + smoke (FIX-7)
+- 5/5 notion auth (FIX-8)
+- 10/10 security invariants (FIX-9)
+- 11/11 regex safety + PDF guards (FIX-10/11)
+
+> ✅ R0+R1+R2 全部落地，无致命 bug，可以 push 到公开 GitHub。
 
 ---
 
