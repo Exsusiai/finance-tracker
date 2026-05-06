@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { mutate as swrMutate } from "swr";
 import { ApiError, type AccountOut, updateAccount } from "@/lib/api";
 import { invalidateTransactionGraph } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
@@ -12,52 +11,71 @@ import { cn } from "@/lib/utils";
  *
  * The PDF parser uses this list to identify in-bank moves (e.g. N26 main →
  * "Investing" Space) and tag them as `subaccount=true`, so the balance view
- * skips them and the cash-flow report doesn't double-count them as income/expense.
+ * skips them and the cash-flow report doesn't double-count them as
+ * income/expense. Backend's PATCH /accounts/{id} also retroactively
+ * re-classifies any pending pdf_import rows that match the newly-added
+ * names (see _reclassify_pending_for_subaccounts).
+ *
+ * 2026-05-06 UX fix: previously add/remove only updated local state and
+ * required a second click on "保存" to persist — users would close the
+ * page assuming it had saved. Now every add/remove fires a PATCH
+ * immediately so what you see in the chip list IS what's saved.
  */
 export function SubaccountListEditor({ account }: { account: AccountOut }) {
-  const initial = parseSubaccountNames(account.metadata_json);
-  const [names, setNames] = useState<string[]>(initial);
+  const [names, setNames] = useState<string[]>(parseSubaccountNames(account.metadata_json));
   const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [reclassified, setReclassified] = useState<number | null>(null);
 
   // Re-sync when account prop changes (after refresh from another component)
   useEffect(() => {
     setNames(parseSubaccountNames(account.metadata_json));
   }, [account.metadata_json]);
 
-  const dirty = !arrayEqual(names, initial);
+  // Persist a new name list to the backend immediately.
+  const persist = async (next: string[], prev: string[]) => {
+    setError(null);
+    setReclassified(null);
+    setStatus("saving");
+    setNames(next);  // optimistic UI
+    try {
+      const merged = mergeSubaccountNames(account.metadata_json, next);
+      const resp = await updateAccount(account.id, { metadata_json: merged });
+      // Backend returns meta.subaccount_reclassified when added names
+      // matched any pending pdf_import rows.
+      const meta = (resp as unknown as { meta?: { subaccount_reclassified?: number } }).meta;
+      if (meta?.subaccount_reclassified && meta.subaccount_reclassified > 0) {
+        setReclassified(meta.subaccount_reclassified);
+      }
+      await invalidateTransactionGraph();
+      setStatus("saved");
+      // Brief flash then back to idle.
+      setTimeout(() => setStatus("idle"), 1500);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "保存失败");
+      setStatus("error");
+      setNames(prev);  // rollback optimistic update
+    }
+  };
 
-  const handleAdd = () => {
+  const handleAdd = async () => {
     const v = draft.trim();
     if (!v) return;
     if (names.some((n) => n.toLowerCase() === v.toLowerCase())) {
       setDraft("");
-      return; // already in list
+      return;
     }
-    setNames([...names, v]);
+    const prev = names;
+    const next = [...names, v];
     setDraft("");
+    await persist(next, prev);
   };
 
-  const handleRemove = (i: number) => {
-    setNames(names.filter((_, idx) => idx !== i));
-  };
-
-  const handleSave = async () => {
-    setError(null);
-    try {
-      setSaving(true);
-      const merged = mergeSubaccountNames(account.metadata_json, names);
-      await updateAccount(account.id, { metadata_json: merged });
-      // Backend now retroactively reclassifies this account's pending
-      // transactions when subaccount_names changes — invalidate the whole
-      // transaction graph so inbox / cashflow / balances all refresh.
-      await invalidateTransactionGraph();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "保存失败");
-    } finally {
-      setSaving(false);
-    }
+  const handleRemove = async (i: number) => {
+    const prev = names;
+    const next = names.filter((_, idx) => idx !== i);
+    await persist(next, prev);
   };
 
   return (
@@ -66,15 +84,20 @@ export function SubaccountListEditor({ account }: { account: AccountOut }) {
         <p className="text-[11px] font-semibold text-muted-foreground">
           子账户名（PDF 内此账户里出现的子账户/Space/Pocket 名）
         </p>
-        {dirty && (
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="text-[10px] px-2 py-0.5 rounded text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
-          >
-            {saving ? "保存中…" : "保存"}
-          </button>
-        )}
+        <span
+          className={cn(
+            "text-[10px] transition-opacity",
+            status === "saving" && "text-muted-foreground",
+            status === "saved" && "text-emerald-600 dark:text-emerald-400",
+            status === "error" && "text-destructive",
+            status === "idle" && "opacity-0",
+          )}
+        >
+          {status === "saving" && "保存中…"}
+          {status === "saved" && "✓ 已保存"}
+          {status === "error" && "✗ 保存失败"}
+          {status === "idle" && " "}
+        </span>
       </div>
       <div className="flex flex-wrap gap-1.5 mb-2">
         {names.length === 0 ? (
@@ -90,7 +113,8 @@ export function SubaccountListEditor({ account }: { account: AccountOut }) {
               {n}
               <button
                 onClick={() => handleRemove(i)}
-                className="text-muted-foreground hover:text-destructive transition-colors"
+                disabled={status === "saving"}
+                className="text-muted-foreground hover:text-destructive transition-colors disabled:opacity-50"
                 aria-label={`删除 ${n}`}
               >
                 ×
@@ -110,15 +134,16 @@ export function SubaccountListEditor({ account }: { account: AccountOut }) {
               handleAdd();
             }
           }}
+          disabled={status === "saving"}
           placeholder="例如：Investing / Dream List / Saving"
-          className="flex-1 px-2 py-1 text-[11px] rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+          className="flex-1 px-2 py-1 text-[11px] rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
         />
         <button
           onClick={handleAdd}
-          disabled={!draft.trim()}
+          disabled={!draft.trim() || status === "saving"}
           className={cn(
             "text-[10px] px-2 py-1 rounded-md transition-colors",
-            draft.trim()
+            draft.trim() && status !== "saving"
               ? "bg-primary/10 text-primary hover:bg-primary/20"
               : "text-muted-foreground cursor-not-allowed",
           )}
@@ -126,6 +151,11 @@ export function SubaccountListEditor({ account }: { account: AccountOut }) {
           + 添加
         </button>
       </div>
+      {reclassified != null && (
+        <p className="mt-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+          已自动把 {reclassified} 笔待确认交易识别为子账户内部转账
+        </p>
+      )}
       {error && <p className="mt-1 text-[10px] text-destructive">{error}</p>}
     </div>
   );
