@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { mutate as swrMutate } from "swr";
 import { ApiError, type AccountOut, updateAccount } from "@/lib/api";
+import { invalidateTransactionGraph } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
 /**
@@ -48,11 +49,10 @@ export function SubaccountListEditor({ account }: { account: AccountOut }) {
       setSaving(true);
       const merged = mergeSubaccountNames(account.metadata_json, names);
       await updateAccount(account.id, { metadata_json: merged });
-      swrMutate(
-        (k) => typeof k === "string" && k.startsWith("accounts"),
-        undefined,
-        { revalidate: true },
-      );
+      // Backend now retroactively reclassifies this account's pending
+      // transactions when subaccount_names changes — invalidate the whole
+      // transaction graph so inbox / cashflow / balances all refresh.
+      await invalidateTransactionGraph();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "保存失败");
     } finally {

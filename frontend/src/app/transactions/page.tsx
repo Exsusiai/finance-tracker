@@ -5,6 +5,7 @@ import {
   useTransactions,
   useCategories,
   useAccounts,
+  invalidateTransactionGraph,
 } from "@/lib/hooks";
 import {
   type TransactionFilters,
@@ -149,6 +150,7 @@ export default function TransactionsPage() {
         await deleteTransaction(id);
         setDeleteConfirm(null);
         setSelectedTx(null);
+        invalidateTransactionGraph();
         refresh();
       } catch (e) {
         console.error("Delete failed:", e);

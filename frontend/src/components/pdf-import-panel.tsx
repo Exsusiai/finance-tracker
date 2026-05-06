@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
-import { useAccounts, useStatements } from "@/lib/hooks";
+import { useAccounts, useStatements, invalidateTransactionGraph } from "@/lib/hooks";
 import {
   type PdfImportOut,
   uploadPdf,
@@ -51,6 +51,10 @@ export function PdfImportPanel() {
         const result = await uploadPdf(file, selectedAccountId);
         setUploadResult(result);
         refreshStatements();
+        // Cross-page invalidation: transactions list / inbox / cashflow /
+        // balances all need to refresh because the upload (when an account
+        // is auto-resolved) immediately writes transactions.
+        invalidateTransactionGraph();
       } catch (e) {
         if (e instanceof ApiError) {
           setUploadError(e.message);
@@ -89,6 +93,7 @@ export function PdfImportPanel() {
       try {
         await confirmStatement(importId);
         refreshStatements();
+        invalidateTransactionGraph();
         if (uploadResult?.id === importId) {
           setUploadResult(null);
         }
@@ -106,6 +111,7 @@ export function PdfImportPanel() {
       try {
         await deleteStatement(importId);
         refreshStatements();
+        invalidateTransactionGraph();
         if (uploadResult?.id === importId) {
           setUploadResult(null);
         }

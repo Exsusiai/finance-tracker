@@ -1,7 +1,42 @@
 "use client";
 
-import useSWR from "swr";
+import useSWR, { mutate as globalMutate } from "swr";
 import useSWRInfinite from "swr/infinite";
+
+// 2026-05-06: cross-page SWR invalidation. Whenever a write operation
+// mutates the transaction graph (PDF upload, inbox confirm, mark-transfer,
+// PATCH transaction, account subaccount edit, etc.) call this to force
+// every dependent SWR cache (transactions list / inbox / cashflow /
+// balances / net worth / statements / transfer-suggestions) to revalidate.
+// Without this the user has to manually hard-refresh between pages
+// because each tab keeps its stale cache.
+const _TX_GRAPH_KEY_PREFIXES = [
+  "transactions",       // useTransactions(...)
+  "transaction-",       // useTransaction(id)
+  "inbox",              // useInbox()
+  "statements",         // useStatements()
+  "balances",           // useBalances()
+  "cashflow",           // useCashFlowMonthly / by-category / timeseries
+  "transfer-suggestions",
+  "accounts",           // re-balanced after delete / status changes
+];
+const _TX_GRAPH_EXACT_KEYS = new Set([
+  "net-worth",
+  "portfolio-summary",
+  "portfolio-breakdown",
+]);
+
+export function invalidateTransactionGraph(): Promise<unknown> {
+  return globalMutate(
+    (key) => {
+      if (typeof key !== "string") return false;
+      if (_TX_GRAPH_EXACT_KEYS.has(key)) return true;
+      return _TX_GRAPH_KEY_PREFIXES.some((p) => key.startsWith(p));
+    },
+    undefined,
+    { revalidate: true },
+  );
+}
 import {
   fetchCashFlowMonthly,
   fetchCashFlowByCategory,

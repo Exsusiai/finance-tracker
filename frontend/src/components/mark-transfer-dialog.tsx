@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useAccounts, useTransactions } from "@/lib/hooks";
+import { useAccounts, useTransactions, invalidateTransactionGraph } from "@/lib/hooks";
 import { ApiError, markAsTransfer, type TransactionOut } from "@/lib/api";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 
@@ -62,6 +62,7 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
     try {
       setSubmitting(true);
       await markAsTransfer(tx.id, { counterTransactionId: counterTxId ?? undefined, direction: direction ?? undefined });
+      invalidateTransactionGraph();
       onSuccess();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "标记失败");

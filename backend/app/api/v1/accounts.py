@@ -153,6 +153,90 @@ async def get_account_balance(
     ))
 
 
+def _extract_subaccount_names(metadata_json: str | None) -> list[str]:
+    """Pull out the user-maintained subaccount-name list from
+    ``metadata_json``. Returns a lower-cased, deduped list."""
+    if not metadata_json:
+        return []
+    try:
+        meta = json.loads(metadata_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    raw = meta.get("subaccount_names") if isinstance(meta, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in raw:
+        s = str(n).strip().lower()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+async def _reclassify_pending_for_subaccounts(
+    db: AsyncSession,
+    account_id: int,
+    new_subaccount_names: list[str],
+) -> int:
+    """Re-scan this account's inbox (is_pending pdf_import expense/income
+    rows) against the **updated** subaccount-name list. Rows whose
+    description / raw_description / counterparty contains any of the names
+    get flipped to ``type=transfer`` with ``metadata.subaccount=true`` and
+    auto-confirmed (is_pending=False) — same outcome as if the parser had
+    seen the new list at PDF-upload time.
+
+    Triggered by PATCH /accounts/{id} when subaccount_names changes, so the
+    user doesn't have to re-upload the PDF or hand-classify the rows.
+    """
+    if not new_subaccount_names:
+        return 0
+
+    stmt = select(Transaction).where(
+        Transaction.account_id == account_id,
+        Transaction.deleted_at.is_(None),
+        Transaction.is_pending.is_(True),
+        Transaction.source == "pdf_import",
+        Transaction.type.in_(("expense", "income")),
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    if not rows:
+        return 0
+
+    from app.services.cashflow import parse_period, recompute_for_periods
+    from app.services.transfer_matcher.engine import _merge_meta
+
+    affected_periods: set[tuple[int, int]] = set()
+    matched = 0
+    for tx in rows:
+        haystack = " ".join(filter(None, [
+            (tx.description or "").lower(),
+            (tx.raw_description or "").lower(),
+            (tx.counterparty or "").lower(),
+        ]))
+        if not haystack:
+            continue
+        hit = next((n for n in new_subaccount_names if n in haystack), None)
+        if not hit:
+            continue
+        tx.type = "transfer"
+        tx.is_pending = False
+        tx.metadata_json = _merge_meta(
+            tx.metadata_json,
+            {"subaccount": True, "matched": hit, "source": "user_list"},
+        )
+        period = parse_period(tx.occurred_at)
+        if period:
+            affected_periods.add(period)
+        matched += 1
+
+    if matched:
+        await db.flush()
+        await recompute_for_periods(db, affected_periods)
+    return matched
+
+
 @router.patch("/{account_id}", response_model=ApiSuccess[AccountOut])
 async def update_account(
     account_id: int,
@@ -166,6 +250,11 @@ async def update_account(
     if not account:
         raise NotFoundError("Account", account_id)
 
+    # Snapshot the OLD subaccount list before applying the patch so we can
+    # detect whether the user added new names that should retroactively
+    # re-classify already-imported pending transactions.
+    old_subaccount_names = set(_extract_subaccount_names(account.metadata_json))
+
     update_data = body.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         if key == "initial_balance":
@@ -174,7 +263,22 @@ async def update_account(
 
     touch_updated_at(account)
     await db.flush()
-    return ApiSuccess(data=_account_to_out(account))
+
+    # 2026-05-06 fix: when the user adds Investing / Dream List / Saving etc.
+    # to subaccount_names AFTER the PDF was already imported, retroactively
+    # classify the inbox rows that match the new names — otherwise the user
+    # has to hand-classify them all even though the system now knows.
+    new_subaccount_names = set(_extract_subaccount_names(account.metadata_json))
+    added_names = list(new_subaccount_names - old_subaccount_names)
+    reclassified = 0
+    if added_names:
+        reclassified = await _reclassify_pending_for_subaccounts(
+            db, account_id, added_names,
+        )
+
+    out = _account_to_out(account)
+    meta = {"subaccount_reclassified": reclassified} if added_names else None
+    return ApiSuccess(data=out, meta=meta)
 
 
 @router.delete("/{account_id}", response_model=ApiSuccess[dict])

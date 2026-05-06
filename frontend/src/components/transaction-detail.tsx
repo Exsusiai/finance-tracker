@@ -10,6 +10,7 @@ import {
   recategorizeTransaction,
   ApiError,
 } from "@/lib/api";
+import { invalidateTransactionGraph } from "@/lib/hooks";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { TransactionForm } from "./transaction-form";
 
@@ -49,6 +50,7 @@ export function TransactionDetail({
   const handleDelete = async () => {
     try {
       await deleteTransaction(tx.id);
+      invalidateTransactionGraph();
       onUpdate();
       onClose();
     } catch (e) {

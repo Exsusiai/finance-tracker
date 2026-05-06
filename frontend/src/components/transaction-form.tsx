@@ -10,6 +10,7 @@ import {
   updateTransaction,
   ApiError,
 } from "@/lib/api";
+import { invalidateTransactionGraph } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 
 interface TransactionFormProps {
@@ -119,6 +120,7 @@ export function TransactionForm({
         await createTransaction(data);
       }
 
+      invalidateTransactionGraph();
       onSuccess();
     } catch (e) {
       if (e instanceof ApiError) {

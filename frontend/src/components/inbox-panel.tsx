@@ -4,6 +4,7 @@ import { useState } from "react";
 import { mutate as swrMutate } from "swr";
 import { useInbox, useCategories } from "@/lib/hooks";
 import { ApiError, confirmInboxItem, type CategoryOut, type TransactionOut } from "@/lib/api";
+import { invalidateTransactionGraph } from "@/lib/hooks";
 import { MarkTransferDialog } from "@/components/mark-transfer-dialog";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui-common";
@@ -146,6 +147,7 @@ function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowPro
       };
       if (noteChanged) payload.user_note = note.trim() || null;
       await confirmInboxItem(tx.id, payload);
+      invalidateTransactionGraph();
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "确认失败");

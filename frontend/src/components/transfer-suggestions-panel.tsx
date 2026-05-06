@@ -4,6 +4,7 @@ import { useState } from "react";
 import { mutate as swrMutate } from "swr";
 import { useAccounts, useTransferSuggestions } from "@/lib/hooks";
 import { ApiError, markAsTransfer, type TransferSuggestion } from "@/lib/api";
+import { invalidateTransactionGraph } from "@/lib/hooks";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui-common";
 
@@ -77,6 +78,7 @@ function SuggestionCard({ suggestion: s, outAccountName, inAccountName, onDone }
     try {
       setSubmitting(true);
       await markAsTransfer(s.out_transaction_id, { counterTransactionId: s.in_transaction_id, direction: "out" });
+      invalidateTransactionGraph();
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "确认失败");
