@@ -323,6 +323,7 @@ async def update_transaction(
     body: TransactionUpdate,
     _token: _auth,
     db: AsyncSession = Depends(get_db),
+    apply_scope: str = Query("all", pattern="^(all|single|never)$"),
 ):
     stmt = (
         select(Transaction)
@@ -384,7 +385,11 @@ async def update_transaction(
         from app.services.ingestion import ingest_transactions
         await ingest_transactions(db, [tx], auto_pair=False, skip_categorize=True)
 
-    # Auto-learn: if user changed the category, derive (or strengthen) a rule
+    # Auto-learn: if user changed the category, derive (or strengthen) a rule.
+    # `apply_scope` (query param) lets the user opt out per-call:
+    #   - "all"    (default): learn rule + cascade to siblings
+    #   - "single": skip both (one-off correction)
+    #   - "never":  skip both AND disable any existing rule for this keyword
     new_category_id = tx.category_id
     new_period = parse_period(tx.occurred_at)
     affected_periods = [old_period, new_period]
@@ -395,20 +400,24 @@ async def update_transaction(
     ):
         from app.services.categorizer.engine import (
             apply_to_similar_pending,
+            disable_rules_for_keyword,
             learn_from_user_assignment,
         )
-        await learn_from_user_assignment(db, tx, new_category_id)
-        cascaded = await apply_to_similar_pending(db, tx, new_category_id)
-        if cascaded:
-            from sqlalchemy import select as _select
-            cascaded_rows = (await db.execute(
-                _select(Transaction.occurred_at).where(
-                    Transaction.category_id == new_category_id,
-                    Transaction.id != tx.id,
-                )
-            )).all()
-            for (occ,) in cascaded_rows:
-                affected_periods.append(parse_period(occ))
+        if apply_scope == "all":
+            await learn_from_user_assignment(db, tx, new_category_id)
+            cascaded = await apply_to_similar_pending(db, tx, new_category_id)
+            if cascaded:
+                from sqlalchemy import select as _select
+                cascaded_rows = (await db.execute(
+                    _select(Transaction.occurred_at).where(
+                        Transaction.category_id == new_category_id,
+                        Transaction.id != tx.id,
+                    )
+                )).all()
+                for (occ,) in cascaded_rows:
+                    affected_periods.append(parse_period(occ))
+        elif apply_scope == "never":
+            await disable_rules_for_keyword(db, tx)
 
     await recompute_for_periods(db, affected_periods)
     return ApiSuccess(data=_tx_to_out(tx))
@@ -429,11 +438,58 @@ async def delete_transaction(
     if not tx:
         raise NotFoundError("Transaction", transaction_id)
 
+    # 2026-05-07: when deleting a paired transfer leg, also detach the
+    # counterpart so it doesn't carry a dangling counter_account_id pointing
+    # at a deleted row (which would silently exclude it from the unpaired
+    # panel). Without this fix, deleting a synthetic mirror left the source
+    # in a "looks paired but isn't" zombie state.
+    affected_periods: list[tuple[int, int] | None] = [parse_period(tx.occurred_at)]
+    src_meta: dict = {}
+    if tx.metadata_json:
+        try:
+            src_meta = json.loads(tx.metadata_json) or {}
+        except (json.JSONDecodeError, TypeError):
+            src_meta = {}
+    if not isinstance(src_meta, dict):
+        src_meta = {}
+    paired_id = src_meta.get("paired_with_tx_id")
+    if paired_id is not None:
+        counterpart = (await db.execute(
+            select(Transaction).where(
+                Transaction.id == paired_id,
+                Transaction.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if counterpart is not None:
+            ctr_meta: dict = {}
+            if counterpart.metadata_json:
+                try:
+                    ctr_meta = json.loads(counterpart.metadata_json) or {}
+                except (json.JSONDecodeError, TypeError):
+                    ctr_meta = {}
+            if not isinstance(ctr_meta, dict):
+                ctr_meta = {}
+            counterpart.counter_account_id = None
+            ctr_meta.pop("paired_with_tx_id", None)
+            counterpart.metadata_json = (
+                json.dumps(ctr_meta, sort_keys=True, ensure_ascii=False)
+                if ctr_meta else None
+            )
+            affected_periods.append(parse_period(counterpart.occurred_at))
+
+    # Also clear our own paired_with_tx_id so a future refresh-matching can't
+    # re-pair us with a tombstoned counterpart (Step -1 only inspects active
+    # rows, so the stale pointer would otherwise survive forever).
+    if "paired_with_tx_id" in src_meta:
+        src_meta.pop("paired_with_tx_id", None)
+        tx.metadata_json = (
+            json.dumps(src_meta, sort_keys=True, ensure_ascii=False)
+            if src_meta else None
+        )
+
     tx.deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    period = parse_period(tx.occurred_at)
     await db.flush()
-    if period:
-        await recompute_period(db, period[0], period[1])
+    await recompute_for_periods(db, affected_periods)
     return ApiSuccess(data={"id": transaction_id, "deleted": True})
 
 
@@ -466,6 +522,24 @@ async def mark_as_transfer(
     tx = (await db.execute(stmt)).scalar_one_or_none()
     if not tx:
         raise NotFoundError("Transaction", transaction_id)
+
+    # If user picked a category in the dialog, it must be a kind='transfer'
+    # one — anything else would silently misbucket dashboards.
+    if body.category_id is not None:
+        cat = (await db.execute(
+            select(Category).where(Category.id == body.category_id)
+        )).scalar_one_or_none()
+        if cat is None:
+            raise InvalidInputError(
+                f"Category {body.category_id} does not exist.",
+                details={"category_id": body.category_id},
+            )
+        if cat.kind != "transfer":
+            raise InvalidInputError(
+                f"Category kind '{cat.kind}' is not allowed for a transfer. "
+                "Pick a category whose kind == 'transfer'.",
+                details={"category_id": body.category_id, "category_kind": cat.kind},
+            )
 
     old_period = parse_period(tx.occurred_at)
 
@@ -501,24 +575,450 @@ async def mark_as_transfer(
                 )
 
         await pair_transactions(db, out_tx, in_tx)
+        # User-picked category overrides whatever the matcher resolved
+        # (e.g. user knows it's 投资划转 even though heuristics said 跨行划转).
+        if body.category_id is not None:
+            out_tx.category_id = body.category_id
+            in_tx.category_id = body.category_id
         out_tx.is_pending = False
         in_tx.is_pending = False
         ctr_period = parse_period(ctr.occurred_at)
         await db.flush()
         await recompute_for_periods(db, [old_period, ctr_period])
+    elif body.counter_account_id is not None:
+        if not body.transfer_direction:
+            raise InvalidInputError(
+                "transfer_direction is required when only counter_account_id is given."
+            )
+        if body.counter_account_id == tx.account_id:
+            raise InvalidInputError(
+                "counter_account_id must differ from the source account."
+            )
+        # 2026-05-07: guard against double-bind. If the source tx already
+        # has a counter_account_id (e.g. user bound the OTHER leg first and
+        # then clicks bind on this leg from a stale UI), refuse — otherwise
+        # we'd overwrite the existing pair pointer and orphan the real
+        # counterpart on the other side.
+        # Force a re-read so this guard reflects the freshest state if a
+        # concurrent refresh-matching just cleared the pointer.
+        await db.refresh(tx, attribute_names=["counter_account_id"])
+        if tx.counter_account_id is not None:
+            raise InvalidInputError(
+                "Transaction is already bound to a counter account "
+                f"(account_id={tx.counter_account_id}). Unbind first to re-pair.",
+                details={
+                    "current_counter_account_id": tx.counter_account_id,
+                    "requested_counter_account_id": body.counter_account_id,
+                },
+            )
+        ctr_account = (await db.execute(
+            select(Account).where(
+                Account.id == body.counter_account_id,
+                Account.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if ctr_account is None:
+            raise NotFoundError("Counter Account", body.counter_account_id)
+
+        # 2026-05-07: before synthesising a mirror leg, look for an existing
+        # real tx in the destination that the matcher missed. Without this,
+        # binding both sides of a real transfer (because both showed up in
+        # the unpaired panel) would produce duplicate +/-500 rows on each
+        # side. Find a same-amount/currency unpaired tx in the counter
+        # account and pair to that.
+        from app.services.transfer_matcher.engine import find_existing_counter_leg
+        existing_real = await find_existing_counter_leg(
+            db, src_tx=tx, counter_account_id=body.counter_account_id,
+        )
+        if existing_real is not None:
+            if body.transfer_direction == "out":
+                out_tx, in_tx = tx, existing_real
+            else:
+                out_tx, in_tx = existing_real, tx
+            await pair_transactions(db, out_tx, in_tx)
+            if body.category_id is not None:
+                out_tx.category_id = body.category_id
+                in_tx.category_id = body.category_id
+            out_tx.is_pending = False
+            in_tx.is_pending = False
+            ctr_period = parse_period(existing_real.occurred_at)
+            await db.flush()
+            await recompute_for_periods(db, [old_period, ctr_period])
+            return ApiSuccess(data=_tx_to_out(tx))
+
+        # No real counter-leg found → synthesise one. This keeps the
+        # cross-account move visible on both balances even when the user
+        # never imports / will never import the destination's PDF (e.g.
+        # external accounts, banks that don't issue downloadable statements).
+        opposite_dir = "in" if body.transfer_direction == "out" else "out"
+        # Idempotency: if the user re-submits the same mark-transfer call we
+        # don't want to double-create the mirror.
+        existing_mirror = (await db.execute(
+            select(Transaction).where(
+                Transaction.account_id == body.counter_account_id,
+                Transaction.external_id == f"counterleg_of_{tx.id}",
+                Transaction.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if existing_mirror is None:
+            mirror = Transaction(
+                account_id=body.counter_account_id,
+                counter_account_id=tx.account_id,
+                category_id=body.category_id,
+                occurred_at=tx.occurred_at,
+                amount=tx.amount,
+                currency=tx.currency,
+                type="transfer",
+                description=tx.description,
+                raw_description=tx.raw_description,
+                source="manual",
+                external_id=f"counterleg_of_{tx.id}",
+                is_pending=False,
+                metadata_json=_merge_meta(None, {
+                    "transfer_direction": opposite_dir,
+                    "synthetic_counterleg": True,
+                    "paired_with_tx_id": tx.id,
+                }),
+            )
+            db.add(mirror)
+            await db.flush()
+        else:
+            mirror = existing_mirror
+
+        # Source side: type, direction, counter-account, paired-id, category
+        tx.type = "transfer"
+        tx.counter_account_id = body.counter_account_id
+        if body.category_id is not None:
+            tx.category_id = body.category_id
+        tx.is_pending = False
+        tx.metadata_json = _merge_meta(tx.metadata_json, {
+            "transfer_direction": body.transfer_direction,
+            "paired_with_tx_id": mirror.id,
+        })
+
+        ctr_period = parse_period(mirror.occurred_at)
+        await db.flush()
+        await recompute_for_periods(db, [old_period, ctr_period])
     else:
-        # Single-leg: direction is required so the balance view signs correctly.
+        # Single-leg & no counter account: external destination (gift, vendor
+        # not in this system, etc.). Source balance drops; we accept that
+        # because the counterparty isn't tracked here.
         if not body.transfer_direction:
             raise InvalidInputError(
                 "transfer_direction is required when no counter_transaction_id is given."
             )
         tx.type = "transfer"
+        if body.category_id is not None:
+            tx.category_id = body.category_id
         tx.is_pending = False
         tx.metadata_json = _merge_meta(tx.metadata_json, {"transfer_direction": body.transfer_direction})
         await db.flush()
         await recompute_for_periods(db, [old_period])
 
     return ApiSuccess(data=_tx_to_out(tx))
+
+
+@router.post("/{transaction_id}/unbind-counter", response_model=ApiSuccess[dict])
+async def unbind_counter(
+    transaction_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Detach a transfer's counter-account binding so it returns to 未配对.
+
+    Symmetric: if the bound counterpart is a synthetic mirror (created by an
+    earlier `mark-transfer` call), it gets soft-deleted; if it's a real
+    transaction, its own counter pointer is cleared so it shows up in 未配对
+    too. Both sides become re-bindable.
+
+    The transactions remain `type='transfer'` and keep their category — only
+    the pairing pointers (counter_account_id + metadata.paired_with_tx_id)
+    are cleared. The user can re-bind via the 转账建议 panel.
+    """
+    from datetime import datetime, timezone
+    from app.services.transfer_matcher.engine import _merge_meta
+
+    tx = (await db.execute(
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(Transaction.id == transaction_id, Transaction.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Transaction", transaction_id)
+
+    # Collect periods to recompute
+    periods: list[tuple[int, int] | None] = [parse_period(tx.occurred_at)]
+    counterpart: Transaction | None = None
+    deleted_synthetic = False
+
+    # Find the counterpart, if any
+    src_meta: dict = {}
+    if tx.metadata_json:
+        try:
+            src_meta = json.loads(tx.metadata_json) or {}
+        except (json.JSONDecodeError, TypeError):
+            src_meta = {}
+    if not isinstance(src_meta, dict):
+        src_meta = {}
+    paired_id = src_meta.get("paired_with_tx_id")
+    if paired_id is not None:
+        counterpart = (await db.execute(
+            select(Transaction).where(
+                Transaction.id == paired_id,
+                Transaction.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+
+    if counterpart is not None:
+        periods.append(parse_period(counterpart.occurred_at))
+        ctr_meta: dict = {}
+        if counterpart.metadata_json:
+            try:
+                ctr_meta = json.loads(counterpart.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                ctr_meta = {}
+        if not isinstance(ctr_meta, dict):
+            ctr_meta = {}
+        if ctr_meta.get("synthetic_counterleg") is True:
+            # Soft-delete — it has no real-world counterpart in any statement
+            counterpart.deleted_at = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+            deleted_synthetic = True
+        else:
+            # Symmetric unbind: detach the real counterpart so it also returns
+            # to 未配对 and can be re-bound to a different (or no) account.
+            counterpart.counter_account_id = None
+            ctr_meta.pop("paired_with_tx_id", None)
+            counterpart.metadata_json = json.dumps(ctr_meta, sort_keys=True, ensure_ascii=False) if ctr_meta else None
+
+    # Detach this side
+    tx.counter_account_id = None
+    src_meta.pop("paired_with_tx_id", None)
+    tx.metadata_json = json.dumps(src_meta, sort_keys=True, ensure_ascii=False) if src_meta else None
+
+    await db.flush()
+    await recompute_for_periods(db, periods)
+
+    return ApiSuccess(data={
+        "transaction_id": transaction_id,
+        "counterpart_id": counterpart.id if counterpart else None,
+        "deleted_synthetic": deleted_synthetic,
+    })
+
+
+@router.get("/recently-promoted-to-transfer", response_model=ApiSuccess[list[dict]])
+async def list_recently_promoted(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """List rows whose `type` was auto-flipped from expense/income to
+    transfer by a recent `refresh-matching` run.
+
+    These carry `metadata.type_promoted_by='refresh_matching'` plus the
+    timestamp and original type. Use this to spot false positives —
+    e.g. a real expense that happened to contain a sub-account name like
+    "saving" but wasn't actually a transfer.
+
+    The frontend can later wrap this in a UI; for now it's CLI-callable.
+    """
+    from sqlalchemy import text as _text
+    promoted_filter = _text(
+        "metadata_json IS NOT NULL "
+        "AND json_valid(metadata_json) "
+        "AND json_extract(metadata_json, '$.type_promoted_by') = 'refresh_matching'"
+    )
+    stmt = (
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(
+            Transaction.deleted_at.is_(None),
+            promoted_filter,
+        )
+        .order_by(Transaction.occurred_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    out: list[dict] = []
+    for r in rows:
+        meta: dict = {}
+        if r.metadata_json:
+            try:
+                meta = json.loads(r.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        out.append({
+            "transaction_id": r.id,
+            "account_id": r.account_id,
+            "account_name": r.account.name if r.account else None,
+            "category_id": r.category_id,
+            "category_name": r.category.name if r.category else None,
+            "occurred_at": r.occurred_at,
+            "amount": str(r.amount),
+            "currency": r.currency,
+            "description": r.description,
+            "current_type": r.type,
+            "original_type": meta.get("type_promoted_from"),
+            "promoted_at": meta.get("type_promoted_at"),
+        })
+    return ApiSuccess(data=out)
+
+
+@router.post("/{transaction_id}/revert-type-promotion", response_model=ApiSuccess[TransactionOut])
+async def revert_type_promotion(
+    transaction_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Undo a `refresh-matching` type promotion. Restores the original
+    type stored in `metadata.type_promoted_from`, clears the audit stamp,
+    and unbinds any counter pair created downstream (since the row is no
+    longer a transfer)."""
+    tx = (await db.execute(
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(Transaction.id == transaction_id, Transaction.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Transaction", transaction_id)
+
+    meta: dict = {}
+    if tx.metadata_json:
+        try:
+            meta = json.loads(tx.metadata_json) or {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+    if not isinstance(meta, dict) or meta.get("type_promoted_by") != "refresh_matching":
+        raise InvalidInputError(
+            "This transaction was not auto-promoted by refresh-matching; "
+            "nothing to revert.",
+        )
+    original = meta.get("type_promoted_from")
+    if original not in ("expense", "income"):
+        raise InvalidInputError(
+            f"Cannot revert: stored original type {original!r} is not expense/income.",
+        )
+
+    # If a counter binding exists from the promotion, detach it (synthetic
+    # mirror was created downstream of the type flip — without unbinding
+    # it would leak into the unpaired panel as an orphan).
+    paired_id = meta.get("paired_with_tx_id")
+    if paired_id is not None:
+        counterpart = (await db.execute(
+            select(Transaction).where(
+                Transaction.id == paired_id, Transaction.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if counterpart is not None:
+            ctr_meta: dict = {}
+            if counterpart.metadata_json:
+                try:
+                    ctr_meta = json.loads(counterpart.metadata_json) or {}
+                except (json.JSONDecodeError, TypeError):
+                    ctr_meta = {}
+            if ctr_meta.get("synthetic_counterleg") is True:
+                from datetime import datetime, timezone
+                counterpart.deleted_at = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+            else:
+                counterpart.counter_account_id = None
+                ctr_meta.pop("paired_with_tx_id", None)
+                counterpart.metadata_json = (
+                    json.dumps(ctr_meta, sort_keys=True, ensure_ascii=False)
+                    if ctr_meta else None
+                )
+
+    tx.type = original
+    tx.counter_account_id = None
+    # Drop transfer-specific metadata + audit stamps. Keep anything else
+    # (e.g. fx_missing) intact.
+    for key in (
+        "type_promoted_by", "type_promoted_at", "type_promoted_from",
+        "paired_with_tx_id", "transfer_direction", "subaccount",
+        "matched", "source", "synthetic_counterleg",
+    ):
+        meta.pop(key, None)
+    tx.metadata_json = json.dumps(meta, sort_keys=True, ensure_ascii=False) if meta else None
+    # Reset category since the new (old) type's kind invariant might not
+    # match the currently-set transfer category.
+    tx.category_id = None
+    tx.is_pending = True  # back into inbox so user can re-categorise
+
+    period = parse_period(tx.occurred_at)
+    await db.flush()
+    await recompute_for_periods(db, [period])
+    return ApiSuccess(data=_tx_to_out(tx))
+
+
+@router.get("/transfers/unpaired", response_model=ApiSuccess[list[dict]])
+async def list_unpaired_transfers(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """All `type='transfer'` rows that don't have a confirmed counter-leg.
+
+    Filters (pushed down to SQL via json_extract so we don't load the whole
+    transfers table into memory just to drop most of it):
+      - type = 'transfer'
+      - deleted_at IS NULL
+      - counter_account_id IS NULL                ← no internal pair
+      - metadata.subaccount != 1                  ← in-bank sub-account
+        moves are intentionally single-leg
+      - metadata.paired_with_tx_id IS NULL        ← matcher didn't pair it
+
+    Used by the front-end "转账建议" panel to surface every cross-bank
+    transfer the user still needs to bind a counter account to. Global —
+    scans all history, capped at `limit`.
+    """
+    from sqlalchemy import text as _text
+
+    not_subaccount = _text(
+        "(metadata_json IS NULL OR NOT json_valid(metadata_json) "
+        "OR COALESCE(json_extract(metadata_json, '$.subaccount'), 0) != 1)"
+    )
+    not_paired_meta = _text(
+        "(metadata_json IS NULL OR NOT json_valid(metadata_json) "
+        "OR json_extract(metadata_json, '$.paired_with_tx_id') IS NULL)"
+    )
+    stmt = (
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(
+            Transaction.type == "transfer",
+            Transaction.deleted_at.is_(None),
+            Transaction.counter_account_id.is_(None),
+            not_subaccount,
+            not_paired_meta,
+        )
+        .order_by(Transaction.occurred_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    out: list[dict] = []
+    for r in rows:
+        meta: dict = {}
+        if r.metadata_json:
+            try:
+                meta = json.loads(r.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        out.append({
+            "transaction_id": r.id,
+            "account_id": r.account_id,
+            "account_name": r.account.name if r.account else None,
+            "category_id": r.category_id,
+            "category_name": r.category.name if r.category else None,
+            "occurred_at": r.occurred_at,
+            "amount": str(r.amount),
+            "currency": r.currency,
+            "description": r.description,
+            "raw_description": r.raw_description,
+            "transfer_direction": meta.get("transfer_direction"),
+        })
+    return ApiSuccess(data=out)
 
 
 @router.get("/transfers/suggestions", response_model=ApiSuccess[list[dict]])
@@ -548,6 +1048,39 @@ async def get_transfer_suggestions(
         if c.score < SCORE_THRESHOLD_AUTO
     ]
     return ApiSuccess(data=suggestions)
+
+
+@router.get("/{transaction_id}/similar-count", response_model=ApiSuccess[dict])
+async def preview_similar_count(
+    transaction_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    category_id: int | None = Query(None),
+):
+    """Preview: how many sibling tx would `apply_scope=all` cascade to?
+
+    Frontend calls this before showing the scope dialog so the
+    "应用到所有同名（共 N 条）" button can show an accurate count.
+    Also returns the keyword that would be learned (or null if
+    no stable keyword can be derived from this tx).
+    """
+    from app.services.categorizer.engine import (
+        count_similar_pending,
+        derive_keyword_for_tx,
+    )
+
+    stmt = (
+        select(Transaction)
+        .where(Transaction.id == transaction_id, Transaction.deleted_at.is_(None))
+    )
+    tx = (await db.execute(stmt)).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Transaction", transaction_id)
+    target_cat = category_id if category_id is not None else (tx.category_id or 0)
+    count = await count_similar_pending(db, tx, target_cat)
+    derived = derive_keyword_for_tx(tx)
+    keyword = derived[1] if derived else None
+    return ApiSuccess(data={"count": count, "keyword": keyword})
 
 
 @router.post("/{transaction_id}/categorize", response_model=ApiSuccess[TransactionOut])
@@ -601,6 +1134,7 @@ async def confirm_inbox_item(
     body: TransactionUpdate,
     _token: _auth,
     db: AsyncSession = Depends(get_db),
+    apply_scope: str = Query("all", pattern="^(all|single|never)$"),
 ):
     """Confirm a single inbox item with optional category override.
 
@@ -661,28 +1195,30 @@ async def confirm_inbox_item(
         await ingest_transactions(db, [tx], auto_pair=False, skip_categorize=True)
 
     # Learn ONLY when user actually changed (or chose) the category.
-    # Confirming an auto-suggested category that wasn't changed → don't strengthen
-    # (the rule already matched, no new signal).
+    # `apply_scope` mirrors update_transaction:
+    #   - "all"    (default): learn rule + cascade to identical-description siblings
+    #   - "single": skip both
+    #   - "never":  skip both AND disable any existing rule for this keyword
     affected_periods = [parse_period(tx.occurred_at)]
     if new_category_id is not None and new_category_id != old_category_id:
-        await learn_from_user_assignment(db, tx, new_category_id)
-        # ↳ NEW (2026-05-05): also propagate the same category to other pending
-        # tx with identical description, so the user doesn't have to confirm
-        # 35 identical "Net interest paid …" rows one by one.
-        from app.services.categorizer.engine import apply_to_similar_pending
-        cascaded = await apply_to_similar_pending(db, tx, new_category_id)
-        if cascaded:
-            # Pull periods of cascaded rows so cash-flow snapshot recomputes them too.
-            from sqlalchemy import select as _select
-            cascaded_rows = (await db.execute(
-                _select(Transaction.occurred_at).where(
-                    Transaction.category_id == new_category_id,
-                    Transaction.id != tx.id,
-                    Transaction.is_pending.is_(False),
-                )
-            )).all()
-            for (occ,) in cascaded_rows:
-                affected_periods.append(parse_period(occ))
+        if apply_scope == "all":
+            await learn_from_user_assignment(db, tx, new_category_id)
+            from app.services.categorizer.engine import apply_to_similar_pending
+            cascaded = await apply_to_similar_pending(db, tx, new_category_id)
+            if cascaded:
+                from sqlalchemy import select as _select
+                cascaded_rows = (await db.execute(
+                    _select(Transaction.occurred_at).where(
+                        Transaction.category_id == new_category_id,
+                        Transaction.id != tx.id,
+                        Transaction.is_pending.is_(False),
+                    )
+                )).all()
+                for (occ,) in cascaded_rows:
+                    affected_periods.append(parse_period(occ))
+        elif apply_scope == "never":
+            from app.services.categorizer.engine import disable_rules_for_keyword
+            await disable_rules_for_keyword(db, tx)
 
     # Refresh cash-flow snapshots for all affected months (de-duplicated)
     await recompute_for_periods(db, affected_periods)

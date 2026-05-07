@@ -124,7 +124,13 @@ def _hint_score(out_tx: Transaction, in_tx: Transaction,
 
 def _is_eligible(tx: Transaction) -> bool:
     """Skip rows that are already paired, already typed transfer, deleted, or
-    sub-account moves we definitively don't want to pair."""
+    sub-account moves we definitively don't want to pair.
+
+    Synthetic counter-legs (created by manual mark-transfer when the user
+    couldn't find a real candidate) are also skipped — they're placeholders,
+    not real money movements; pairing them with newly-imported real legs
+    would leave 1 real + 1 synthetic + 1 new real = 3 rows for one transfer.
+    """
     if tx.deleted_at is not None:
         return False
     if tx.type == "transfer" and tx.counter_account_id is not None:
@@ -132,8 +138,11 @@ def _is_eligible(tx: Transaction) -> bool:
     if tx.metadata_json:
         try:
             meta = json.loads(tx.metadata_json)
-            if isinstance(meta, dict) and meta.get("subaccount"):
-                return False  # sub-account moves stay unpaired
+            if isinstance(meta, dict):
+                if meta.get("subaccount"):
+                    return False  # sub-account moves stay unpaired
+                if meta.get("synthetic_counterleg") is True:
+                    return False  # synthetic mirror — should be replaced, not paired
         except (json.JSONDecodeError, TypeError):
             pass
     return True
@@ -157,16 +166,40 @@ async def find_transfer_pairs(
     acc_rows = (await db.execute(select(Account))).scalars().all()
     accounts = {a.id: a for a in acc_rows}
 
-    # Load all candidate transactions
+    # Load all candidate transactions. When `candidate_ids` is given (post-
+    # PDF-import path) we still scan globally — the counter-leg may live in
+    # any account / period — but we narrow the date window down to ±90d
+    # around the new batch so we don't pull millions of rows once history
+    # builds up. The previous `or_(in_(ids), notin_(ids))` was logically
+    # `TRUE`, which silenced the WHERE entirely.
     base = select(Transaction).where(Transaction.deleted_at.is_(None))
     if candidate_ids is not None:
         ids = list(candidate_ids)
         if not ids:
             return []
-        # Pull both the new batch AND any other tx within ±window days that
-        # could be the counter-leg (we don't know dates yet — let SQL do all,
-        # then filter in Python by window).
-        base = base.where(or_(Transaction.id.in_(ids), Transaction.id.notin_(ids)))
+        # Bound the scan by date — pull dates of the candidate batch, then
+        # widen by 4× window_days so we always have enough room for the
+        # ±window_days score check without loading the whole table.
+        from datetime import datetime, timedelta, timezone
+        date_rows = (await db.execute(
+            select(Transaction.occurred_at).where(Transaction.id.in_(ids))
+        )).all()
+        if date_rows:
+            try:
+                dts = [
+                    datetime.fromisoformat(d[0].replace("Z", "+00:00"))
+                    for d in date_rows if d[0]
+                ]
+                if dts:
+                    delta = timedelta(days=window_days * 4)
+                    lo = (min(dts) - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    hi = (max(dts) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    base = base.where(
+                        Transaction.occurred_at >= lo,
+                        Transaction.occurred_at <= hi,
+                    )
+            except (ValueError, TypeError):
+                pass  # fallback to unbounded scan if dates malformed
     rows = (await db.execute(base)).scalars().all()
     rows = [r for r in rows if _is_eligible(r)]
 
@@ -187,13 +220,35 @@ async def find_transfer_pairs(
 
     outflows = [r for r in rows if r.type == "expense"]
     inflows  = [r for r in rows if r.type == "income"]
-    # Add unpaired transfers based on description direction
+    # Add unpaired transfers. Direction priority:
+    #   1. metadata.transfer_direction (set by parser / earlier user action)
+    #   2. description hints (English / German "to/from/incoming/outgoing")
+    #   3. fallback: drop into BOTH lists so the score-based pair search can
+    #      still catch them. Without this fallback, AMEX-style statements
+    #      (which write deposits as "Payment received - Thank You" with no
+    #      directional verb) never matched the corresponding outflow leg.
     for r in rows:
-        if r.type == "transfer" and r.counter_account_id is None:
-            if _looks_outflow(r):
-                outflows.append(r)
-            elif _looks_inflow(r):
-                inflows.append(r)
+        if r.type != "transfer" or r.counter_account_id is not None:
+            continue
+        meta_dir = None
+        if r.metadata_json:
+            try:
+                m = json.loads(r.metadata_json)
+                if isinstance(m, dict):
+                    meta_dir = m.get("transfer_direction")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if meta_dir == "out":
+            outflows.append(r)
+        elif meta_dir == "in":
+            inflows.append(r)
+        elif _looks_outflow(r):
+            outflows.append(r)
+        elif _looks_inflow(r):
+            inflows.append(r)
+        else:
+            outflows.append(r)
+            inflows.append(r)
 
     pairs: list[_Candidate] = []
     used_ids: set[int] = set()
@@ -203,6 +258,13 @@ async def find_transfer_pairs(
             continue
         for in_tx in inflows:
             if in_tx.id in used_ids:
+                continue
+            # Self-pair guard. The fallback in the directionless branch above
+            # injects the same row into BOTH outflows and inflows, so without
+            # this check `pair(r, r)` becomes a valid candidate (same amount,
+            # same date → score 80, auto-confirmed) and we'd write a row's
+            # paired_with_tx_id pointing at itself.
+            if in_tx.id == out_tx.id:
                 continue
             if in_tx.account_id == out_tx.account_id:
                 continue  # same account — not cross-bank
@@ -238,6 +300,182 @@ async def find_transfer_pairs(
     return pairs
 
 
+async def replace_synthetic_with_real(
+    db: AsyncSession,
+    *,
+    real_tx: Transaction,
+    window_days: int = WINDOW_DAYS,
+) -> Transaction | None:
+    """When a newly-imported real tx matches an existing synthetic mirror in
+    the same account, retire the mirror (soft-delete) and re-point the
+    paired source row to the real one.
+
+    The synthetic row was a placeholder the user manually created via
+    mark-transfer; the real row supersedes it. Without this dedup, after the
+    user imports the missing statement we'd have:
+        source -500 (real, paired_with_tx_id → mirror)
+        mirror +500 (synthetic, paired_with_tx_id → source)
+        new +500 (real, unpaired)
+    which is 3 rows for 1 transfer.
+
+    Match criteria:
+      same account_id
+      same currency
+      same amount (±0.01)
+      occurred_at within ±window days
+      mirror's metadata.synthetic_counterleg == true
+      mirror not deleted
+      real_tx still 'unpaired' (no counter_account_id)
+
+    Returns the soft-deleted mirror row when an upgrade happened, else None.
+    """
+    if real_tx.deleted_at is not None or real_tx.counter_account_id is not None:
+        return None
+
+    from datetime import datetime, timedelta, timezone
+    try:
+        src_dt = datetime.fromisoformat(real_tx.occurred_at.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if src_dt.tzinfo is None:
+        src_dt = src_dt.replace(tzinfo=timezone.utc)
+    delta = timedelta(days=window_days)
+    from_iso = (src_dt - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_iso = (src_dt + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+    real_amt = real_tx.amount if isinstance(real_tx.amount, Decimal) else Decimal(str(real_tx.amount))
+
+    stmt = select(Transaction).where(
+        Transaction.account_id == real_tx.account_id,
+        Transaction.deleted_at.is_(None),
+        Transaction.id != real_tx.id,
+        Transaction.currency == real_tx.currency,
+        Transaction.occurred_at >= from_iso,
+        Transaction.occurred_at <= to_iso,
+        Transaction.type == "transfer",
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    for cand in rows:
+        cand_amt = cand.amount if isinstance(cand.amount, Decimal) else Decimal(str(cand.amount))
+        if abs(cand_amt - real_amt) >= Decimal("0.01"):
+            continue
+        meta: dict = {}
+        if cand.metadata_json:
+            try:
+                meta = json.loads(cand.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        if not isinstance(meta, dict) or meta.get("synthetic_counterleg") is not True:
+            continue
+
+        # Found a synthetic mirror to replace. Re-point its source.
+        source_id = meta.get("paired_with_tx_id")
+        source_tx = None
+        if source_id is not None:
+            source_tx = (await db.execute(
+                select(Transaction).where(
+                    Transaction.id == source_id,
+                    Transaction.deleted_at.is_(None),
+                )
+            )).scalar_one_or_none()
+
+        if source_tx is not None:
+            # Pair the source with the real row instead
+            real_tx.type = "transfer"
+            real_tx.counter_account_id = source_tx.account_id
+            real_dir = meta.get("transfer_direction") or (
+                "in" if cand.amount and Decimal(str(cand.amount)) > 0 else "out"
+            )
+            real_tx.metadata_json = _merge_meta(real_tx.metadata_json, {
+                "transfer_direction": real_dir,
+                "paired_with_tx_id": source_tx.id,
+                "matched_by": "synthetic_replacement",
+            })
+            # Update source's pointer
+            source_tx.counter_account_id = real_tx.account_id
+            source_tx.metadata_json = _merge_meta(source_tx.metadata_json, {
+                "paired_with_tx_id": real_tx.id,
+            })
+            # Inherit category from synthetic if real doesn't have one
+            if real_tx.category_id is None and cand.category_id is not None:
+                real_tx.category_id = cand.category_id
+
+        # Soft-delete the synthetic; we don't want it counted in balances
+        from datetime import datetime, timezone
+        cand.deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        logger.info(
+            "synthetic_replaced",
+            real_id=real_tx.id,
+            synthetic_id=cand.id,
+            source_id=source_id,
+        )
+        return cand
+    return None
+
+
+async def find_existing_counter_leg(
+    db: AsyncSession,
+    *,
+    src_tx: Transaction,
+    counter_account_id: int,
+    window_days: int = WINDOW_DAYS,
+) -> Transaction | None:
+    """Look for an unpaired tx in `counter_account_id` that could be the
+    other leg of `src_tx` — same amount, same currency, opposite-ish
+    direction, within ±window days, NOT yet paired and NOT a synthetic
+    counter-leg created by an earlier bind.
+
+    Used by the manual-bind flow so that when both real legs already exist
+    (e.g. user imported both N26 and AMEX statements but the matcher missed
+    them), we attach them to each other instead of synthesising a duplicate.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        src_dt = datetime.fromisoformat(src_tx.occurred_at.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if src_dt.tzinfo is None:
+        src_dt = src_dt.replace(tzinfo=timezone.utc)
+    delta = timedelta(days=window_days)
+    from_iso = (src_dt - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_iso = (src_dt + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    src_amt = src_tx.amount if isinstance(src_tx.amount, Decimal) else Decimal(str(src_tx.amount))
+
+    stmt = select(Transaction).where(
+        Transaction.account_id == counter_account_id,
+        Transaction.deleted_at.is_(None),
+        Transaction.id != src_tx.id,
+        Transaction.currency == src_tx.currency,
+        Transaction.occurred_at >= from_iso,
+        Transaction.occurred_at <= to_iso,
+        Transaction.counter_account_id.is_(None),
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+
+    for c in rows:
+        c_amt = c.amount if isinstance(c.amount, Decimal) else Decimal(str(c.amount))
+        if abs(c_amt - src_amt) >= Decimal("0.01"):
+            continue
+        meta: dict = {}
+        if c.metadata_json:
+            try:
+                meta = json.loads(c.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if meta.get("paired_with_tx_id") is not None:
+            continue
+        if meta.get("synthetic_counterleg") is True:
+            continue  # don't bind two synthetic mirrors to each other
+        if meta.get("subaccount") is True:
+            continue
+        return c
+    return None
+
+
 async def pair_transactions(
     db: AsyncSession,
     out_tx: Transaction,
@@ -265,8 +503,20 @@ async def pair_transactions(
     in_tx.type = "transfer"
     out_tx.counter_account_id = in_tx.account_id
     in_tx.counter_account_id = out_tx.account_id
-    out_tx.metadata_json = _merge_meta(out_tx.metadata_json, {"transfer_direction": "out"})
-    in_tx.metadata_json = _merge_meta(in_tx.metadata_json, {"transfer_direction": "in"})
+    # Symmetric pointers — without `paired_with_tx_id` on both sides,
+    # the orphan-pointer cleanup in refresh-matching's Step -1 sees a row
+    # with counter_account_id set but no metadata back-pointer, treats it
+    # as orphan, clears counter_account_id, and the candidates resurface
+    # in the suggestions panel after every refresh. mark_subaccount_pair
+    # already wrote this; pair_transactions historically didn't.
+    out_tx.metadata_json = _merge_meta(out_tx.metadata_json, {
+        "transfer_direction": "out",
+        "paired_with_tx_id": in_tx.id,
+    })
+    in_tx.metadata_json = _merge_meta(in_tx.metadata_json, {
+        "transfer_direction": "in",
+        "paired_with_tx_id": out_tx.id,
+    })
 
     # Resolve auto-category once based on the counter account's type
     # (e.g. credit_card → 信用卡还款, bank → 跨行划转).
@@ -713,8 +963,11 @@ def _descriptions_match(a: str | None, b: str | None) -> bool:
     """
     if not a or not b:
         return False
-    norm = lambda s: re.sub(r"\s+", " ", re.sub(r"[\"'`'']", "", s.lower())).strip()
-    na, nb = norm(a), norm(b)
+
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", re.sub(r"[\"'`'']", "", s.lower())).strip()
+
+    na, nb = _norm(a), _norm(b)
     if na == nb:
         return True
     # Token overlap fallback for when one side has more context

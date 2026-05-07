@@ -205,9 +205,15 @@ async def lifespan(app: FastAPI):
         ("transactions", "user_note", "ALTER TABLE transactions ADD COLUMN user_note TEXT"),
         ("accounts", "iban", "ALTER TABLE accounts ADD COLUMN iban TEXT"),
     ]
+    # Whitelist of identifiers that may appear in interpolated DDL.
+    # SQLite has no parameter binding for PRAGMA / ALTER, so we vet the
+    # value before substituting. Static today, the assert prevents a
+    # future caller from feeding user input through this path.
+    _ALLOWED_TABLES = {"transactions", "accounts"}
     async with engine.begin() as conn:
         from sqlalchemy import text
         for table, column, ddl in _column_migrations:
+            assert table in _ALLOWED_TABLES, f"Unauthorised table in schema migration: {table}"
             existing_cols = [
                 row[1] for row in (await conn.execute(text(f"PRAGMA table_info({table})"))).fetchall()
             ]
@@ -224,11 +230,116 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning("schema_index_create_failed", name=name, error=str(e))
 
+    # 2026-05-07 dedup (must run BEFORE seed_categories, because seed's
+    # `_ensure_rule` calls scalar_one_or_none() and explodes on duplicates):
+    # an earlier version of the 信用卡还款 → 跨行划转 merge redirected rules
+    # without checking for collisions, which left e.g.
+    # (pattern='amex', field='description', category_id=跨行划转) appearing
+    # twice. Idempotent — no-op once duplicates are gone.
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        dedup = await conn.execute(text("""
+            DELETE FROM categorization_rules
+            WHERE id NOT IN (
+                SELECT MIN(id) FROM categorization_rules
+                GROUP BY lower(pattern), field, category_id
+            )
+        """))
+        if dedup.rowcount:
+            logger.info("rules_deduplicated", count=dedup.rowcount)
+
     # Seed default expense categories + starter matching rules (idempotent)
     from app.services.categorizer.seed import seed_categories
     async with async_session_factory() as seed_db:
         await seed_categories(seed_db)
         await seed_db.commit()
+
+    # 2026-05-06: backfill 内部储蓄 for orphan single-leg subaccount transfers.
+    # The parser tags these with metadata.subaccount=true, but only the
+    # matcher's `mark_subaccount_pair` writes the category — single-leg rows
+    # (e.g. main-account PDF imported without the saving-space PDF) never had
+    # one assigned. Without this, they end up uncategorised and the
+    # legacy-transfer migration below pushes them back into the inbox.
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        cat_row = (await conn.execute(text(
+            "SELECT id FROM categories WHERE kind='transfer' AND name='内部储蓄' LIMIT 1"
+        ))).first()
+        if cat_row:
+            backfill = await conn.execute(text(
+                "UPDATE transactions SET category_id = :cid "
+                "WHERE type = 'transfer' "
+                "  AND category_id IS NULL "
+                "  AND deleted_at IS NULL "
+                "  AND metadata_json IS NOT NULL "
+                "  AND json_valid(metadata_json) "
+                "  AND json_extract(metadata_json, '$.subaccount') = 1"
+            ), {"cid": cat_row[0]})
+            if backfill.rowcount:
+                logger.info("subaccount_orphans_categorized", count=backfill.rowcount)
+
+    # 2026-05-07: collapse 信用卡还款 → 跨行划转. The distinction was brittle
+    # (TF Bank's PDF omits incoming repayments, breaking pair detection) and
+    # added cognitive load. Migrate every transaction + rule still pointing
+    # at 信用卡还款 over to 跨行划转, then delete the legacy category.
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        old = (await conn.execute(text(
+            "SELECT id FROM categories WHERE kind='transfer' AND name='信用卡还款' LIMIT 1"
+        ))).first()
+        new = (await conn.execute(text(
+            "SELECT id FROM categories WHERE kind='transfer' AND name='跨行划转' LIMIT 1"
+        ))).first()
+        if old and new:
+            tx_n = await conn.execute(text(
+                "UPDATE transactions SET category_id = :new "
+                "WHERE category_id = :old AND deleted_at IS NULL"
+            ), {"old": old[0], "new": new[0]})
+            # Drop old-pointing rules whose pattern already has a counterpart
+            # under the new category, then re-point what's left. This avoids
+            # the duplicate (pattern, category_id) pairs that would otherwise
+            # trip up `_ensure_rule`'s scalar_one_or_none on next startup.
+            dropped_n = await conn.execute(text(
+                "DELETE FROM categorization_rules "
+                "WHERE category_id = :old "
+                "  AND EXISTS ("
+                "    SELECT 1 FROM categorization_rules r2 "
+                "    WHERE r2.category_id = :new "
+                "      AND lower(r2.pattern) = lower(categorization_rules.pattern) "
+                "      AND r2.field = categorization_rules.field"
+                "  )"
+            ), {"old": old[0], "new": new[0]})
+            redirected_n = await conn.execute(text(
+                "UPDATE categorization_rules SET category_id = :new "
+                "WHERE category_id = :old"
+            ), {"old": old[0], "new": new[0]})
+            await conn.execute(text(
+                "DELETE FROM categories WHERE id = :old"
+            ), {"old": old[0]})
+            logger.info(
+                "category_merged",
+                src="信用卡还款",
+                dst="跨行划转",
+                tx_count=tx_n.rowcount,
+                rules_dropped=dropped_n.rowcount,
+                rules_redirected=redirected_n.rowcount,
+            )
+
+    # 2026-05-06: re-enqueue *truly* uncategorised transfers (no subaccount
+    # tag, no pairing, no category) into the inbox so the user can pick a
+    # transfer subtype. Idempotent — runs after the subaccount backfill above
+    # so rows we just fixed don't get re-flagged.
+    async with engine.begin() as conn:
+        from sqlalchemy import text
+        result = await conn.execute(text(
+            "UPDATE transactions SET is_pending = 1 "
+            "WHERE type = 'transfer' "
+            "  AND category_id IS NULL "
+            "  AND deleted_at IS NULL "
+            "  AND is_pending = 0"
+        ))
+        if result.rowcount:
+            logger.info("legacy_transfers_reenqueued", count=result.rowcount)
 
     # Start background market-data scheduler
     from app.services.market_data.scheduler import start_scheduler, shutdown_scheduler

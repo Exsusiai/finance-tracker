@@ -5,14 +5,18 @@ from app.services.transfer_matcher.engine import (
     auto_pair_after_import,
     detect_same_account_pairs,
     detect_single_leg_iban,
+    find_existing_counter_leg,
     find_transfer_pairs,
     mark_subaccount_pair,
     pair_orphan_single_legs,
     pair_transactions,
+    replace_synthetic_with_real,
 )
 
 __all__ = [
     "find_transfer_pairs",
+    "find_existing_counter_leg",
+    "replace_synthetic_with_real",
     "pair_transactions",
     "auto_pair_after_import",
     "detect_same_account_pairs",

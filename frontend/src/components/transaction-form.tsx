@@ -7,6 +7,7 @@ import {
   type TransactionCreateInput,
   createTransaction,
   type TransactionUpdateInput,
+  unbindTransferCounter,
   updateTransaction,
   ApiError,
 } from "@/lib/api";
@@ -18,9 +19,15 @@ interface TransactionFormProps {
   categories: CategoryOut[];
   onClose: () => void;
   onSuccess: () => void;
+  /** Optional override for unbind success. Defaults to `onSuccess`, but
+   *  the parent can route it differently (e.g. close the whole detail
+   *  panel since the read-only view would otherwise display the now-stale
+   *  counter account from props). */
+  onUnbindSuccess?: () => void;
   initialData?: {
     id: number;
     account_id: number;
+    counter_account_id?: number | null;
     category_id: number | null;
     occurred_at: string;
     amount: string;
@@ -46,6 +53,7 @@ export function TransactionForm({
   categories,
   onClose,
   onSuccess,
+  onUnbindSuccess,
   initialData,
   isEdit = false,
 }: TransactionFormProps) {
@@ -65,8 +73,37 @@ export function TransactionForm({
   const [tagsInput, setTagsInput] = useState(initialData?.tags?.join(", ") || "");
   const [isPending, setIsPending] = useState(initialData?.is_pending ?? false);
 
+  const [counterAccountId, setCounterAccountId] = useState<number | null>(
+    initialData?.counter_account_id ?? null,
+  );
   const [submitting, setSubmitting] = useState(false);
+  const [unbinding, setUnbinding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const counterAccount = counterAccountId
+    ? accounts.find((a) => a.id === counterAccountId) ?? null
+    : null;
+
+  const handleUnbind = async () => {
+    if (!isEdit || !initialData) return;
+    if (!confirm("确认解除该转账与对手账户的绑定？解除后会回到「未配对」面板，可重新绑定。")) {
+      return;
+    }
+    setError(null);
+    setUnbinding(true);
+    try {
+      await unbindTransferCounter(initialData.id);
+      setCounterAccountId(null);
+      invalidateTransactionGraph();
+      // Prefer the explicit unbind hook; fall back to onSuccess so existing
+      // call sites keep working.
+      (onUnbindSuccess ?? onSuccess)();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "解除绑定失败");
+    } finally {
+      setUnbinding(false);
+    }
+  };
 
   const selectedAccount = accounts.find((a) => a.id === accountId);
   const currency = selectedAccount?.currency || "EUR";
@@ -268,17 +305,49 @@ export function TransactionForm({
               />
             </div>
 
-            {/* Counterparty */}
+            {/* Counterparty (free-text — merchant or person on the other side) */}
             <div>
-              <label className="block text-sm font-medium mb-2">对方</label>
+              <label className="block text-sm font-medium mb-2">对方姓名 / 商户</label>
               <input
                 type="text"
                 value={counterparty}
                 onChange={(e) => setCounterparty(e.target.value)}
-                placeholder="交易对手"
+                placeholder="例如：Amazon、张三"
                 className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </div>
+
+            {/* Counter account (only meaningful for transfers; read-only —
+                changing the binding goes through the 转账建议 panel) */}
+            {type === "transfer" && (
+              <div>
+                <label className="block text-sm font-medium mb-2">对手账户</label>
+                {counterAccount ? (
+                  <div className="flex items-center gap-2 px-3 py-2 text-sm rounded-lg border border-border bg-muted/30">
+                    <span className="flex-1 text-foreground">
+                      {counterAccount.name}
+                      <span className="ml-1.5 text-xs text-muted-foreground">
+                        ({counterAccount.currency})
+                      </span>
+                    </span>
+                    {isEdit && (
+                      <button
+                        type="button"
+                        onClick={handleUnbind}
+                        disabled={unbinding || submitting}
+                        className="text-xs px-2 py-1 rounded-md text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+                      >
+                        {unbinding ? "解除中…" : "解除绑定"}
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground italic px-3 py-2 rounded-lg border border-dashed border-border">
+                    未绑定。去「转账建议 → 未配对转账」面板可手动绑定对手账户。
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* Tags */}
             <div>

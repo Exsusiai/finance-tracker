@@ -100,6 +100,39 @@ async def get_scheduler_status(_token: _auth):
     return ApiSuccess(data=scheduler_status())
 
 
+@router.post("/refresh-matching", response_model=ApiSuccess[dict])
+async def refresh_matching(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-run the full ingestion pipeline against the entire database.
+
+    Mental model: "re-import every PDF from scratch" — re-detect type,
+    re-classify category, re-pair across accounts, re-enqueue anything still
+    untagged. Idempotent.
+
+    Manual edits are respected: rows with `source='manual'` or `user_note`
+    are NEVER re-classified — those carry an authoritative user choice.
+
+    The 10-step pipeline lives in `services/refresh_matching/`; this route
+    just wraps it in a savepoint and resets counters on exception so
+    callers don't see mid-flight numbers in error logs.
+    """
+    from app.services.refresh_matching import RefreshContext, run_full_pipeline
+
+    ctx = RefreshContext(db=db)
+    try:
+        async with db.begin_nested():
+            await run_full_pipeline(ctx)
+    except Exception:
+        for k in ctx.summary:
+            ctx.summary[k] = 0
+        raise
+
+    return ApiSuccess(data=ctx.summary)
+
+
+
 @router.get("/backups", response_model=ApiSuccess[list[BackupInfo]])
 async def list_backups(
     _token: _auth,

@@ -4,21 +4,18 @@ import { useState } from "react";
 import { mutate as swrMutate } from "swr";
 import {
   ApiError,
+  type ApplyScope,
   type CategoryOut,
   type TransactionOut,
   updateTransaction,
 } from "@/lib/api";
+import { CategoryScopeDialog } from "@/components/category-scope-dialog";
 import { cn } from "@/lib/utils";
 
 /**
- * Compact "click to change category" button. Used in any tx list row to let
- * the user reclassify a transaction inline. Picking a category triggers the
- * backend's update path which:
- *   - learns a new rule from the description (`learn_from_user_assignment`)
- *   - cascades the new category to ALL other pending tx with the same desc
- *     (`apply_to_similar_pending`) — so the user only has to fix one of N
- *     identical rows
- *   - re-computes cash-flow snapshots for affected months
+ * Compact "click to change category" button. Picking a different category
+ * opens the scope dialog so the user can decide how the change propagates
+ * (single / all-same-name / disable-rule), with an optional note attached.
  *
  * After success we invalidate inbox / cashflow / balances / transactions
  * SWR caches so every page that's currently visible refreshes.
@@ -46,6 +43,11 @@ export function InlineCategoryPicker({
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Pending pick — shown in scope dialog. null id = "未分类" (clearing).
+  const [pending, setPending] = useState<{
+    categoryId: number | null;
+    type?: string;
+  } | null>(null);
 
   // Cross-kind switchable: list ALL of expense / income / transfer in one
   // dropdown, prefixed with their kind so the user can re-classify a row's
@@ -83,20 +85,39 @@ export function InlineCategoryPicker({
     if (onChanged) onChanged();
   };
 
-  const handlePick = async (id: number | null) => {
+  // User picked a category from the dropdown — stage it and open the
+  // scope dialog. We don't PATCH yet; the dialog confirms scope + note.
+  const handlePick = (id: number | null) => {
     setError(null);
+    if (id === tx.category_id) {
+      setEditing(false);
+      return;
+    }
+    let nextType: string | undefined;
+    if (id !== null) {
+      const picked = categories.find((c) => c.id === id);
+      if (picked && picked.kind !== tx.type) {
+        // User re-classified across kinds (e.g. expense → income). Flip the
+        // type so cash-flow/breakdown/inbox re-bucket this tx correctly.
+        nextType = picked.kind;
+      }
+    }
+    setPending({ categoryId: id, type: nextType });
+  };
+
+  const handleScopeConfirm = async (scope: ApplyScope, note: string | null) => {
+    if (!pending) return;
     setSaving(true);
     try {
-      const payload: { category_id: number | null; type?: string } = { category_id: id };
-      if (id !== null) {
-        const picked = categories.find((c) => c.id === id);
-        if (picked && picked.kind !== tx.type) {
-          // User re-classified across kinds (e.g. expense → income). Flip the
-          // type so cash-flow/breakdown/inbox re-bucket this tx correctly.
-          payload.type = picked.kind;
-        }
-      }
-      await updateTransaction(tx.id, payload);
+      const payload: {
+        category_id: number | null;
+        type?: string;
+        user_note?: string | null;
+      } = { category_id: pending.categoryId };
+      if (pending.type) payload.type = pending.type;
+      if ((note ?? null) !== (tx.user_note ?? null)) payload.user_note = note;
+      await updateTransaction(tx.id, payload, scope);
+      setPending(null);
       setEditing(false);
       refreshAfter();
     } catch (e) {
@@ -106,15 +127,28 @@ export function InlineCategoryPicker({
     }
   };
 
+  const dialog = pending !== null && (
+    <CategoryScopeDialog
+      open={true}
+      txId={tx.id}
+      newCategoryId={pending.categoryId}
+      initialNote={tx.user_note}
+      onConfirm={handleScopeConfirm}
+      onClose={() => {
+        if (!saving) setPending(null);
+      }}
+    />
+  );
+
   if (editing) {
     return (
       <div className="inline-flex flex-col gap-0.5">
         <select
           autoFocus
           disabled={saving}
-          value={tx.category_id ?? ""}
+          value={pending?.categoryId ?? tx.category_id ?? ""}
           onChange={(e) => handlePick(e.target.value ? Number(e.target.value) : null)}
-          onBlur={() => !saving && setEditing(false)}
+          onBlur={() => !saving && pending === null && setEditing(false)}
           className="px-1.5 py-0.5 text-xs rounded border border-primary bg-background focus:outline-none focus:ring-1 focus:ring-ring max-w-[200px]"
         >
           <option value="">— 未分类 —</option>
@@ -129,6 +163,7 @@ export function InlineCategoryPicker({
           ))}
         </select>
         {error && <span className="text-[10px] text-destructive">{error}</span>}
+        {dialog}
       </div>
     );
   }
@@ -139,7 +174,7 @@ export function InlineCategoryPicker({
     return (
       <button
         onClick={() => setEditing(true)}
-        title="点击修改分类（系统会自动归类同描述的所有条目）"
+        title="点击修改分类"
         className={cn(
           "text-[10px] px-1 py-0 rounded text-muted-foreground hover:text-primary transition-colors",
         )}
@@ -152,7 +187,7 @@ export function InlineCategoryPicker({
   return tx.category_name ? (
     <button
       onClick={() => setEditing(true)}
-      title="点击修改分类（系统会自动归类同描述的所有条目）"
+      title="点击修改分类"
       className="inline-block px-2 py-0.5 text-xs rounded-full bg-muted text-foreground hover:bg-primary/10 hover:text-primary transition-colors cursor-pointer"
     >
       {label}

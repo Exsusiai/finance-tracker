@@ -1,10 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { mutate as swrMutate } from "swr";
-import { useInbox, useCategories } from "@/lib/hooks";
-import { ApiError, confirmInboxItem, type CategoryOut, type TransactionOut } from "@/lib/api";
-import { invalidateTransactionGraph } from "@/lib/hooks";
+import { useInbox, useCategories, invalidateTransactionGraph } from "@/lib/hooks";
+import {
+  ApiError,
+  type ApplyScope,
+  confirmInboxItem,
+  type CategoryOut,
+  type TransactionOut,
+} from "@/lib/api";
+import { CategoryScopeDialog } from "@/components/category-scope-dialog";
 import { MarkTransferDialog } from "@/components/mark-transfer-dialog";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui-common";
@@ -24,18 +29,17 @@ export function InboxPanel() {
   const { data: categories } = useCategories();
   const [transferTx, setTransferTx] = useState<TransactionOut | null>(null);
 
+  // Use the canonical graph-wide invalidator. The previous hand-rolled
+  // predicate left out transfer-suggestions / transfer-unpaired / accounts /
+  // statements, so confirming an inbox item silently desynced those panels.
   const refreshAfterConfirm = () => {
     refreshInbox();
-    swrMutate(
-      (k) =>
-        typeof k === "string" &&
-        (k.startsWith("transactions") || k.startsWith("cashflow") || k.startsWith("balances")),
-      undefined,
-      { revalidate: true },
-    );
+    invalidateTransactionGraph();
   };
 
-  if (isLoading) return <LoadingSpinner />;
+  // Initial-load only. Background revalidation keeps the existing list
+  // on screen so the user doesn't lose scroll position after confirming.
+  if (isLoading && !items) return <LoadingSpinner />;
   if (!items || items.length === 0) {
     return (
       <div className="rounded-xl border border-border bg-card p-12 text-center">
@@ -117,13 +121,11 @@ interface InboxRowProps {
 
 function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowProps) {
   const [pickedCat, setPickedCat] = useState<number | null>(tx.category_id ?? null);
-  const [note, setNote] = useState<string>(tx.user_note ?? "");
-  const [showNote, setShowNote] = useState<boolean>(Boolean(tx.user_note));
+  const [scopeDialogOpen, setScopeDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isUserChange = pickedCat !== (tx.category_id ?? null);
-  const noteChanged = (note.trim() || null) !== (tx.user_note ?? null);
   const isTransfer = tx.type === "transfer";
 
   // Distinguish sub-account vs cross-bank transfer for the visual badge.
@@ -138,16 +140,43 @@ function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowPro
   // Filter inbox category dropdown by tx type (expense → expense cats only, etc.)
   const eligibleCategories = categories.filter((c) => c.kind === tx.type);
 
-  const handleConfirm = async () => {
+  // No category change: confirm straight through, no scope dialog needed.
+  const handleConfirmDirect = async () => {
+    setError(null);
+    try {
+      setSubmitting(true);
+      await confirmInboxItem(tx.id, { category_id: pickedCat });
+      invalidateTransactionGraph();
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "确认失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleConfirmClick = () => {
+    if (isUserChange && pickedCat !== null) {
+      setScopeDialogOpen(true);
+    } else {
+      void handleConfirmDirect();
+    }
+  };
+
+  // After user picks a scope in the dialog: send the request and close.
+  const handleScopeConfirm = async (scope: ApplyScope, note: string | null) => {
     setError(null);
     try {
       setSubmitting(true);
       const payload: { category_id: number | null; user_note?: string | null } = {
         category_id: pickedCat,
       };
-      if (noteChanged) payload.user_note = note.trim() || null;
-      await confirmInboxItem(tx.id, payload);
+      if ((note ?? null) !== (tx.user_note ?? null)) {
+        payload.user_note = note;
+      }
+      await confirmInboxItem(tx.id, payload, scope);
       invalidateTransactionGraph();
+      setScopeDialogOpen(false);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "确认失败");
@@ -188,29 +217,10 @@ function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowPro
         {tx.account_name && (
           <div className="text-[10px] text-muted-foreground mt-0.5">{tx.account_name}</div>
         )}
-        {showNote ? (
-          <div className="mt-2">
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="备注（保存后系统会用作 AI 分类时的线索）"
-              rows={2}
-              className="w-full max-w-[320px] px-2 py-1 text-[11px] rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground/70 focus:outline-none focus:ring-2 focus:ring-ring resize-y"
-            />
-            {noteChanged && (
-              <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-                💡 备注会作为分类线索被记住
-              </div>
-            )}
+        {tx.user_note && (
+          <div className="mt-1 text-[10px] text-muted-foreground italic max-w-[320px] truncate" title={tx.user_note}>
+            备注：{tx.user_note}
           </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setShowNote(true)}
-            className="mt-1 text-[10px] text-muted-foreground hover:text-primary transition-colors"
-          >
-            + 备注
-          </button>
         )}
       </td>
       <td className={cn(
@@ -249,14 +259,14 @@ function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowPro
         )}
         {isUserChange && (
           <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
-            ⚡ 确认后会被记住
+            ⚡ 确认时可选择应用范围
           </div>
         )}
       </td>
       <td className="px-3 py-2.5 text-right whitespace-nowrap">
         <div className="flex flex-col items-end gap-1">
           <button
-            onClick={handleConfirm}
+            onClick={handleConfirmClick}
             disabled={submitting}
             className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
@@ -278,6 +288,14 @@ function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowPro
           <div className="text-[10px] text-destructive mt-1">{error}</div>
         )}
       </td>
+      <CategoryScopeDialog
+        open={scopeDialogOpen}
+        txId={tx.id}
+        newCategoryId={pickedCat}
+        initialNote={tx.user_note}
+        onConfirm={handleScopeConfirm}
+        onClose={() => { if (!submitting) setScopeDialogOpen(false); }}
+      />
     </tr>
   );
 }

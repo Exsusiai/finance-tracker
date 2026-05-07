@@ -102,9 +102,18 @@ export function TransactionDetail({
                 setIsEditing(false);
                 onUpdate();
               }}
+              // After unbind, the read-only DetailRow underneath still
+              // renders the now-stale counter_account_id from the parent's
+              // prop. Closing the whole panel forces a fresh open if the
+              // user wants to inspect the updated state.
+              onUnbindSuccess={() => {
+                onUpdate();
+                onClose();
+              }}
               initialData={{
                 id: tx.id,
                 account_id: tx.account_id,
+                counter_account_id: tx.counter_account_id,
                 category_id: tx.category_id,
                 occurred_at: tx.occurred_at,
                 amount: tx.amount,
@@ -157,7 +166,16 @@ export function TransactionDetail({
                 {tx.raw_description && tx.raw_description !== tx.description && (
                   <DetailRow label="原始描述" value={tx.raw_description} />
                 )}
-                {tx.counterparty && <DetailRow label="对方" value={tx.counterparty} />}
+                {tx.counterparty && <DetailRow label="对方姓名" value={tx.counterparty} />}
+                {tx.type === "transfer" && tx.counter_account_id && (
+                  <DetailRow
+                    label="对手账户"
+                    value={
+                      accounts.find((a) => a.id === tx.counter_account_id)?.name
+                      ?? `#${tx.counter_account_id}`
+                    }
+                  />
+                )}
                 {tx.location && <DetailRow label="地点" value={tx.location} />}
                 <DetailRow label="来源" value={SOURCE_LABELS[tx.source] || tx.source} />
                 {tx.tags.length > 0 && (

@@ -1,7 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useAccounts, useTransactions, invalidateTransactionGraph } from "@/lib/hooks";
+import {
+  useAccounts,
+  useCategories,
+  useTransactions,
+  invalidateTransactionGraph,
+} from "@/lib/hooks";
 import { ApiError, markAsTransfer, type TransactionOut } from "@/lib/api";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 
@@ -20,10 +25,20 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
   const [direction, setDirection] = useState<"out" | "in" | null>(null);
   const [counterAccountId, setCounterAccountId] = useState<number | "external" | null>(null);
   const [counterTxId, setCounterTxId] = useState<number | null>(null);
+  // Pre-fill if tx already has a transfer-kind category assigned (e.g. matcher
+  // resolved 跨行划转), otherwise force the user to pick one before submitting.
+  const [categoryId, setCategoryId] = useState<number | null>(
+    tx.category_id ?? null,
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const { data: accounts } = useAccounts(true);
+  const { data: categories } = useCategories();
+  const transferCategories = useMemo(
+    () => (categories ?? []).filter((c) => c.kind === "transfer"),
+    [categories],
+  );
 
   // Pull candidate counter-leg transactions: same amount, opposite direction,
   // within ±3 days.
@@ -58,10 +73,25 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
       setError("请选择「转出」或「转入」");
       return;
     }
+    if (categoryId == null) {
+      setError("请选择转账分类");
+      return;
+    }
     setError(null);
     try {
       setSubmitting(true);
-      await markAsTransfer(tx.id, { counterTransactionId: counterTxId ?? undefined, direction: direction ?? undefined });
+      // Only send counter_account_id when (a) we have one, (b) it's an
+      // internal account, and (c) we don't already have a counter tx.
+      // Sending it together with counterTransactionId would conflict — the
+      // backend uses counter_transaction_id when both are present.
+      const internalCounterAccount =
+        typeof counterAccountId === "number" ? counterAccountId : undefined;
+      await markAsTransfer(tx.id, {
+        counterTransactionId: counterTxId ?? undefined,
+        counterAccountId: counterTxId ? undefined : internalCounterAccount,
+        direction: direction ?? undefined,
+        categoryId,
+      });
       invalidateTransactionGraph();
       onSuccess();
     } catch (e) {
@@ -131,6 +161,35 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
               </span>
             </button>
           </div>
+        </div>
+
+        {/* Transfer category — required */}
+        <div className="mb-4">
+          <p className="text-xs font-medium mb-1.5">
+            转账分类 <span className="text-destructive">*</span>
+          </p>
+          <select
+            value={categoryId ?? ""}
+            onChange={(e) => setCategoryId(e.target.value ? Number(e.target.value) : null)}
+            className={cn(
+              "w-full px-2.5 py-1.5 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-ring",
+              categoryId == null ? "border-amber-500/50" : "border-border",
+            )}
+          >
+            <option value="">— 请选择 —</option>
+            {groupedTransferCategories(transferCategories).map(([parent, kids]) => (
+              <optgroup key={parent.id} label={parent.name}>
+                {kids.map((k) => (
+                  <option key={k.id} value={k.id}>
+                    {k.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            内部储蓄 = 同银行子账户互转 · 跨行划转 = 不同银行间 · 信用卡还款 = 银行→信用卡
+          </p>
         </div>
 
         {/* Counter-account picker */}
@@ -211,7 +270,7 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
           </button>
           <button
             onClick={handleConfirm}
-            disabled={submitting || !direction}
+            disabled={submitting || !direction || categoryId == null}
             className="flex-1 px-3 py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
             {submitting ? "保存中…" : "确认"}
@@ -220,6 +279,22 @@ export function MarkTransferDialog({ tx, onClose, onSuccess }: Props) {
       </div>
     </div>
   );
+}
+
+/** Group flat transfer-kind categories by their parent for `<optgroup>`. */
+function groupedTransferCategories(
+  cats: { id: number; name: string; parent_id: number | null }[],
+): Array<[
+  { id: number; name: string },
+  { id: number; name: string }[],
+]> {
+  const parents = cats.filter((c) => c.parent_id == null);
+  return parents
+    .map((p) => [p, cats.filter((c) => c.parent_id === p.id)] as [
+      { id: number; name: string },
+      { id: number; name: string }[],
+    ])
+    .filter(([, kids]) => kids.length > 0);
 }
 
 function dateRange(occurred_at: string, deltaDays: number): { from: string; to: string } {

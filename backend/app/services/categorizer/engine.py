@@ -16,7 +16,7 @@ import concurrent.futures
 import re
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import InvalidInputError
@@ -199,8 +199,11 @@ async def apply_to_similar_pending(
       - rows already in the target category (no-op, avoids needless updates)
       - rows the user manually entered (`source='manual'`) — those carry a
         more authoritative classification choice we shouldn't overwrite
-      - transfer-tagged rows (subaccount / cross-bank pairs) — re-categorising
-        them would make no sense; they're not income/expense
+      - rows of a different type than the seed — the same-type filter
+        prevents accidentally re-typing income↔expense↔transfer siblings;
+        within the same type, transfer→transfer cascading is allowed (so
+        e.g. setting a row to 跨行划转 also classifies all same-description
+        transfer siblings)
 
     Returns the count of rows updated. Caller must recompute cash-flow snapshots.
     """
@@ -239,11 +242,11 @@ async def apply_to_similar_pending(
                 Transaction.category_id != category_id,
             ),
             Transaction.source != "manual",
-            Transaction.type != "transfer",
-            # Only cascade within the same kind. When the user crosses kinds
+            # Only cascade within the same type. When the user crosses kinds
             # (e.g. expense → income on this row), don't drag other identical
             # rows along — they may have legitimately been the original kind
             # and rewriting their type would silently flip their sign.
+            # transfer → transfer cascading is intentionally allowed.
             Transaction.type == seed_tx.type,
         )
     )
@@ -258,6 +261,84 @@ async def apply_to_similar_pending(
     if count:
         await db.flush()
         logger.info("apply_to_similar", seed_id=seed_tx.id, count=count, desc=norm_desc[:60])
+    return count
+
+
+async def count_similar_pending(
+    db: AsyncSession,
+    seed_tx: Transaction,
+    category_id: int,
+) -> int:
+    """Preview helper — how many tx would `apply_to_similar_pending` touch.
+
+    Mirrors the filter clause of `apply_to_similar_pending` exactly so the
+    UI's "应用到所有同名（共 N 条）" count matches what would actually change.
+    """
+    if not seed_tx.description:
+        return 0
+    norm_desc = seed_tx.description.strip()
+    if not norm_desc:
+        return 0
+    stmt = (
+        select(func.count(Transaction.id))
+        .where(
+            Transaction.id != seed_tx.id,
+            Transaction.deleted_at.is_(None),
+            Transaction.description == norm_desc,
+            or_(
+                Transaction.category_id.is_(None),
+                Transaction.category_id != category_id,
+            ),
+            Transaction.source != "manual",
+            # Same-type filter is sufficient — when seed is a transfer, we
+            # cascade to other transfers; when seed is expense, only expenses.
+            Transaction.type == seed_tx.type,
+        )
+    )
+    return int((await db.execute(stmt)).scalar() or 0)
+
+
+def derive_keyword_for_tx(tx: Transaction) -> tuple[str, str] | None:
+    """Return `(field, keyword)` that would be learned, or None.
+
+    Public wrapper around _extract_keyword so the API layer can preview
+    or scope rule operations to the same keyword the learner would use.
+    """
+    source_field, source_value = "description", tx.description or ""
+    if tx.counterparty and len(tx.counterparty) >= _MIN_LEARN_LEN:
+        source_field, source_value = "counterparty", tx.counterparty
+    keyword = _extract_keyword(source_value)
+    if not keyword:
+        return None
+    return source_field, keyword
+
+
+async def disable_rules_for_keyword(
+    db: AsyncSession,
+    seed_tx: Transaction,
+) -> int:
+    """Disable any enabled rule whose pattern == seed_tx's learnable keyword.
+
+    Used by `apply_scope=never` so future imports of the same merchant text
+    won't be auto-classified. Returns the count of rules disabled.
+    """
+    derived = derive_keyword_for_tx(seed_tx)
+    if derived is None:
+        return 0
+    field, keyword = derived
+    stmt = select(CategorizationRule).where(
+        CategorizationRule.pattern.ilike(keyword),
+        CategorizationRule.field == field,
+        CategorizationRule.enabled.is_(True),
+    )
+    rules = (await db.execute(stmt)).scalars().all()
+    count = 0
+    for r in rules:
+        r.enabled = False
+        count += 1
+    if count:
+        await db.flush()
+        logger.info("rules_disabled_by_user", keyword=keyword, count=count)
     return count
 
 
@@ -301,14 +382,19 @@ async def learn_from_user_assignment(
         return {"action": "bumped", "rule_id": existing.id, "keyword": keyword, "reason": ""}
 
     # Check for a same-keyword rule pointing to a DIFFERENT category — that's a conflict.
+    # Use .first() instead of .scalar_one_or_none() — historical dirty data
+    # could leave more than one rule with the same (pattern, field) but
+    # different category_ids; .scalar_one_or_none() would crash with
+    # MultipleResultsFound. We only need ONE conflict to disable, the
+    # lifespan dedup migration handles the rest.
     conflict_q = await db.execute(
         select(CategorizationRule).where(
             CategorizationRule.pattern.ilike(keyword),
             CategorizationRule.field == source_field,
             CategorizationRule.category_id != new_category_id,
-        )
+        ).limit(1)
     )
-    conflict = conflict_q.scalar_one_or_none()
+    conflict = conflict_q.scalars().first()
     if conflict:
         # User is overriding an existing rule. Disable the old one, create the new.
         conflict.enabled = False

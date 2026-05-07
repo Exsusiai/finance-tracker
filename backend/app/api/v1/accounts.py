@@ -205,7 +205,10 @@ async def _reclassify_pending_for_subaccounts(
         return 0
 
     from app.services.cashflow import parse_period, recompute_for_periods
-    from app.services.transfer_matcher.engine import _merge_meta
+    from app.services.transfer_matcher.engine import _merge_meta, _resolve_transfer_category
+
+    # Resolve once — the lookup is constant across the loop.
+    subaccount_cat_id = await _resolve_transfer_category(db, kind="subaccount")
 
     affected_periods: set[tuple[int, int]] = set()
     matched = 0
@@ -222,6 +225,10 @@ async def _reclassify_pending_for_subaccounts(
             continue
         tx.type = "transfer"
         tx.is_pending = False
+        # Without a category these rows would re-enter the inbox via the
+        # legacy-transfer migration in main.py lifespan.
+        if subaccount_cat_id is not None:
+            tx.category_id = subaccount_cat_id
         tx.metadata_json = _merge_meta(
             tx.metadata_json,
             {"subaccount": True, "matched": hit, "source": "user_list"},

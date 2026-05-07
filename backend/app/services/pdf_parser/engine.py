@@ -61,47 +61,47 @@ async def parse_pdf_statement(
         raw_text, page_words = await asyncio.to_thread(_extract_text_and_words_sync, content)
     except Exception as e:
         return _empty_result(error=f"Failed to extract text: {e}")
-    # Stash for transaction-level use (read in `_make_tx`)
-    _SUBACCOUNT_USER_NAMES.clear()
-    if subaccount_names:
-        _SUBACCOUNT_USER_NAMES.extend(n.strip().lower() for n in subaccount_names if n.strip())
+    # Per-task context (async-safe — replaces the old module-level list)
+    _names_token = _set_subaccount_names(list(subaccount_names or []))
+    try:
+        detected_bank = _detect_bank(raw_text)
 
-    detected_bank = _detect_bank(raw_text)
+        # Revolut: column-aware parser (uses word X-coordinates to distinguish
+        # Money out / Money in columns — pure-text regex can't tell them apart).
+        if detected_bank == "revolut":
+            transactions = _parse_revolut_columns(page_words)
+        elif detected_bank:
+            parser_func = _BANK_PARSERS.get(detected_bank, _parse_generic)
+            transactions = parser_func(raw_text)
+        else:
+            transactions = _parse_generic(raw_text)
 
-    # Revolut: column-aware parser (uses word X-coordinates to distinguish
-    # Money out / Money in columns — pure-text regex can't tell them apart).
-    if detected_bank == "revolut":
-        transactions = _parse_revolut_columns(page_words)
-    elif detected_bank:
-        parser_func = _BANK_PARSERS.get(detected_bank, _parse_generic)
-        transactions = parser_func(raw_text)
-    else:
-        transactions = _parse_generic(raw_text)
+        # 2026-05-06: parser external_ids look like "tfbank_1" / "n26_3" — they
+        # restart from seq=1 in every PDF, so two TFBank statements (e.g. March
+        # and April) BOTH emit "tfbank_1", which collides with the partial
+        # unique index `(account_id, external_id) WHERE deleted_at IS NULL`
+        # the second time around. Post-process the parser output to prefix the
+        # external_id with a per-PDF disambiguator (the SHA-256 prefix of the
+        # PDF bytes) so two different PDFs can never produce the same
+        # external_id even when their seqs overlap.
+        import hashlib
 
-    # 2026-05-06: parser external_ids look like "tfbank_1" / "n26_3" — they
-    # restart from seq=1 in every PDF, so two TFBank statements (e.g. March
-    # and April) BOTH emit "tfbank_1", which collides with the partial
-    # unique index `(account_id, external_id) WHERE deleted_at IS NULL`
-    # the second time around. Post-process the parser output to prefix the
-    # external_id with a per-PDF disambiguator (the SHA-256 prefix of the
-    # PDF bytes) so two different PDFs can never produce the same
-    # external_id even when their seqs overlap.
-    import hashlib
+        pdf_disambiguator = hashlib.sha256(content).hexdigest()[:12]
+        for tx in transactions:
+            eid = tx.get("external_id")
+            if eid:
+                tx["external_id"] = f"{eid}_{pdf_disambiguator}"
 
-    pdf_disambiguator = hashlib.sha256(content).hexdigest()[:12]
-    for tx in transactions:
-        eid = tx.get("external_id")
-        if eid:
-            tx["external_id"] = f"{eid}_{pdf_disambiguator}"
-
-    return {
-        "detected_bank": detected_bank,
-        "parser_version": "0.3.1",
-        "statement_period": _detect_period(raw_text),
-        "raw_text": raw_text[:10000],
-        "error": None,
-        "transactions": transactions,
-    }
+        return {
+            "detected_bank": detected_bank,
+            "parser_version": "0.3.1",
+            "statement_period": _detect_period(raw_text),
+            "raw_text": raw_text[:10000],
+            "error": None,
+            "transactions": transactions,
+        }
+    finally:
+        _reset_subaccount_names(_names_token)
 
 
 def _extract_text_sync(content: bytes) -> str:
@@ -252,8 +252,31 @@ _SUBACCOUNT_KEYWORDS = (
 # A↔B internal transfer. It must flow through column-based income/expense
 # detection so it actually credits the bank's overall balance.
 
-# Mutable list filled by `parse_pdf_statement` from the caller-supplied
-# per-account `subaccount_names`. Lower-cased.
+# Per-task subaccount-name context. Was a module-level mutable list, which
+# raced under concurrent ingestion (worker A's account names polluting
+# worker B's classification). ContextVar gives every asyncio task a fresh
+# copy without forcing every parser/_make_tx call site to add a parameter.
+import contextvars as _ctxvars  # noqa: E402
+
+_SUBACCOUNT_NAMES_VAR: _ctxvars.ContextVar[list[str]] = _ctxvars.ContextVar(
+    "pdf_parser_subaccount_names", default=[]
+)
+
+
+def _set_subaccount_names(names: list[str]) -> _ctxvars.Token:
+    """Bind a per-task subaccount-name list. Caller must `reset(token)`
+    in a finally to keep the context stack clean."""
+    return _SUBACCOUNT_NAMES_VAR.set(
+        [n.strip().lower() for n in names if str(n).strip()]
+    )
+
+
+def _reset_subaccount_names(token: _ctxvars.Token) -> None:
+    _SUBACCOUNT_NAMES_VAR.reset(token)
+
+
+# Backward-compatible empty list for any external reader that imported the
+# old name. Reading this no longer reflects per-task state.
 _SUBACCOUNT_USER_NAMES: list[str] = []
 
 # Cross-bank transfer cues (description-level). When matched we mark the row as
@@ -300,8 +323,10 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
     # which would otherwise prevent `"to instant access savings"` from matching).
     d = re.sub(r"[\"'`'']", "", desc.lower())
     d = re.sub(r"\s+", " ", d)
-    # 1) User-maintained per-account sub-account names (highest precedence)
-    for name in _SUBACCOUNT_USER_NAMES:
+    # 1) User-maintained per-account sub-account names (highest precedence,
+    # read from a per-task ContextVar set by `parse_pdf_statement` /
+    # callers — async-safe).
+    for name in _SUBACCOUNT_NAMES_VAR.get():
         if name in d:
             return "transfer", {"subaccount": True, "matched": name, "source": "user_list"}
     # 2) Hard-coded common sub-account keywords

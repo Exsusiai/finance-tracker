@@ -18,6 +18,7 @@ const _TX_GRAPH_KEY_PREFIXES = [
   "balances",           // useBalances()
   "cashflow",           // useCashFlowMonthly / by-category / timeseries
   "transfer-suggestions",
+  "transfer-unpaired",
   "accounts",           // re-balanced after delete / status changes
 ];
 const _TX_GRAPH_EXACT_KEYS = new Set([
@@ -27,14 +28,21 @@ const _TX_GRAPH_EXACT_KEYS = new Set([
 ]);
 
 export function invalidateTransactionGraph(): Promise<unknown> {
+  // Trigger background revalidation WITHOUT clearing the cached data.
+  // The previous form passed `undefined` as the new data, which wiped the
+  // cache → consumers' `isLoading` flipped back to `true` for an instant
+  // → the entire panel re-rendered as a `<LoadingSpinner />`, losing the
+  // user's scroll position after every confirm click. Passing a function
+  // that returns the current data unchanged keeps the cache populated
+  // while SWR fetches fresh data in the background.
   return globalMutate(
     (key) => {
       if (typeof key !== "string") return false;
       if (_TX_GRAPH_EXACT_KEYS.has(key)) return true;
       return _TX_GRAPH_KEY_PREFIXES.some((p) => key.startsWith(p));
     },
-    undefined,
-    { revalidate: true },
+    (current: unknown) => current,
+    { revalidate: true, populateCache: true },
   );
 }
 import {
@@ -55,6 +63,7 @@ import {
   fetchFxRates,
   fetchInbox,
   fetchTransferSuggestions,
+  fetchUnpairedTransfers,
 } from "@/lib/api";
 import type { TransactionFilters, TransactionOut } from "@/lib/api";
 
@@ -179,6 +188,14 @@ export function useTransferSuggestions() {
   return useSWR(
     "transfer-suggestions",
     () => fetchTransferSuggestions(),
+    { revalidateOnFocus: false },
+  );
+}
+
+export function useUnpairedTransfers() {
+  return useSWR(
+    "transfer-unpaired",
+    () => fetchUnpairedTransfers(),
     { revalidateOnFocus: false },
   );
 }

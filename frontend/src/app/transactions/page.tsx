@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   useTransactions,
   useCategories,
@@ -13,7 +13,13 @@ import {
   deleteTransaction,
   ApiError,
 } from "@/lib/api";
-import { formatCurrency, formatDate, cn } from "@/lib/utils";
+import { formatCurrency, formatDate, periodLabel, cn } from "@/lib/utils";
+import {
+  currentPeriod,
+  monthDateRange,
+  recentPeriods,
+  shiftPeriod,
+} from "@/lib/time-range";
 import { LoadingSpinner, ErrorDisplay } from "@/components/ui-common";
 import { TransactionForm } from "@/components/transaction-form";
 import { TransactionDetail } from "@/components/transaction-detail";
@@ -22,9 +28,14 @@ import { PdfImportPanel } from "@/components/pdf-import-panel";
 import { InboxPanel } from "@/components/inbox-panel";
 import { CategoryBreakdownView } from "@/components/category-breakdown-view";
 import { TransferSuggestionsPanel } from "@/components/transfer-suggestions-panel";
+import { RefreshMatchingButton } from "@/components/refresh-matching-button";
 import { InlineCategoryPicker } from "@/components/inline-category-picker";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { useInbox, useTransferSuggestions } from "@/lib/hooks";
+import {
+  useInbox,
+  useTransferSuggestions,
+  useUnpairedTransfers,
+} from "@/lib/hooks";
 
 type SortField = "occurred_at" | "amount" | "category";
 type SortDir = "asc" | "desc";
@@ -52,6 +63,10 @@ export default function TransactionsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [accountId, setAccountId] = useState<number | undefined>();
   const [categoryId, setCategoryId] = useState<number | undefined>();
+  // The list defaults to a single-month window, navigable via ◀ / ▶. Picking
+  // 全部 (period=null) drops the month filter so the user can use the explicit
+  // date-range inputs for arbitrary windows.
+  const [period, setPeriod] = useState<string | null>(() => currentPeriod());
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
@@ -62,21 +77,25 @@ export default function TransactionsPage() {
   const [selectedTx, setSelectedTx] = useState<TransactionOut | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // ─── Data fetching ────────────────────────────────────────────────────
+  // When a month is selected its calendar bounds win; the explicit date inputs
+  // are only honoured in 全部 mode so the two controls don't fight each other.
   const filters = useMemo<TransactionFilters>(() => {
+    const monthBounds = period ? monthDateRange(period) : null;
     const f: TransactionFilters = {
       search: search || undefined,
       type: typeFilter || undefined,
       account_id: accountId,
       category_id: categoryId,
-      from_date: fromDate || undefined,
-      to_date: toDate || undefined,
+      from_date: monthBounds?.from || fromDate || undefined,
+      to_date: monthBounds?.to || toDate || undefined,
       source: sourceFilter || undefined,
-      limit: 100,
+      limit: 200,
     };
     return f;
-  }, [search, typeFilter, accountId, categoryId, fromDate, toDate, sourceFilter]);
+  }, [search, typeFilter, accountId, categoryId, period, fromDate, toDate, sourceFilter]);
 
   const {
     data: txResponse,
@@ -90,7 +109,12 @@ export default function TransactionsPage() {
   const { data: inboxItems } = useInbox(200);
   const inboxCount = inboxItems?.length ?? 0;
   const { data: transferSuggestions } = useTransferSuggestions();
-  const suggestionCount = transferSuggestions?.length ?? 0;
+  const { data: unpairedTransfers } = useUnpairedTransfers();
+  // The 转账建议 tab now bundles both paired-candidate suggestions AND
+  // unpaired single-leg transfers (e.g. credit-card repayments missing on
+  // statements like TF Bank). Surface the combined count on the badge.
+  const suggestionCount =
+    (transferSuggestions?.length ?? 0) + (unpairedTransfers?.length ?? 0);
 
   // ─── Derived data ─────────────────────────────────────────────────────
   const transactions = useMemo(() => {
@@ -127,6 +151,7 @@ export default function TransactionsPage() {
     setTypeFilter("");
     setAccountId(undefined);
     setCategoryId(undefined);
+    setPeriod(currentPeriod());
     setFromDate("");
     setToDate("");
     setSourceFilter("");
@@ -147,13 +172,16 @@ export default function TransactionsPage() {
   const handleDelete = useCallback(
     async (id: number) => {
       try {
+        setDeleteError(null);
         await deleteTransaction(id);
         setDeleteConfirm(null);
         setSelectedTx(null);
         invalidateTransactionGraph();
         refresh();
       } catch (e) {
-        console.error("Delete failed:", e);
+        // Surface the failure — silently swallowing left users staring at
+        // an unchanged row wondering why "delete" did nothing.
+        setDeleteError(e instanceof ApiError ? e.message : "删除失败，请重试");
       }
     },
     [refresh]
@@ -176,16 +204,22 @@ export default function TransactionsPage() {
                 ? ` · ${accounts.find((a) => a.id === accountId)!.name}`
                 : ""}
             </p>
+            {deleteError && (
+              <p className="text-xs text-destructive mt-1">{deleteError}</p>
+            )}
           </div>
-          <button
-            onClick={() => setShowCreateForm(true)}
-            className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-          >
-            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            手动记账
-          </button>
+          <div className="flex items-center gap-2">
+            <RefreshMatchingButton />
+            <button
+              onClick={() => setShowCreateForm(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              手动记账
+            </button>
+          </div>
         </div>
 
         {/* ─── Tabs ────────────────────────────────────────────────── */}
@@ -225,6 +259,9 @@ export default function TransactionsPage() {
           </TabsContent>
 
           <TabsContent value="list">
+        {/* ─── Month navigator ────────────────────────────────────── */}
+        <MonthNav period={period} onChange={setPeriod} />
+
         {/* ─── Filters ─────────────────────────────────────────────── */}
         <div className="rounded-xl border border-border bg-card p-4 mb-4 space-y-3">
           {/* Row 1: Search + Type + Account */}
@@ -273,23 +310,29 @@ export default function TransactionsPage() {
             </select>
           </div>
 
-          {/* Row 2: Date range + Source + Category */}
+          {/* Row 2: Date range (only in 全部 mode) + Source */}
           <div className="flex flex-col sm:flex-row gap-3">
-            <div className="flex items-center gap-2">
-              <input
-                type="date"
-                value={fromDate}
-                onChange={(e) => setFromDate(e.target.value)}
-                className="px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-              <span className="text-muted-foreground text-sm">—</span>
-              <input
-                type="date"
-                value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
-                className="px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-            </div>
+            {period === null ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => setFromDate(e.target.value)}
+                  className="px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <span className="text-muted-foreground text-sm">—</span>
+                <input
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => setToDate(e.target.value)}
+                  className="px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </div>
+            ) : (
+              <div className="text-xs text-muted-foreground self-center">
+                日期范围由月份导航控制（切到「全部」可使用自定义日期）
+              </div>
+            )}
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
@@ -574,6 +617,91 @@ function TransactionRow({
           {tx.account_name}
         </span>
       </div>
+    </div>
+  );
+}
+
+// ─── Month Navigator ─────────────────────────────────────────────────────
+
+interface MonthNavProps {
+  period: string | null;
+  onChange: (p: string | null) => void;
+}
+
+// Computed once at module load — `recentPeriods(12)` is pure and the result
+// is stable for the session (today's "last 12 months" doesn't change while
+// the page is open). Lifting it out of the component avoids a useMemo on
+// every mount.
+const _RECENT_12_MONTHS = recentPeriods(12);
+
+function MonthNav({ period, onChange }: MonthNavProps) {
+  const months = _RECENT_12_MONTHS;
+  const isAll = period === null;
+
+  // ←/→ shortcuts: shift the selected month, but only when the focus
+  // is on a non-input element. Without this guard, typing in a search
+  // box or date picker would jump months when the caret moves.
+  useEffect(() => {
+    if (isAll) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) {
+          return;
+        }
+      }
+      if (e.key === "ArrowLeft") {
+        onChange(shiftPeriod(period!, -1));
+      } else if (e.key === "ArrowRight") {
+        onChange(shiftPeriod(period!, 1));
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [period, isAll, onChange]);
+
+  return (
+    <div className="rounded-xl border border-border bg-card px-3 py-2 mb-3 flex items-center gap-2 flex-wrap">
+      <button
+        onClick={() => onChange(period ? shiftPeriod(period, -1) : currentPeriod())}
+        disabled={isAll}
+        title="上个月（← 键）"
+        className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        aria-label="上个月"
+      >
+        ◀
+      </button>
+      <select
+        value={period ?? ""}
+        onChange={(e) => onChange(e.target.value || null)}
+        className="px-2.5 py-1.5 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring tabular-nums min-w-[140px]"
+      >
+        <option value="">全部时间</option>
+        {months.map((m) => (
+          <option key={m} value={m}>
+            {periodLabel(m)}
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={() => onChange(period ? shiftPeriod(period, 1) : currentPeriod())}
+        disabled={isAll}
+        title="下个月（→ 键）"
+        className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        aria-label="下个月"
+      >
+        ▶
+      </button>
+      {!isAll && (
+        <button
+          onClick={() => onChange(currentPeriod())}
+          className="ml-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          回到本月
+        </button>
+      )}
     </div>
   );
 }

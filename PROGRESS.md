@@ -1,13 +1,22 @@
 # Finance Tracker — 项目进度
 
-> 修订日期: 2026-05-06
+> 修订日期: 2026-05-07
 > 根据"是否真正闭环并验证过"打分；详细分析见 `docx/REQUIREMENT_GAP.md`，剩余优先级见 `docx/ROADMAP.md`。
 
 ## 项目信息
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` branch
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ **Sprint 0+1+2+3+4 全部完成**（review V3 14 项核查；按用户约定修了 7 项 FIX-19~25 P0/P1+安全；5 项半成品/UX 等子系统启用时一起做）。`pytest backend/tests/ --ignore=test_api.py` → **75 passed**。下一步：P1-4（链上钱包）→ P1-1（LLM）
+- **当前阶段**: ✅ Sprint 0+1+2+3+4 完成 + 2026-05-06/07 UX 改造（详见 `docx/WORKLOG_2026-05-07.md`）。下一步：架构审查（agent 评估中）→ 修高优 bug → P1-4（链上钱包）→ P1-1（LLM）
+
+## 2026-05-07 新交付速览
+12 项功能（详见 [docx/WORKLOG_2026-05-07.md](docx/WORKLOG_2026-05-07.md)）：
+- CategoryScopeDialog · MarkTransferDialog 强制分类 · 子账户单边自动分类
+- 删除「信用卡还款」合并到「跨行划转」 · 交易记录月份导航
+- 「未配对转账」面板 + 手动绑定（信用卡缺端场景）
+- 全局「↻ 重新匹配」按钮（9 步流水线）
+- 编辑表单显示对手账户 + 解除绑定 · delete/refresh 孤儿指针清理
+- Counter-leg 智能绑定（避免重复镜像） · matcher 双向兜底
 
 ---
 

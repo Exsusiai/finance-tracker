@@ -331,6 +331,12 @@ export interface TransactionListResponse {
   meta: TransactionListMeta;
 }
 
+/** Mirrors backend TransactionType (expense/income/transfer/adjustment).
+ *  Kept as a string-literal union so IDEs catch missing branches when
+ *  switching on tx.type — the previous bare `string` typing meant any
+ *  comparison was a free-for-all. */
+export type TransactionType = "expense" | "income" | "transfer" | "adjustment";
+
 export interface TransactionOut {
   id: number;
   account_id: number;
@@ -344,7 +350,7 @@ export interface TransactionOut {
   currency: string;
   fx_rate_to_base: string | null;
   base_amount: string | null;
-  type: string;
+  type: TransactionType;
   description: string | null;
   raw_description: string | null;
   counterparty: string | null;
@@ -429,14 +435,31 @@ export async function createTransaction(data: TransactionCreateInput): Promise<T
   });
 }
 
+/** How a manual category change should propagate.
+ *  - "all":    create/strengthen rule + cascade to identical-description siblings (default)
+ *  - "single": skip both — one-off correction only
+ *  - "never":  skip both AND disable any existing auto-rule for this keyword
+ */
+export type ApplyScope = "all" | "single" | "never";
+
 export async function updateTransaction(
   id: number,
-  data: TransactionUpdateInput
+  data: TransactionUpdateInput,
+  applyScope?: ApplyScope,
 ): Promise<TransactionOut> {
-  return request(`/api/v1/transactions/${id}`, {
+  const qs = applyScope ? `?apply_scope=${applyScope}` : "";
+  return request(`/api/v1/transactions/${id}${qs}`, {
     method: "PATCH",
     body: JSON.stringify(data),
   });
+}
+
+export async function fetchSimilarCount(
+  id: number,
+  categoryId?: number | null,
+): Promise<{ count: number; keyword: string | null }> {
+  const qs = categoryId != null ? `?category_id=${categoryId}` : "";
+  return request(`/api/v1/transactions/${id}/similar-count${qs}`);
 }
 
 export async function deleteTransaction(id: number): Promise<{ id: number; deleted: boolean }> {
@@ -619,15 +642,90 @@ export async function fetchTransferSuggestions(): Promise<TransferSuggestion[]> 
   return request("/api/v1/transactions/transfers/suggestions");
 }
 
+export interface UnpairedTransfer {
+  transaction_id: number;
+  account_id: number;
+  account_name: string | null;
+  category_id: number | null;
+  category_name: string | null;
+  occurred_at: string;
+  amount: string;
+  currency: string;
+  description: string | null;
+  raw_description: string | null;
+  transfer_direction: "in" | "out" | null;
+}
+
+export async function fetchUnpairedTransfers(): Promise<UnpairedTransfer[]> {
+  return request("/api/v1/transactions/transfers/unpaired");
+}
+
+export async function unbindTransferCounter(
+  id: number,
+): Promise<{ transaction_id: number; counterpart_id: number | null; deleted_synthetic: boolean }> {
+  return request(`/api/v1/transactions/${id}/unbind-counter`, {
+    method: "POST",
+  });
+}
+
+export interface RefreshMatchingSummary {
+  orphan_pointers_cleared: number;
+  type_promoted_to_transfer: number;
+  recategorized: number;
+  subaccount_pairs: number;
+  single_leg_iban: number;
+  auto_paired: number;
+  orphan_paired: number;
+  subaccount_orphans_categorized: number;
+  reenqueued_to_inbox: number;
+  periods_recomputed: number;
+}
+
+export async function refreshAllMatching(): Promise<RefreshMatchingSummary> {
+  return request("/api/v1/system/refresh-matching", { method: "POST" });
+}
+
+export interface PromotedTransaction {
+  transaction_id: number;
+  account_id: number;
+  account_name: string | null;
+  category_id: number | null;
+  category_name: string | null;
+  occurred_at: string;
+  amount: string;
+  currency: string;
+  description: string | null;
+  current_type: string;
+  original_type: string | null;
+  promoted_at: string | null;
+}
+
+export async function fetchRecentlyPromoted(): Promise<PromotedTransaction[]> {
+  return request("/api/v1/transactions/recently-promoted-to-transfer");
+}
+
+export async function revertTypePromotion(id: number): Promise<TransactionOut> {
+  return request(`/api/v1/transactions/${id}/revert-type-promotion`, {
+    method: "POST",
+  });
+}
+
 export async function markAsTransfer(
   id: number,
-  options?: { counterTransactionId?: number; direction?: "in" | "out" }
+  options?: {
+    counterTransactionId?: number;
+    counterAccountId?: number | null;
+    direction?: "in" | "out";
+    categoryId?: number | null;
+  },
 ): Promise<TransactionOut> {
   return request(`/api/v1/transactions/${id}/mark-transfer`, {
     method: "POST",
     body: JSON.stringify({
       counter_transaction_id: options?.counterTransactionId ?? null,
+      counter_account_id: options?.counterAccountId ?? null,
       transfer_direction: options?.direction ?? null,
+      category_id: options?.categoryId ?? null,
     }),
   });
 }
@@ -645,8 +743,10 @@ export async function confirmInboxItem(
     description?: string | null;
     user_note?: string | null;
   },
+  applyScope?: ApplyScope,
 ): Promise<TransactionOut> {
-  return request(`/api/v1/transactions/inbox/${id}/confirm`, {
+  const qs = applyScope ? `?apply_scope=${applyScope}` : "";
+  return request(`/api/v1/transactions/inbox/${id}/confirm${qs}`, {
     method: "POST",
     body: JSON.stringify(data),
   });

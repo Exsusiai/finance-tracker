@@ -92,8 +92,14 @@ _INCOME_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
 
 _TRANSFER_TAXONOMY: list[tuple[str, list[tuple[str, list[str]]]]] = [
     ("转账", [
-        ("信用卡还款", ["amex", "advanzia", "visa", "mastercard", "kreditkarte", "credit card", "tf bank", "信用卡"]),
-        ("跨行划转", ["sepa", "outgoing transfer", "incoming transfer", "wise", "transferwise"]),
+        # 2026-05-07: 信用卡还款 was merged into 跨行划转 — distinguishing
+        # bank↔credit-card from bank↔bank turned out to be brittle (TF Bank's
+        # statement omits incoming repayments) and added cognitive load.
+        ("跨行划转", [
+            "sepa", "outgoing transfer", "incoming transfer", "wise", "transferwise",
+            "amex", "advanzia", "visa", "mastercard", "kreditkarte", "credit card",
+            "tf bank", "信用卡",
+        ]),
         ("内部储蓄", ["saving", "saving space", "vault", "pocket", "instant access", "spaces", "round-up"]),
         ("投资划转", ["binance", "bitget", "coinbase", "okx", "kraken", "investing", "broker"]),
         ("其他转账", []),

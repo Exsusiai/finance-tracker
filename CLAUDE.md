@@ -69,7 +69,11 @@ docker compose --profile mcp up   # 含 MCP server
 - **时间 ISO-8601 UTC 字符串**：`"YYYY-MM-DDTHH:MM:SSZ"`，存为 `String(30)`，由 `_utcnow_str()` 生成。
 - **软删除**：`deleted_at` 列（NULL = 活跃）。查询时一律加 `WHERE deleted_at IS NULL` 过滤。
 - **SQLite PRAGMA**：每次连接自动启用 `journal_mode=WAL` / `foreign_keys=ON` / `synchronous=NORMAL`（见 `app/db/session.py`）。
-- **Schema 来源**：当前由启动时 `Base.metadata.create_all()` 创建（`app/main.py` lifespan）。`docs/SCHEMA.sql` 是参考文档，`alembic/` 目录已规划但尚未启用——添加新表/字段时请同步 ORM 模型 + `docs/SCHEMA.sql`。
+- **Schema 来源**：启动时 `Base.metadata.create_all()` 兜底创建表，**2026-05-07 起新增 schema 改动走 alembic**（`backend/alembic/`，async 配置；当前 head = `1ed07e31cab5_baseline_2026_05_07`）。流程：
+  - 改 ORM 模型 → `cd backend && alembic revision --autogenerate -m "<change>"` → 检查生成的 revision → `alembic upgrade head`
+  - 已存在的 DB 第一次接入 alembic：`alembic stamp head`
+  - lifespan 里旧的 inline DDL 迁移保留作向后兼容，已是幂等
+  - `docs/SCHEMA.sql` 仍是手写参考文档
 - **`v_account_balance` 视图**在启动时由 lifespan 创建，用于读取账户余额（=`initial_balance + SUM(transactions.amount)`）。
 
 ### 后端代码结构

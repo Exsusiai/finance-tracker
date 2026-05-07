@@ -252,6 +252,13 @@ class TransactionBatchCreate(BaseModel):
 class MarkTransferIn(BaseModel):
     counter_transaction_id: int | None = None
     transfer_direction: str | None = Field(None, pattern=r"^(in|out)$")
+    # Optional transfer-kind category to attach to both legs of the pair.
+    # When omitted, falls back to whatever the matcher resolved (内部储蓄 vs
+    # 跨行划转). When the user picks one explicitly, theirs wins.
+    category_id: int | None = None
+    # Counter account id (no existing counter tx). When set, the route auto-
+    # creates a mirror leg in that account so both balances reflect the move.
+    counter_account_id: int | None = None
 
 
 # ─── PDF Import ─────────────────────────────────────────────────────────────

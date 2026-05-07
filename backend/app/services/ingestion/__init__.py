@@ -134,12 +134,19 @@ async def ingest_transactions(
 
     # Step 2: auto-categorise (rule-matching). `transfer` rows are already
     # confirmed (no inbox), so we only run rules for income/expense.
+    # For transfer rows pre-tagged by the parser (subaccount / cross-bank),
+    # also assign a default transfer category so they don't sit in the inbox
+    # when single-leg pairing fails.
+    from app.services.transfer_matcher.engine import _resolve_transfer_category
+
     if not skip_categorize:
         from app.services.categorizer.engine import categorize_transaction
 
         for tx in tx_list:
             if tx.type == "transfer":
                 tx.is_pending = False
+                if tx.category_id is None:
+                    await _backfill_transfer_category(db, tx, _resolve_transfer_category)
                 continue
             matched = await categorize_transaction(db, tx)
             if matched:
@@ -151,6 +158,8 @@ async def ingest_transactions(
         for tx in tx_list:
             if tx.type == "transfer":
                 tx.is_pending = False
+                if tx.category_id is None:
+                    await _backfill_transfer_category(db, tx, _resolve_transfer_category)
 
     await db.flush()
 
@@ -160,6 +169,20 @@ async def ingest_transactions(
         period = parse_period(tx.occurred_at)
         if period:
             result.affected_periods.add(period)
+
+    # Step 3.5: synthetic→real upgrade. Before the matcher runs, sweep new
+    # rows against any existing synthetic mirrors in their account. If a new
+    # real row matches a synthetic placeholder (same amount/currency/±N
+    # days), retire the placeholder and re-point its paired source to the
+    # real row. Without this, importing the missing PDF after manual bind
+    # leaves 1 real + 1 synthetic + 1 new real = 3 rows for one transfer.
+    if auto_pair:
+        from app.services.transfer_matcher import replace_synthetic_with_real
+        for tx in tx_list:
+            if tx.id is None:
+                continue
+            await replace_synthetic_with_real(db, real_tx=tx)
+        await db.flush()
 
     # Step 4: cross-account / sub-account pairing
     if auto_pair:
@@ -209,6 +232,25 @@ async def ingest_transactions(
         periods=len(result.affected_periods),
     )
     return result
+
+
+async def _backfill_transfer_category(db: AsyncSession, tx: Transaction, resolver) -> None:
+    """Set `tx.category_id` based on the parser's transfer hint.
+
+    Subaccount-tagged rows → 内部储蓄. Anything else (cross-bank hint, no hint)
+    → 跨行划转. Only assigns when category_id is NULL — pre-existing categories
+    win. Used for single-leg transfers that can't be paired (so the matcher's
+    `mark_subaccount_pair` / `pair_transactions` paths never fire).
+    """
+    try:
+        meta: dict = json.loads(tx.metadata_json) if tx.metadata_json else {}
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    is_subaccount = isinstance(meta, dict) and meta.get("subaccount") is True
+    kind = "subaccount" if is_subaccount else "cross_bank"
+    cat_id = await resolver(db, kind=kind)
+    if cat_id is not None:
+        tx.category_id = cat_id
 
 
 async def recompute_after_delete(
