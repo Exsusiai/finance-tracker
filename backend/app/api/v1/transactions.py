@@ -553,6 +553,41 @@ async def mark_as_transfer(
         if not ctr:
             raise NotFoundError("Counter Transaction", body.counter_transaction_id)
 
+        # V4-P1-2: pair invariants. Without these, an API caller (or stale
+        # UI) could pair a 100 EUR expense with a 500 CNY income, both
+        # would flip to type='transfer' and drop out of income/expense
+        # totals — silently distorting cashflow.
+        if ctr.account_id == tx.account_id:
+            raise InvalidInputError(
+                "Counter transaction is in the same account; not a cross-account transfer.",
+                details={"account_id": tx.account_id, "counter_tx_id": ctr.id},
+            )
+        if ctr.currency != tx.currency:
+            raise InvalidInputError(
+                "Currency mismatch between the two legs; cross-currency "
+                "transfers are not supported in manual binding.",
+                details={
+                    "tx_currency": tx.currency, "counter_currency": ctr.currency,
+                },
+            )
+        try:
+            tx_amt = Decimal(str(tx.amount))
+            ctr_amt = Decimal(str(ctr.amount))
+        except Exception:
+            raise InvalidInputError("Invalid amount on one of the legs.")
+        if abs(tx_amt - ctr_amt) >= Decimal("0.01"):
+            raise InvalidInputError(
+                "Amount mismatch between the two legs.",
+                details={"tx_amount": str(tx_amt), "counter_amount": str(ctr_amt)},
+            )
+        # Already-bound check on the counter side too — pairing a row that
+        # already points at someone else would orphan the existing pair.
+        if ctr.counter_account_id is not None and ctr.counter_account_id != tx.account_id:
+            raise InvalidInputError(
+                "Counter transaction is already bound to a different account.",
+                details={"counter_existing_account_id": ctr.counter_account_id},
+            )
+
         # Determine which leg is out and which is in.
         if body.transfer_direction == "out":
             out_tx, in_tx = tx, ctr
@@ -619,6 +654,26 @@ async def mark_as_transfer(
         )).scalar_one_or_none()
         if ctr_account is None:
             raise NotFoundError("Counter Account", body.counter_account_id)
+
+        # V4-P1-2: synthetic mirror copies the source's amount + currency
+        # verbatim into the counter account. If the counter account has a
+        # different currency, the mirror would write e.g. 100 EUR into a
+        # CNY account — the balance view would then add raw "100" to the
+        # CNY balance, polluting its unit. Refuse cross-currency
+        # synthesise; the user must instead create both legs explicitly
+        # with FX, or pair an existing real counterpart.
+        if ctr_account.currency != tx.currency:
+            raise InvalidInputError(
+                "Cross-currency synthetic mirror is not supported. "
+                f"Source is {tx.currency}, counter account is "
+                f"{ctr_account.currency}. Create the counter leg manually "
+                "with the correct currency + FX, or pick a same-currency "
+                "counter account.",
+                details={
+                    "src_currency": tx.currency,
+                    "counter_currency": ctr_account.currency,
+                },
+            )
 
         # 2026-05-07: before synthesising a mirror leg, look for an existing
         # real tx in the destination that the matcher missed. Without this,

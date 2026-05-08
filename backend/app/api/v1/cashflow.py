@@ -110,14 +110,30 @@ async def cashflow_by_category(
     db: AsyncSession = Depends(get_db),
     period: str = Query(..., description="Period in YYYY-MM format"),
 ):
-    """Aggregate spending/income by category for a specific month (folded to BASE_CURRENCY)."""
-    stmt = text("""
+    """Aggregate spending/income by category for a specific month (folded to BASE_CURRENCY).
+
+    Review V4-P0-1 fix: previously used the legacy
+    `COALESCE(base_amount, amount*fx_rate, amount)` raw fallback, so a
+    `100 GBP` row with no FX showed up as `100 CNY` in the breakdown view —
+    not matching the monthly cashflow snapshot which already excludes
+    FX-missing rows. We now reuse `_AMOUNT_BASE_EXPR` from the cashflow
+    engine (CASE: base currency → amount; FX present → fold; else NULL),
+    so `/by-category` and `/monthly` agree exactly.
+    """
+    from app.services.cashflow.engine import _AMOUNT_BASE_EXPR
+    stmt = text(f"""
         SELECT
             c.id,
             COALESCE(c.name, 'Uncategorized'),
             COALESCE(c.kind, 'expense'),
-            SUM(ABS(COALESCE(t.base_amount, t.amount * t.fx_rate_to_base, t.amount))) AS total,
-            COUNT(*) AS count
+            SUM(ABS({_AMOUNT_BASE_EXPR})) AS total,
+            COUNT(*) AS count,
+            SUM(CASE
+                WHEN currency = :base_currency THEN 0
+                WHEN base_amount IS NOT NULL THEN 0
+                WHEN fx_rate_to_base IS NOT NULL THEN 0
+                ELSE 1
+            END) AS fx_missing_count
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.deleted_at IS NULL
@@ -126,7 +142,10 @@ async def cashflow_by_category(
         GROUP BY t.category_id
         ORDER BY total DESC
     """)
-    result = await db.execute(stmt, {"period": period})
+    result = await db.execute(stmt, {
+        "period": period,
+        "base_currency": settings.base_currency,
+    })
     rows = result.all()
 
     return ApiSuccess(data=[

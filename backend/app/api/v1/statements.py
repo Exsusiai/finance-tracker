@@ -545,6 +545,17 @@ async def reparse_statement(
     if not pdf_import:
         raise NotFoundError("PdfImport", import_id)
 
+    # V4-P2-1: an awaiting_account / orphan import has no resolved account
+    # — the old `account_id=pdf_import.account_id or tx_data.get("account_id", 0)`
+    # fallback would write account_id=0 and trigger an FK error. Refuse
+    # explicitly with an actionable hint.
+    if not pdf_import.account_id:
+        raise InvalidInputError(
+            "Cannot reparse: this import has no associated account. "
+            "Use POST /statements/{id}/assign-account first.",
+            details={"import_id": import_id, "status": pdf_import.status},
+        )
+
     # Read stored PDF
     storage_path = pdf_import.storage_path
     if not os.path.exists(storage_path):
@@ -601,7 +612,10 @@ async def reparse_statement(
         new_txs: list[Transaction] = []
         for tx_data in result.get("transactions", []):
             tx = Transaction(
-                account_id=pdf_import.account_id or tx_data.get("account_id", 0),
+                # V4-P2-1: account_id is guaranteed non-None at the top
+                # of this route (we 422 if missing). Drop the `or 0`
+                # fallback that would otherwise leak FK errors.
+                account_id=pdf_import.account_id,
                 occurred_at=tx_data.get("occurred_at", ""),
                 amount=Decimal(str(tx_data.get("amount", 0))),
                 currency=tx_data.get("currency", "CNY"),

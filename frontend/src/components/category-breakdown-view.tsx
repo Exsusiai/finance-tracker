@@ -61,8 +61,8 @@ export function CategoryBreakdownView({ defaultKind = "expense" }: CategoryBreak
   // foreign-currency rows without base_amount fall through with a known caveat
   // (Sprint 1 FIX-4 will guarantee base_amount on every ingested row).
   const tree = useMemo(
-    () => buildTreeFromTx(categories ?? [], txResp?.data ?? [], kind),
-    [categories, txResp, kind],
+    () => buildTreeFromTx(categories ?? [], txResp?.data ?? [], kind, displayCurrency),
+    [categories, txResp, kind, displayCurrency],
   );
   const grandTotal = useMemo(() => tree.reduce((s, p) => s + p.total, 0), [tree]);
   const byCatLoading = txLoading;
@@ -450,6 +450,7 @@ function buildTreeFromTx(
   categories: CategoryOut[],
   txs: TransactionOut[],
   kind: "expense" | "income" | "transfer",
+  baseCurrency: string,
 ): ParentNode[] {
   // Filter categories by kind
   const ofKind = categories.filter((c) => c.kind === kind);
@@ -462,16 +463,27 @@ function buildTreeFromTx(
     childrenByParent.set(c.parent_id, arr);
   }
 
-  // Aggregate transactions by category_id. FIX-3: prefer base_amount (already
-  // folded to BASE_CURRENCY by the parser / ingestion); fall back to amount
-  // for rows that don't have it yet (handled fully in Sprint 1 FIX-4).
+  // Aggregate by category_id. V4-P1-6 fix: mirror backend
+  // `_AMOUNT_BASE_EXPR` (CASE) — same currency uses raw amount; otherwise
+  // base_amount → amount * fx_rate; rows with NEITHER are SKIPPED (the
+  // previous fallback to raw `amount` silently mixed currencies).
   const aggByCat = new Map<number, { total: number; count: number }>();
+  const baseUpper = baseCurrency.toUpperCase();
   for (const t of txs) {
     if (t.category_id == null) continue;
     if (t.type !== kind) continue;
     const baseAmt = (t as { base_amount?: string | null }).base_amount;
-    const raw = baseAmt != null ? parseFloat(baseAmt) : parseFloat(t.amount);
-    const amt = Math.abs(raw || 0);
+    const fxRate = (t as { fx_rate_to_base?: string | null }).fx_rate_to_base;
+    let raw: number | null = null;
+    if (t.currency.toUpperCase() === baseUpper) {
+      raw = parseFloat(t.amount);
+    } else if (baseAmt != null) {
+      raw = parseFloat(baseAmt);
+    } else if (fxRate != null) {
+      raw = parseFloat(t.amount) * parseFloat(fxRate);
+    }
+    if (raw == null || Number.isNaN(raw)) continue;
+    const amt = Math.abs(raw);
     const cur = aggByCat.get(t.category_id) ?? { total: 0, count: 0 };
     cur.total += amt;
     cur.count += 1;

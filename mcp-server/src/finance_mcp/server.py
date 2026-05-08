@@ -72,38 +72,66 @@ def _now_iso() -> str:
 
 
 # Sprint 1 FIX-4 (sync mirror of backend cashflow recompute SQL).
-# Keep formula identical to `app.services.cashflow.engine._RECOMPUTE_SQL`
-# so MCP-driven inserts produce snapshots matching the backend.
-_RECOMPUTE_SNAPSHOT_SQL_SYNC = """
-    INSERT OR REPLACE INTO cash_flow_snapshots
-        (period_year, period_month, base_currency,
-         income_total, expense_total, transfer_total, savings_total, other_total,
-         by_category_json, by_account_json, computed_at)
-    SELECT
-        ?, ?, ?,
-        COALESCE(SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
-                          WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
-                          ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN type = 'adjustment' THEN COALESCE(base_amount, amount * fx_rate_to_base, amount) ELSE 0 END), 0),
-        NULL,
-        NULL,
-        ?
-    FROM transactions
-    WHERE deleted_at IS NULL
-      AND is_pending = 0
-      AND CAST(substr(occurred_at, 1, 4) AS INTEGER) = ?
-      AND CAST(substr(occurred_at, 6, 2) AS INTEGER) = ?
-"""
+# Mirrors `app.services.cashflow.engine._AMOUNT_BASE_EXPR` (Sprint 4 FIX-19,
+# review V3-P0-1 / V4-P0-2). Crucially: same-currency rows bypass FX,
+# foreign-currency rows fall through `base_amount` then `amount*fx_rate`,
+# and rows with NEITHER are NULL — excluded from SUM. The previous raw
+# fallback `COALESCE(..., amount)` silently mixed currencies into the
+# base-currency total.
+#
+# The %BASE% placeholder is substituted with the actual base_currency
+# string at format time (sqlite3 driver doesn't support named params
+# inside CASE-WHEN literals reliably, so we splice an already-validated
+# ISO 4217 code).
+_AMOUNT_BASE_EXPR_SYNC = (
+    "CASE "
+    "  WHEN currency = '%BASE%' THEN amount "
+    "  WHEN base_amount IS NOT NULL THEN base_amount "
+    "  WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base "
+    "  ELSE NULL "
+    "END"
+)
+
+
+def _recompute_snapshot_sql(base_currency: str) -> str:
+    """Build the recompute SQL with the base_currency spliced in.
+
+    base_currency is a 3-letter uppercase ISO code (validated at write
+    time by Settings); splicing is therefore safe.
+    """
+    base = base_currency.upper().replace("'", "")
+    expr = _AMOUNT_BASE_EXPR_SYNC.replace("%BASE%", base)
+    return f"""
+        INSERT OR REPLACE INTO cash_flow_snapshots
+            (period_year, period_month, base_currency,
+             income_total, expense_total, transfer_total, savings_total, other_total,
+             by_category_json, by_account_json, computed_at)
+        SELECT
+            ?, ?, ?,
+            COALESCE(SUM(CASE WHEN type = 'income'  THEN ABS({expr}) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS({expr}) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS({expr}) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN type = 'income'  THEN  ABS({expr})
+                              WHEN type = 'expense' THEN -ABS({expr})
+                              ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN type = 'adjustment' THEN {expr} ELSE 0 END), 0),
+            NULL,
+            NULL,
+            ?
+        FROM transactions
+        WHERE deleted_at IS NULL
+          AND is_pending = 0
+          AND CAST(substr(occurred_at, 1, 4) AS INTEGER) = ?
+          AND CAST(substr(occurred_at, 6, 2) AS INTEGER) = ?
+    """
 
 
 def _recompute_period_sync(conn, year: int, month: int) -> None:
     """Sync mirror of backend recompute_period — used by MCP after inserts."""
     now = _now_iso()
+    sql = _recompute_snapshot_sql(settings.base_currency)
     conn.execute(
-        _RECOMPUTE_SNAPSHOT_SQL_SYNC,
+        sql,
         (year, month, settings.base_currency, now, year, month),
     )
 
@@ -878,17 +906,20 @@ async def get_cashflow(
 ) -> dict[str, Any]:
     conn = _get_conn()
     try:
-        # FIX-2/3 (review V1 §P1-1, §P1-2): savings = ABS(income) − ABS(expense);
-        # all amounts folded to BASE_CURRENCY via base_amount → fx_rate_to_base
-        # → raw amount fallback.
-        rows = conn.execute("""
+        # FIX-2/3 + V4-P0-2: same CASE-WHEN-NULL formula as backend so MCP
+        # and REST agree exactly. Foreign-currency rows without FX are NULL
+        # and excluded — the previous COALESCE(...amount) raw fallback
+        # silently mixed currencies into the base-currency total.
+        base = settings.base_currency.upper().replace("'", "")
+        expr = _AMOUNT_BASE_EXPR_SYNC.replace("%BASE%", base)
+        rows = conn.execute(f"""
             SELECT
                 substr(occurred_at, 1, 7) AS period,
-                SUM(CASE WHEN type = 'income'  THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS income,
-                SUM(CASE WHEN type = 'expense' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS expense,
-                SUM(CASE WHEN type = 'transfer' THEN ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount)) ELSE 0 END) AS transfer,
-                SUM(CASE WHEN type = 'income'  THEN  ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
-                         WHEN type = 'expense' THEN -ABS(COALESCE(base_amount, amount * fx_rate_to_base, amount))
+                SUM(CASE WHEN type = 'income'  THEN ABS({expr}) ELSE 0 END) AS income,
+                SUM(CASE WHEN type = 'expense' THEN ABS({expr}) ELSE 0 END) AS expense,
+                SUM(CASE WHEN type = 'transfer' THEN ABS({expr}) ELSE 0 END) AS transfer,
+                SUM(CASE WHEN type = 'income'  THEN  ABS({expr})
+                         WHEN type = 'expense' THEN -ABS({expr})
                          ELSE 0 END) AS savings
             FROM transactions
             WHERE deleted_at IS NULL AND is_pending = 0

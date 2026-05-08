@@ -310,3 +310,63 @@ class TestTwoLegTransfer:
         in_meta = json.loads(in_fresh.metadata_json or "{}")
         assert out_meta.get("transfer_direction") == "out"
         assert in_meta.get("transfer_direction") == "in"
+
+
+class TestPairInvariants:
+    """V4-P1-2: manual pair must reject obviously-invalid combinations."""
+
+    async def test_amount_mismatch_rejected(self, client: AsyncClient, db: AsyncSession):
+        a = await _make_account(db, "PairA1", initial="1000")
+        b = await _make_account(db, "PairB1", initial="1000")
+        tx_a = await _make_tx(db, a, "100", tx_type="expense")
+        tx_b = await _make_tx(db, b, "150", tx_type="income")
+        await db.commit()
+        resp = await client.post(
+            f"/api/v1/transactions/{tx_a.id}/mark-transfer",
+            json={"counter_transaction_id": tx_b.id, "transfer_direction": "out"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422
+        assert "Amount mismatch" in resp.text
+
+    async def test_currency_mismatch_rejected(self, client: AsyncClient, db: AsyncSession):
+        a = await _make_account(db, "PairA2", currency="EUR", initial="1000")
+        b = await _make_account(db, "PairB2", currency="CNY", initial="1000")
+        tx_a = await _make_tx(db, a, "100", tx_type="expense")
+        tx_b = await _make_tx(db, b, "100", tx_type="income")
+        await db.commit()
+        resp = await client.post(
+            f"/api/v1/transactions/{tx_a.id}/mark-transfer",
+            json={"counter_transaction_id": tx_b.id, "transfer_direction": "out"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422
+        assert "Currency mismatch" in resp.text
+
+    async def test_same_account_rejected(self, client: AsyncClient, db: AsyncSession):
+        a = await _make_account(db, "PairA3", initial="1000")
+        tx_a = await _make_tx(db, a, "100", tx_type="expense")
+        tx_b = await _make_tx(db, a, "100", tx_type="income")
+        await db.commit()
+        resp = await client.post(
+            f"/api/v1/transactions/{tx_a.id}/mark-transfer",
+            json={"counter_transaction_id": tx_b.id, "transfer_direction": "out"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422
+        assert "same account" in resp.text
+
+    async def test_synthetic_mirror_cross_currency_rejected(self, client: AsyncClient, db: AsyncSession):
+        """V4-P1-2: counter_account_id with different currency must 422
+        rather than copy raw amount into a wrong-currency balance."""
+        src = await _make_account(db, "MirrorSrc", currency="EUR", initial="1000")
+        dst = await _make_account(db, "MirrorDst", currency="CNY", initial="0")
+        tx_src = await _make_tx(db, src, "100", tx_type="expense")
+        await db.commit()
+        resp = await client.post(
+            f"/api/v1/transactions/{tx_src.id}/mark-transfer",
+            json={"counter_account_id": dst.id, "transfer_direction": "out"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422
+        assert "Cross-currency" in resp.text
