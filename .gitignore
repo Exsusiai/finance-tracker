@@ -62,3 +62,6 @@ logs/
 # ──────────────────────────── Local tooling ─────────────────────
 .local/
 .cache/
+
+# Local self-improvement notes (per-machine)
+.learnings/

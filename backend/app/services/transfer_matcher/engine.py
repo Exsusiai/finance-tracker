@@ -33,7 +33,8 @@ from app.models import Account, Category, Transaction
 
 logger = structlog.get_logger(__name__)
 
-WINDOW_DAYS = 3
+WINDOW_DAYS = 5  # was 3, bumped 2026-05-09: AMEX charges can post up to 5 days
+                 # after the bank-side debit (different settlement cycles).
 SCORE_THRESHOLD_AUTO = 75
 SCORE_THRESHOLD_SUGGEST = 50
 
@@ -55,11 +56,17 @@ def _date_only(dt_str: str) -> datetime:
 
 
 def _date_score(d1: str, d2: str) -> int:
+    """Decay score by absolute date delta. Same day = 30 pts, drops to 0
+    past day 5. Steep decay so same-day still strongly preferred over
+    delayed bank settlement.
+    """
     delta = abs((_date_only(d1) - _date_only(d2)).days)
     if delta == 0: return 30
     if delta == 1: return 20
     if delta == 2: return 10
     if delta == 3: return 5
+    if delta == 4: return 3
+    if delta == 5: return 2
     return 0
 
 
@@ -411,6 +418,120 @@ async def replace_synthetic_with_real(
         )
         return cand
     return None
+
+
+async def list_counter_leg_candidates(
+    db: AsyncSession,
+    *,
+    src_tx: Transaction,
+    window_days: int = 10,
+    amount_tolerance: Decimal | None = None,
+) -> list[tuple[Transaction, str]]:
+    """Return all tx in OTHER accounts that could plausibly be the other leg
+    of `src_tx`. Each entry is `(candidate_tx, status)` where status is:
+
+      - "free"               — unpaired; the typical case
+      - "synthetic_bound"    — currently paired to a SYNTHETIC mirror leg.
+                               The caller may re-bind by retiring the
+                               synthetic and pairing to src_tx instead
+                               (handled in the mark-transfer route).
+
+    Filters: same currency, amount within ±`amount_tolerance`, occurred
+    within ±`window_days`, NOT itself a synthetic counterleg, NOT a
+    sub-account row, NOT already paired to a REAL counterpart.
+
+    `amount_tolerance` defaults to 0.01 (cent precision). User-facing flows
+    can pass a larger value when the two legs deliberately differ — e.g. a
+    friend reimburses a meal but rounds the amount, or splits unevenly.
+
+    Wider date window than `find_existing_counter_leg` (default 10 d vs 5 d)
+    so edge cases like delayed credit-card settlements are visible. Caller
+    is expected to render these as candidates and let the human disambiguate.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        src_dt = datetime.fromisoformat(src_tx.occurred_at.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return []
+    if src_dt.tzinfo is None:
+        src_dt = src_dt.replace(tzinfo=timezone.utc)
+    delta = timedelta(days=window_days)
+    from_iso = (src_dt - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+    to_iso = (src_dt + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    src_amt = src_tx.amount if isinstance(src_tx.amount, Decimal) else Decimal(str(src_tx.amount))
+    tol = amount_tolerance if amount_tolerance is not None else Decimal("0.01")
+    if tol < 0:
+        tol = Decimal("0")
+
+    # We DO NOT filter `counter_account_id IS NULL` at the SQL level — we
+    # also want rows whose existing counterpart is a synthetic mirror, so
+    # the user can re-bind them to a real reimbursement leg. The post-
+    # filter loop classifies each row.
+    stmt = select(Transaction).where(
+        Transaction.account_id != src_tx.account_id,
+        Transaction.deleted_at.is_(None),
+        Transaction.id != src_tx.id,
+        Transaction.currency == src_tx.currency,
+        Transaction.occurred_at >= from_iso,
+        Transaction.occurred_at <= to_iso,
+    ).order_by(Transaction.occurred_at)
+    rows = (await db.execute(stmt)).scalars().all()
+
+    out: list[tuple[Transaction, str]] = []
+    for c in rows:
+        c_amt = c.amount if isinstance(c.amount, Decimal) else Decimal(str(c.amount))
+        # Strict-equal special case: 0 tolerance means amounts must match exactly.
+        # Otherwise use <= so the boundary value is included (tol=2 → ±2 inclusive).
+        diff = abs(c_amt - src_amt)
+        if tol == 0:
+            if diff != 0:
+                continue
+        else:
+            if diff > tol:
+                continue
+        meta: dict = {}
+        if c.metadata_json:
+            try:
+                meta = json.loads(c.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        # Skip the candidate ITSELF being a synthetic mirror — pairing two
+        # synthetics is meaningless.
+        if meta.get("synthetic_counterleg") is True:
+            continue
+        if meta.get("subaccount") is True:
+            continue
+
+        paired_id = meta.get("paired_with_tx_id")
+        if paired_id is None and c.counter_account_id is None:
+            out.append((c, "free"))
+            continue
+        # Already paired. Check whether the partner is a synthetic mirror —
+        # if so, this is a re-pair candidate (synthetic gets retired).
+        if paired_id is not None:
+            partner = (await db.execute(
+                select(Transaction).where(Transaction.id == paired_id)
+            )).scalar_one_or_none()
+            if partner is None:
+                continue  # orphan pointer
+            try:
+                partner_meta = (
+                    json.loads(partner.metadata_json) if partner.metadata_json else {}
+                ) or {}
+            except (json.JSONDecodeError, TypeError):
+                partner_meta = {}
+            if not isinstance(partner_meta, dict):
+                partner_meta = {}
+            if partner_meta.get("synthetic_counterleg") is True:
+                out.append((c, "synthetic_bound"))
+                continue
+        # Real-paired or otherwise: skip — re-binding would orphan the real
+        # partner.
+    return out
 
 
 async def find_existing_counter_leg(

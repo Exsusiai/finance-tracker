@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   invalidateTransactionGraph,
   useAccounts,
@@ -9,6 +9,8 @@ import {
 } from "@/lib/hooks";
 import {
   ApiError,
+  type CounterLegCandidate,
+  fetchCounterLegCandidates,
   markAsTransfer,
   type TransferSuggestion,
   type UnpairedTransfer,
@@ -127,6 +129,7 @@ function UnpairedCard({ tx, accounts, onDone }: UnpairedCardProps) {
   const [counterAccountId, setCounterAccountId] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   // Default direction from metadata; fall back: if amount > 0 logically we
   // can't tell, so default 'out' (most common single-leg case).
@@ -145,6 +148,25 @@ function UnpairedCard({ tx, accounts, onDone }: UnpairedCardProps) {
         direction,
         categoryId: tx.category_id ?? undefined,
       });
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "绑定失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleManualPair = async (counterTxId: number, amountTolerance: string) => {
+    setError(null);
+    try {
+      setSubmitting(true);
+      await markAsTransfer(tx.transaction_id, {
+        counterTransactionId: counterTxId,
+        direction,
+        categoryId: tx.category_id ?? undefined,
+        amountTolerance,
+      });
+      setPickerOpen(false);
       onDone();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "绑定失败");
@@ -195,12 +217,279 @@ function UnpairedCard({ tx, accounts, onDone }: UnpairedCardProps) {
         <button
           onClick={handleConfirm}
           disabled={submitting || counterAccountId == null}
-          className="text-xs px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 ml-auto"
+          className="text-xs px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
           {submitting ? "绑定中…" : "✓ 绑定并生成对手腿"}
         </button>
+        <button
+          type="button"
+          onClick={() => setPickerOpen(true)}
+          disabled={submitting}
+          title="从其他账户里挑一笔已存在的交易作为对手腿（适用于自动匹配漏掉的对子）"
+          className="text-xs px-3 py-1 rounded-md border border-border bg-card hover:bg-muted transition-colors disabled:opacity-50 ml-auto"
+        >
+          🔗 选对手腿…
+        </button>
       </div>
       {error && <p className="mt-1 text-[11px] text-destructive">{error}</p>}
+
+      {pickerOpen && (
+        <CounterLegPickerDialog
+          srcTx={tx}
+          onClose={() => setPickerOpen(false)}
+          onPick={handleManualPair}
+          submitting={submitting}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Counter-leg picker dialog ────────────────────────────────────────
+
+interface CounterLegPickerProps {
+  srcTx: UnpairedTransfer;
+  onClose: () => void;
+  // Includes the tolerance the user picked so the bind call can accept
+  // pairs that differ by more than 0.01 (paying-for-friends scenarios).
+  onPick: (counterTxId: number, amountTolerance: string) => Promise<void> | void;
+  submitting: boolean;
+}
+
+// Format the signed amount diff between candidate and source. "0E-8" /
+// 0 → "完全一致"; otherwise "+12.34" / "-3.50".
+function _formatAmountDiff(amountDiff: string, currency: string): string {
+  const n = parseFloat(amountDiff);
+  if (!Number.isFinite(n) || n === 0) return "完全一致";
+  const sign = n > 0 ? "+" : "−";
+  const abs = Math.abs(n);
+  return `${sign}${formatCurrency(abs, currency)}`;
+}
+
+function CounterLegPickerDialog({ srcTx, onClose, onPick, submitting }: CounterLegPickerProps) {
+  const [candidates, setCandidates] = useState<CounterLegCandidate[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [windowDays, setWindowDays] = useState(10);
+  // Amount tolerance is a string so the user can type partial decimals
+  // ("2.", ".5") while editing without losing focus on every keystroke.
+  const [tolInput, setTolInput] = useState("0.01");
+
+  // Debounce tolerance changes so we don't fire one request per keystroke.
+  const [debouncedTol, setDebouncedTol] = useState(tolInput);
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedTol(tolInput), 350);
+    return () => clearTimeout(id);
+  }, [tolInput]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCandidates(null);
+    setLoadError(null);
+    // Validate before firing — empty / NaN / negative → fall back to 0.01
+    const parsed = parseFloat(debouncedTol);
+    const tolForRequest =
+      Number.isFinite(parsed) && parsed >= 0 ? String(parsed) : "0.01";
+    fetchCounterLegCandidates(srcTx.transaction_id, windowDays, tolForRequest)
+      .then((rows) => {
+        if (!cancelled) setCandidates(rows);
+      })
+      .catch((e) => {
+        if (!cancelled) setLoadError(e instanceof ApiError ? e.message : "加载候选失败");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [srcTx.transaction_id, windowDays, debouncedTol]);
+
+  const handlePick = async (counterTxId: number) => {
+    const parsed = parseFloat(debouncedTol);
+    const tol = Number.isFinite(parsed) && parsed >= 0 ? String(parsed) : "0.01";
+    await onPick(counterTxId, tol);
+  };
+
+  const tolNum = parseFloat(tolInput);
+  const tolValid = Number.isFinite(tolNum) && tolNum >= 0;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-2xl rounded-xl border border-border bg-card p-5 shadow-xl space-y-3 max-h-[85vh] overflow-y-auto">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold">选择对手腿</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              其他账户中币种相同、未配对、金额 ±{tolValid ? tolNum : 0.01}、日期在 ±{windowDays} 天内的交易
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground text-sm"
+            aria-label="关闭"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="rounded-md bg-muted/40 p-2.5 text-xs">
+          <span className="text-muted-foreground">源交易: </span>
+          <span className="font-medium tabular-nums">
+            {formatCurrency(parseFloat(srcTx.amount), srcTx.currency)}
+          </span>
+          <span className="text-muted-foreground"> · </span>
+          <span>{formatDate(srcTx.occurred_at)}</span>
+          <span className="text-muted-foreground"> · </span>
+          <span>{srcTx.account_name ?? `#${srcTx.account_id}`}</span>
+          {srcTx.description && (
+            <div className="mt-1 text-muted-foreground truncate">{srcTx.description}</div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+          <div className="flex items-center gap-2">
+            <label className="text-muted-foreground">日期窗口 (±天):</label>
+            {[5, 10, 20, 30].map((d) => (
+              <button
+                key={d}
+                onClick={() => setWindowDays(d)}
+                className={cn(
+                  "px-2 py-0.5 rounded-md border transition-colors",
+                  d === windowDays
+                    ? "border-primary bg-primary/10 text-primary font-medium"
+                    : "border-border hover:bg-muted",
+                )}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-muted-foreground">金额容差 ±</label>
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              value={tolInput}
+              onChange={(e) => setTolInput(e.target.value)}
+              className={cn(
+                "w-24 px-2 py-0.5 rounded-md border bg-background tabular-nums focus:outline-none focus:ring-2 focus:ring-ring",
+                tolValid ? "border-border" : "border-destructive/50",
+              )}
+              title="允许两腿金额差。0.01 = 严格分到分；2 = 帮朋友付钱、对方少给 1-2 块也能配；以此类推。"
+            />
+            <span className="text-muted-foreground">{srcTx.currency}</span>
+            {[0.01, 1, 5, 20].map((preset) => (
+              <button
+                key={preset}
+                onClick={() => setTolInput(String(preset))}
+                className={cn(
+                  "px-1.5 py-0.5 rounded-md border transition-colors text-[10px]",
+                  Math.abs((Number.isFinite(tolNum) ? tolNum : -1) - preset) < 1e-9
+                    ? "border-primary bg-primary/10 text-primary font-medium"
+                    : "border-border hover:bg-muted",
+                )}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {loadError && (
+          <div className="rounded-md bg-destructive/10 border border-destructive/30 p-2.5 text-xs text-destructive">
+            {loadError}
+          </div>
+        )}
+
+        {candidates === null && !loadError && (
+          <div className="py-8 flex items-center justify-center">
+            <LoadingSpinner />
+          </div>
+        )}
+
+        {candidates !== null && candidates.length === 0 && (
+          <div className="py-8 text-center text-sm text-muted-foreground">
+            未找到匹配的候选交易。可以扩大日期窗口或金额容差再试。
+          </div>
+        )}
+
+        {candidates !== null && candidates.length > 0 && (
+          <div className="space-y-1.5">
+            {candidates.map((c) => {
+              const diff = parseFloat(c.amount_diff);
+              const isExact = Number.isFinite(diff) && diff === 0;
+              const isSyntheticBound = c.status === "synthetic_bound";
+              return (
+                <button
+                  key={c.transaction_id}
+                  onClick={() => handlePick(c.transaction_id)}
+                  disabled={submitting}
+                  className={cn(
+                    "w-full text-left rounded-md border bg-background hover:bg-muted/40 p-2.5 transition-colors disabled:opacity-50",
+                    isSyntheticBound ? "border-amber-500/40" : "border-border",
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      <span className="font-medium tabular-nums shrink-0">
+                        {formatCurrency(parseFloat(c.amount), c.currency)}
+                      </span>
+                      <span className="text-muted-foreground shrink-0">
+                        {formatDate(c.occurred_at)}
+                      </span>
+                      {c.days_diff !== null && (
+                        <span
+                          className={cn(
+                            "text-[10px] px-1.5 py-0.5 rounded shrink-0",
+                            c.days_diff <= 1
+                              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                              : c.days_diff <= 5
+                                ? "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                                : "bg-muted text-muted-foreground",
+                          )}
+                        >
+                          差 {c.days_diff} 天
+                        </span>
+                      )}
+                      <span
+                        className={cn(
+                          "text-[10px] px-1.5 py-0.5 rounded shrink-0 tabular-nums",
+                          isExact
+                            ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"
+                            : "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+                        )}
+                        title={isExact ? "金额完全一致" : "金额差额（候选 - 源）"}
+                      >
+                        {_formatAmountDiff(c.amount_diff, c.currency)}
+                      </span>
+                      {isSyntheticBound && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded shrink-0 bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                          title="此交易当前绑定的是一条由「绑定到账户」生成的合成腿。点击后会先废弃合成腿，再把这两笔真实交易绑成对子。"
+                        >
+                          ⚠ 含合成腿（点击后会替换）
+                        </span>
+                      )}
+                      <span className="text-muted-foreground truncate">
+                        {c.account_name ?? `#${c.account_id}`}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-muted-foreground shrink-0">
+                      type={c.type}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-foreground/80 truncate" title={c.description ?? ""}>
+                    {c.description || c.raw_description || "—"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="pt-2 text-[10px] text-muted-foreground border-t border-border">
+          点击候选条目即可绑定。绑定后两笔都会标为 transfer，方向沿用源腿。金额容差大于 0.01 时（帮朋友付钱场景）两腿不必精确相等。
+        </div>
+      </div>
     </div>
   );
 }

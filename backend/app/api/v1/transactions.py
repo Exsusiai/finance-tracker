@@ -402,9 +402,17 @@ async def update_transaction(
             apply_to_similar_pending,
             disable_rules_for_keyword,
             learn_from_user_assignment,
+            record_note_to_kb,
         )
         if apply_scope == "all":
             await learn_from_user_assignment(db, tx, new_category_id)
+            # If the user attached a free-form note, persist it to the KB
+            # so the LLM can use it next time AND mark same-keyword rules
+            # as requires_llm so they re-route to L2.
+            if tx.user_note:
+                await record_note_to_kb(
+                    db, tx=tx, new_category_id=new_category_id, note_text=tx.user_note
+                )
             cascaded = await apply_to_similar_pending(db, tx, new_category_id)
             if cascaded:
                 from sqlalchemy import select as _select
@@ -575,18 +583,82 @@ async def mark_as_transfer(
             ctr_amt = Decimal(str(ctr.amount))
         except Exception:
             raise InvalidInputError("Invalid amount on one of the legs.")
-        if abs(tx_amt - ctr_amt) >= Decimal("0.01"):
+        # Tolerance defaults to 0.01 (cent precision). Manual flows
+        # (paying-for-friends, uneven split) pass a larger value to bind
+        # legs that legitimately differ by a few units. We still cap at a
+        # reasonable upper bound to avoid wildly mismatched pairs.
+        try:
+            tol = Decimal(body.amount_tolerance) if body.amount_tolerance else Decimal("0.01")
+        except Exception:
+            raise InvalidInputError(
+                f"Invalid amount_tolerance: {body.amount_tolerance!r}"
+            )
+        if tol < Decimal("0"):
+            tol = Decimal("0")
+        if tol > Decimal("10000"):
+            raise InvalidInputError(
+                "amount_tolerance is unreasonably large (> 10000)."
+            )
+        diff = abs(tx_amt - ctr_amt)
+        # tol=0 demands exact equality; otherwise allow up to and including tol
+        if (tol == 0 and diff != 0) or (tol > 0 and diff > tol):
             raise InvalidInputError(
                 "Amount mismatch between the two legs.",
-                details={"tx_amount": str(tx_amt), "counter_amount": str(ctr_amt)},
+                details={
+                    "tx_amount": str(tx_amt),
+                    "counter_amount": str(ctr_amt),
+                    "diff": str(diff),
+                    "tolerance": str(tol),
+                },
             )
-        # Already-bound check on the counter side too — pairing a row that
-        # already points at someone else would orphan the existing pair.
+        # Already-bound check on the counter side. If `ctr` is paired to a
+        # SYNTHETIC mirror leg (created by an earlier "bind to account"
+        # action), retire that synthetic and proceed with the real-pair.
+        # Otherwise refuse — re-binding would orphan the real partner.
         if ctr.counter_account_id is not None and ctr.counter_account_id != tx.account_id:
-            raise InvalidInputError(
-                "Counter transaction is already bound to a different account.",
-                details={"counter_existing_account_id": ctr.counter_account_id},
-            )
+            ctr_meta_existing: dict = {}
+            if ctr.metadata_json:
+                try:
+                    ctr_meta_existing = json.loads(ctr.metadata_json) or {}
+                except (json.JSONDecodeError, TypeError):
+                    ctr_meta_existing = {}
+            if not isinstance(ctr_meta_existing, dict):
+                ctr_meta_existing = {}
+            existing_partner_id = ctr_meta_existing.get("paired_with_tx_id")
+            existing_partner: Transaction | None = None
+            if existing_partner_id is not None:
+                existing_partner = (await db.execute(
+                    select(Transaction).where(Transaction.id == existing_partner_id)
+                )).scalar_one_or_none()
+            partner_is_synthetic = False
+            if existing_partner is not None and existing_partner.metadata_json:
+                try:
+                    pm = json.loads(existing_partner.metadata_json) or {}
+                    if isinstance(pm, dict) and pm.get("synthetic_counterleg") is True:
+                        partner_is_synthetic = True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if partner_is_synthetic and existing_partner is not None:
+                # Retire the synthetic mirror — soft-delete + clear ctr's
+                # back-pointer + counter_account_id so pair_transactions
+                # below can write a clean new pair.
+                existing_partner.deleted_at = _utcnow_str()
+                touch_updated_at(existing_partner)
+                ctr.counter_account_id = None
+                ctr_meta_existing.pop("paired_with_tx_id", None)
+                ctr_meta_existing.pop("synthetic_counterleg", None)
+                ctr.metadata_json = (
+                    json.dumps(ctr_meta_existing, ensure_ascii=False, sort_keys=True)
+                    if ctr_meta_existing else None
+                )
+                touch_updated_at(ctr)
+                await db.flush()
+            else:
+                raise InvalidInputError(
+                    "Counter transaction is already bound to a different account.",
+                    details={"counter_existing_account_id": ctr.counter_account_id},
+                )
 
         # Determine which leg is out and which is in.
         if body.transfer_direction == "out":
@@ -1076,6 +1148,118 @@ async def list_unpaired_transfers(
     return ApiSuccess(data=out)
 
 
+@router.get(
+    "/transfers/{transaction_id}/counter-leg-candidates",
+    response_model=ApiSuccess[list[dict]],
+)
+async def list_counter_leg_candidates_for_tx(
+    transaction_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    window_days: int = Query(10, ge=1, le=30),
+    amount_tolerance: str = Query(
+        "0.01",
+        description=(
+            "Allowed amount diff between source and candidate (same currency). "
+            "Default 0.01 enforces cent precision; pass a larger number to "
+            "include candidates that differ by more (e.g. friend's reimbursement)."
+        ),
+    ),
+):
+    """List unpaired tx in OTHER accounts that the user can manually bind
+    as the counter-leg of `transaction_id`.
+
+    Returns same-currency, ±`amount_tolerance`-amount, ±`window_days`,
+    NOT-paired, NOT-synthetic, NOT-subaccount tx. Powers the manual-pair
+    dialog in the "未配对转账" panel for cases where automatic matching
+    missed the pair (e.g. AMEX took 5+ days to settle, or the friend
+    rounded the reimbursement amount).
+    """
+    from app.services.transfer_matcher import list_counter_leg_candidates
+
+    src = (await db.execute(
+        select(Transaction).where(
+            Transaction.id == transaction_id,
+            Transaction.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+    if src is None:
+        raise NotFoundError("Transaction", transaction_id)
+
+    try:
+        tol = Decimal(amount_tolerance)
+    except Exception:
+        raise InvalidInputError(
+            f"Invalid amount_tolerance: {amount_tolerance!r}"
+        )
+    if tol < Decimal("0"):
+        tol = Decimal("0")
+    if tol > Decimal("10000"):
+        raise InvalidInputError(
+            "amount_tolerance is unreasonably large (> 10000)."
+        )
+
+    candidates = await list_counter_leg_candidates(
+        db, src_tx=src, window_days=window_days, amount_tolerance=tol,
+    )
+    if not candidates:
+        return ApiSuccess(data=[])
+
+    # `candidates` is now a list of (Transaction, status) tuples.
+    cand_tuples = candidates
+    # Hydrate account names in one query
+    acct_ids = {c.account_id for (c, _s) in cand_tuples}
+    acct_rows = (await db.execute(
+        select(Account.id, Account.name).where(Account.id.in_(acct_ids))
+    )).all()
+    name_by_id = {aid: aname for aid, aname in acct_rows}
+
+    # Compute days_diff for sorting + UI display
+    from datetime import datetime
+    try:
+        src_d = datetime.strptime(src.occurred_at[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        src_d = None
+
+    src_amt = Decimal(str(src.amount))
+    out: list[dict] = []
+    for (c, status) in cand_tuples:
+        days_diff = None
+        if src_d is not None:
+            try:
+                c_d = datetime.strptime(c.occurred_at[:10], "%Y-%m-%d")
+                days_diff = abs((c_d - src_d).days)
+            except (ValueError, TypeError):
+                days_diff = None
+        c_amt = Decimal(str(c.amount))
+        amount_diff = c_amt - src_amt  # signed: positive = candidate > source
+        out.append({
+            "transaction_id": c.id,
+            "account_id": c.account_id,
+            "account_name": name_by_id.get(c.account_id),
+            "occurred_at": c.occurred_at,
+            "amount": str(c.amount),
+            "amount_diff": str(amount_diff),  # signed; UI formats sign
+            "currency": c.currency,
+            "type": c.type,
+            "description": c.description,
+            "raw_description": c.raw_description,
+            "days_diff": days_diff,
+            # status='free' (clean) or 'synthetic_bound' (re-pairs after
+            # retiring the existing synthetic mirror).
+            "status": status,
+        })
+    # Sort: free candidates first, then smallest |amount_diff|, then closest
+    # by date, then by occurred_at.
+    out.sort(key=lambda r: (
+        0 if r["status"] == "free" else 1,
+        abs(Decimal(r["amount_diff"])),
+        r["days_diff"] if r["days_diff"] is not None else 999,
+        r["occurred_at"],
+    ))
+    return ApiSuccess(data=out)
+
+
 @router.get("/transfers/suggestions", response_model=ApiSuccess[list[dict]])
 async def get_transfer_suggestions(
     _token: _auth,
@@ -1258,6 +1442,14 @@ async def confirm_inbox_item(
     if new_category_id is not None and new_category_id != old_category_id:
         if apply_scope == "all":
             await learn_from_user_assignment(db, tx, new_category_id)
+            # If the user attached a free-form note at inbox time, persist
+            # it to the KB so the LLM can use it next time + mark same
+            # keyword L1 rules as requires_llm.
+            if tx.user_note:
+                from app.services.categorizer.engine import record_note_to_kb
+                await record_note_to_kb(
+                    db, tx=tx, new_category_id=new_category_id, note_text=tx.user_note
+                )
             from app.services.categorizer.engine import apply_to_similar_pending
             cascaded = await apply_to_similar_pending(db, tx, new_category_id)
             if cascaded:

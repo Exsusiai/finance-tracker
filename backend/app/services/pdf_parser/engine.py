@@ -286,6 +286,33 @@ _CROSS_BANK_TRANSFER_HINTS_BASE = (
     "outgoing transfer",
     "incoming transfer",
     "sepa direct debit",
+    # Credit-card "we received your payment" entries — semantically a transfer
+    # from a bank account into the credit-card balance, not a real expense
+    # even though the AMEX/Advanzia parsers tag them as expense by default.
+    # Examples seen in real statements:
+    #   - "ZAHLUNG ERHALTEN. BESTEN DANK." (AMEX-DE)
+    #   - "ZAHLUNGSEINGANG"                 (Advanzia)
+    #   - "PAYMENT RECEIVED - THANK YOU"    (AMEX-EN)
+    "zahlung erhalten",
+    "zahlungseingang",
+    "payment received",
+    "thank you for your payment",
+)
+
+
+# Hints that strongly imply transfer DIRECTION (incoming vs outgoing). Used
+# by `_classify_transfer` to set `transfer_direction` so the auto-pair
+# matcher can put the row into the right outflow / inflow bucket.
+_DIRECTION_IN_HINTS = (
+    "zahlung erhalten",
+    "zahlungseingang",
+    "payment received",
+    "thank you for your payment",
+    "incoming transfer",
+)
+_DIRECTION_OUT_HINTS = (
+    "outgoing transfer",
+    "sepa direct debit",
 )
 
 
@@ -333,10 +360,20 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
     for kw in _SUBACCOUNT_KEYWORDS:
         if kw in d:
             return "transfer", {"subaccount": True, "matched": kw, "source": "keyword"}
-    # 3) Cross-bank cues
+    # 3) Cross-bank cues. Also infer direction so the matcher's outflow /
+    # inflow bucketing puts the row on the right side. Without direction,
+    # an "ZAHLUNG ERHALTEN" row tagged transfer would land in BOTH buckets
+    # via the directionless fallback, but its score against an OUT leg
+    # in another account ends up below threshold for various reasons —
+    # the explicit direction lifts the pairing reliability.
     for kw in _cross_bank_transfer_hints():
         if kw in d:
-            return "transfer", {"cross_bank_hint": True, "matched": kw}
+            meta: dict = {"cross_bank_hint": True, "matched": kw}
+            if any(h in d for h in _DIRECTION_IN_HINTS):
+                meta["transfer_direction"] = "in"
+            elif any(h in d for h in _DIRECTION_OUT_HINTS):
+                meta["transfer_direction"] = "out"
+            return "transfer", meta
     return default_type, None
 
 

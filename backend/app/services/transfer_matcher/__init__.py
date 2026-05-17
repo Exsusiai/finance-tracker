@@ -7,6 +7,7 @@ from app.services.transfer_matcher.engine import (
     detect_single_leg_iban,
     find_existing_counter_leg,
     find_transfer_pairs,
+    list_counter_leg_candidates,
     mark_subaccount_pair,
     pair_orphan_single_legs,
     pair_transactions,
@@ -16,6 +17,7 @@ from app.services.transfer_matcher.engine import (
 __all__ = [
     "find_transfer_pairs",
     "find_existing_counter_leg",
+    "list_counter_leg_candidates",
     "replace_synthetic_with_real",
     "pair_transactions",
     "auto_pair_after_import",

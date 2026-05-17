@@ -53,6 +53,7 @@ SUMMARY_KEYS = (
     "subaccount_orphans_categorized",
     "reenqueued_to_inbox",
     "periods_recomputed",
+    "llm_dispatched",
 )
 
 
@@ -61,6 +62,11 @@ class RefreshContext:
     db: AsyncSession
     summary: dict[str, int] = field(default_factory=lambda: {k: 0 for k in SUMMARY_KEYS})
     affected_periods: set[tuple[int, int]] = field(default_factory=set)
+    # Transactions queued for L2 LLM classification — populated by
+    # `step_recategorize` for L1 misses + polluted rule hits. The route
+    # handler dispatches them post-commit so the LLM tasks see committed
+    # state when they open their own sessions.
+    llm_targets: set[int] = field(default_factory=set)
 
     def track_period(self, occurred_at: str | None) -> None:
         from app.services.cashflow.engine import parse_period
@@ -226,6 +232,16 @@ async def step_redetect_type(ctx: RefreshContext) -> None:
 
 
 async def step_recategorize(ctx: RefreshContext) -> None:
+    """Re-run L1 keyword matching on uncategorised pdf/bank rows. Rows that
+    L1 misses, OR that hit a rule with `requires_llm=True`, are queued in
+    `ctx.llm_targets` for L2 LLM classification (dispatched post-commit by
+    the route handler).
+
+    Skips rows that already had an LLM attempt (`metadata.llm_attempt`)
+    since the last user touch — avoids burning the monthly budget on rows
+    Gemini can't classify (e.g. credit-card payment receipts that should
+    really be transfers, but the type stays expense).
+    """
     rows = (await ctx.db.execute(
         select(Transaction).where(
             Transaction.deleted_at.is_(None),
@@ -236,10 +252,21 @@ async def step_recategorize(ctx: RefreshContext) -> None:
         )
     )).scalars().all()
     for r in rows:
-        if await categorize_transaction(ctx.db, r):
+        match = await categorize_transaction(ctx.db, r)
+        if match.matched and not match.requires_llm:
             ctx.summary["recategorized"] += 1
             r.is_pending = False
             ctx.track_period(r.occurred_at)
+        elif (r.source or "") in {"pdf_import", "bank_api"}:
+            # L1 missed OR matched a polluted rule → route to LLM.
+            # Skip rows previously attempted (any outcome): the user can
+            # re-trigger by clearing metadata.llm_attempt or by editing
+            # / deleting / re-importing the row.
+            meta = _safe_meta(r.metadata_json)
+            if "llm_attempt" in meta:
+                continue
+            if r.id is not None:
+                ctx.llm_targets.add(r.id)
     await ctx.db.flush()
 
 
@@ -337,6 +364,13 @@ async def step_subaccount_category_backfill(ctx: RefreshContext) -> None:
 
 
 async def step_reenqueue_inbox(ctx: RefreshContext) -> None:
+    """Mark uncategorised rows as pending so they appear in the inbox.
+
+    For LLM-targeted rows we still re-enqueue here: if the async LLM task
+    lands a high-confidence match it'll flip is_pending back to False; if
+    it returns low-confidence it stashes a suggestion in metadata and
+    leaves is_pending=True so the inbox shows the recommendation.
+    """
     rows = (await ctx.db.execute(
         select(Transaction).where(
             Transaction.deleted_at.is_(None),
