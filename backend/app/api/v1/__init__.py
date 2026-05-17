@@ -15,6 +15,8 @@ from app.api.v1 import (
     system,
     notion,
     bank_sync,
+    notes,
+    llm,
 )
 
 api_router = APIRouter()
@@ -31,3 +33,5 @@ api_router.include_router(rules.router, prefix="/rules", tags=["Categorization R
 api_router.include_router(system.router, prefix="/system", tags=["System"])
 api_router.include_router(notion.router, prefix="/notion", tags=["Notion Sync"])
 api_router.include_router(bank_sync.router, prefix="/bank-sync", tags=["Bank Sync"])
+api_router.include_router(notes.router, prefix="/categorization-notes", tags=["Knowledge Base"])
+api_router.include_router(llm.router, prefix="/llm", tags=["LLM Classification"])

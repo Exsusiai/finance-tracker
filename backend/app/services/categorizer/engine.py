@@ -14,13 +14,20 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
+from dataclasses import dataclass
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import InvalidInputError
-from app.models import CategorizationRule, Category, Transaction
+from app.models import (
+    CategorizationNote,
+    CategorizationRule,
+    Category,
+    Transaction,
+    _utcnow_str,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -76,11 +83,38 @@ def _safe_regex_search(pattern: str, value: str, *, timeout_sec: float = 1.0) ->
 # ─── Forward: rule-based categorization ────────────────────────────────
 
 
-async def categorize_transaction(db: AsyncSession, tx: Transaction) -> bool:
-    """Apply rules to `tx`. Returns True if matched (and sets `tx.category_id`).
+@dataclass(frozen=True)
+class MatchResult:
+    """Outcome of L1 rule matching.
+
+    `matched` indicates a rule fired (category_id was set). `requires_llm`
+    is True iff the matched rule wants the LLM to double-check the verdict
+    before the row leaves the inbox — used for composite rules like
+    "PayPal AND amount=2.99" that can't be expressed as plain keyword
+    equality.
+
+    Truthy iff `matched` so legacy callers (`if await categorize_transaction(...)`)
+    keep working without changes.
+    """
+
+    matched: bool
+    rule_id: int | None = None
+    requires_llm: bool = False
+
+    def __bool__(self) -> bool:
+        return self.matched
+
+
+async def categorize_transaction(db: AsyncSession, tx: Transaction) -> MatchResult:
+    """Apply rules to `tx`. Returns a MatchResult describing what fired.
+
+    - `matched=True, requires_llm=False` → caller may short-circuit (high confidence)
+    - `matched=True, requires_llm=True`  → caller should still consult the LLM
+    - `matched=False`                    → no rule fired; LLM may try
 
     Only applies a rule when the rule's target category kind matches the
-    transaction type (FIX-14: kind guard).
+    transaction type (FIX-14: kind guard). On match `tx.category_id` is set
+    and `rule.hit_count` incremented.
     """
     from sqlalchemy.orm import selectinload  # local import to avoid circular
 
@@ -106,8 +140,12 @@ async def categorize_transaction(db: AsyncSession, tx: Transaction) -> bool:
         if _match(rule, value):
             tx.category_id = rule.category_id
             rule.hit_count += 1
-            return True
-    return False
+            return MatchResult(
+                matched=True,
+                rule_id=rule.id,
+                requires_llm=bool(getattr(rule, "requires_llm", False)),
+            )
+    return MatchResult(matched=False)
 
 
 def _field_value(tx: Transaction, field: str) -> str:
@@ -340,6 +378,74 @@ async def disable_rules_for_keyword(
         await db.flush()
         logger.info("rules_disabled_by_user", keyword=keyword, count=count)
     return count
+
+
+async def record_note_to_kb(
+    db: AsyncSession,
+    *,
+    tx: Transaction,
+    new_category_id: int,
+    note_text: str,
+) -> int | None:
+    """Persist a user-authored note as a knowledge-base entry + mark same
+    keyword L1 rules as `requires_llm=True` so future imports of the same
+    merchant must consult the LLM.
+
+    Returns the new note's id (None if note_text empty).
+
+    The trigger_text we save is a short, structured combo of the merchant
+    keyword and the user's free-form note — this is what the LLM will see
+    in its few-shot context. We persist BOTH:
+      - the keyword token (so future tx with the same merchant can be
+        matched by token-overlap retrieval)
+      - the user's free-form rule (so the LLM gets the actual semantic
+        condition, e.g. "PayPal 每月 2.99 是订阅 X")
+    """
+    if not note_text or not note_text.strip():
+        return None
+
+    derived = derive_keyword_for_tx(tx)
+    keyword = derived[1] if derived else None
+
+    # Build a trigger that gives the LLM both: keyword for retrieval,
+    # narrative for reasoning.
+    trigger = f"{keyword} | {note_text.strip()}" if keyword else note_text.strip()
+
+    note = CategorizationNote(
+        category_id=new_category_id,
+        trigger_text=trigger,
+        note_text=note_text.strip(),
+        source_transaction_id=tx.id,
+        usage_count=0,
+        enabled=True,
+        created_at=_utcnow_str(),
+        updated_at=_utcnow_str(),
+    )
+    db.add(note)
+    await db.flush()
+
+    # Mark all L1 rules sharing the same keyword as "requires_llm" so the
+    # next ingestion of the same merchant routes to L2 instead of falling
+    # straight into the inbox via the simple keyword.
+    if derived is not None:
+        field, kw = derived
+        await db.execute(
+            update(CategorizationRule)
+            .where(
+                func.lower(CategorizationRule.pattern) == kw.lower(),
+                CategorizationRule.field == field,
+            )
+            .values(requires_llm=True, updated_at=_utcnow_str())
+        )
+
+    logger.info(
+        "kb_note_recorded",
+        note_id=note.id,
+        category_id=new_category_id,
+        keyword=keyword,
+        tx_id=tx.id,
+    )
+    return note.id
 
 
 async def learn_from_user_assignment(

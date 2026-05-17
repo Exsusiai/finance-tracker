@@ -13,6 +13,8 @@ import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { cn, formatCurrency } from "@/lib/utils";
 import { CategoryManager } from "@/components/category-manager";
 import { SubaccountListEditor } from "@/components/subaccount-list-editor";
+import { LLMSettingsForm } from "@/components/llm-settings-form";
+import { CategorizationNotesTable } from "@/components/categorization-notes-table";
 
 export default function SettingsPage() {
   const {
@@ -196,6 +198,26 @@ export default function SettingsPage() {
             </p>
           </div>
           <CategoryManager />
+        </section>
+
+        <section className="mt-10">
+          <div className="mb-3">
+            <h2 className="text-base font-semibold">🧠 智能分类 (LLM)</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              当 L1 关键词规则未命中或命中需要 LLM 复核的规则时, 异步调用 LLM 兜底分类。
+            </p>
+          </div>
+          <LLMSettingsForm />
+        </section>
+
+        <section className="mt-10">
+          <div className="mb-3">
+            <h2 className="text-base font-semibold">📚 分类知识库</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              用户维护的分类规则, 自动注入 LLM prompt 作为 few-shot 上下文。
+            </p>
+          </div>
+          <CategorizationNotesTable />
         </section>
 
         <section className="mt-10">

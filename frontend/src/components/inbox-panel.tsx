@@ -222,6 +222,41 @@ function InboxRow({ tx, categories, onDone, onRequestMarkTransfer }: InboxRowPro
             备注：{tx.user_note}
           </div>
         )}
+        {(() => {
+          const sugg = txMeta?.llm_suggestion as
+            | {
+                category_id: number;
+                category_path: string;
+                confidence: number;
+                reason: string;
+                used_search?: boolean;
+              }
+            | undefined;
+          if (!sugg) return null;
+          const handleAdopt = () => setPickedCat(sugg.category_id);
+          return (
+            <div
+              className="mt-1.5 max-w-[360px] rounded-md bg-violet-500/10 border border-violet-500/30 px-2 py-1.5 text-[10px] text-violet-700 dark:text-violet-300"
+              title={sugg.reason}
+            >
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="font-medium">✨ LLM 推荐</span>
+                <span className="font-mono">{sugg.category_path}</span>
+                <span className="opacity-70">置信 {sugg.confidence.toFixed(2)}</span>
+                {sugg.used_search && <span className="opacity-70">· 已联网</span>}
+                <button
+                  onClick={handleAdopt}
+                  className="ml-auto px-1.5 py-0.5 rounded text-[10px] bg-violet-500/20 hover:bg-violet-500/30"
+                >
+                  采纳
+                </button>
+              </div>
+              {sugg.reason && (
+                <div className="mt-0.5 opacity-80 truncate">{sugg.reason}</div>
+              )}
+            </div>
+          );
+        })()}
       </td>
       <td className={cn(
         "px-3 py-2.5 text-right tabular-nums whitespace-nowrap font-medium",

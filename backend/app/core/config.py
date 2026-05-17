@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     notion_asset_page_id: str = ""
     notion_sync_enabled: bool = False
 
+    # --- LLM classification (P1-1) ---
+    # Provider API keys live in env so they never end up in the DB. Runtime
+    # tunables (provider/model/budget/threshold/grounding) live in the
+    # `app_settings` KV table so the UI can edit them without a restart.
+    gemini_api_key: str = ""
+
     # --- Bank sync (GoCardless / Nordigen) ---
     # Encrypted credentials are stored per-connection in DB.
     # This key encrypts/decrypts them. Generate once and keep safe!

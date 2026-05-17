@@ -40,6 +40,7 @@ def _rule_to_out(r: CategorizationRule) -> RuleOut:
         priority=r.priority,
         enabled=r.enabled,
         hit_count=r.hit_count,
+        requires_llm=bool(getattr(r, "requires_llm", False)),
         created_at=r.created_at,
     )
 

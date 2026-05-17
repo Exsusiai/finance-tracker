@@ -50,6 +50,7 @@ class IngestResult:
     subaccount_paired: list[tuple[int, int]] = field(default_factory=list)
     suggested: list[dict] = field(default_factory=list)
     affected_periods: set[tuple[int, int]] = field(default_factory=set)
+    llm_dispatched: int = 0  # rows queued for async LLM classification
 
 
 def _fx_missing_meta(tx: Transaction, src: str, base: str) -> None:
@@ -139,6 +140,10 @@ async def ingest_transactions(
     # when single-leg pairing fails.
     from app.services.transfer_matcher.engine import _resolve_transfer_category
 
+    # Track which tx objects need to be routed to the L2 LLM after L1.
+    # We dispatch async tasks AFTER db.flush() so each task gets a stable id.
+    llm_target_txs: list[Transaction] = []
+
     if not skip_categorize:
         from app.services.categorizer.engine import categorize_transaction
 
@@ -148,10 +153,19 @@ async def ingest_transactions(
                 if tx.category_id is None:
                     await _backfill_transfer_category(db, tx, _resolve_transfer_category)
                 continue
-            matched = await categorize_transaction(db, tx)
-            if matched:
+            match = await categorize_transaction(db, tx)
+            if match.matched and not match.requires_llm:
+                # High confidence: L1 rule short-circuits.
                 tx.is_pending = False
+                tx.categorization_method = "rule"
                 result.auto_categorized += 1
+            else:
+                # Either no rule matched, or the matched rule is "polluted"
+                # (requires_llm=True). Route to LLM. Eligibility: pdf_import
+                # / bank_api only — manual and mcp_agent rows already carry
+                # the user's intent explicitly.
+                if (tx.source or "") in {"pdf_import", "bank_api"}:
+                    llm_target_txs.append(tx)
     else:
         # Even when categorisation is skipped, transfer rows shouldn't sit in
         # the inbox.
@@ -162,6 +176,16 @@ async def ingest_transactions(
                     await _backfill_transfer_category(db, tx, _resolve_transfer_category)
 
     await db.flush()
+
+    # Step 2.5: dispatch L2 LLM tasks (fire-and-forget). Targets get a
+    # stable `tx.id` only after the flush above. We DO NOT await — the
+    # caller's HTTP response shouldn't be held hostage by a 1–3 s/row LLM
+    # round-trip. The background tasks open their own session.
+    if llm_target_txs:
+        ids_to_classify = [tx.id for tx in llm_target_txs if tx.id is not None]
+        if ids_to_classify:
+            await _dispatch_llm_classification(ids_to_classify)
+            result.llm_dispatched += len(ids_to_classify)
 
     # Step 3: collect periods touched by the new batch BEFORE pairing — pairing
     # may add additional periods (counter-legs in different months).
@@ -232,6 +256,52 @@ async def ingest_transactions(
         periods=len(result.affected_periods),
     )
     return result
+
+
+async def _classify_one_with_llm(tx_id: int) -> None:
+    """Run the L2 classifier on a single tx, in its own session.
+
+    Imported lazily so the module load order doesn't break when LLM deps
+    aren't installed. Failures are logged and swallowed — LLM is best-effort,
+    the row stays in inbox if anything goes wrong.
+    """
+    try:
+        from app.db import async_session_factory
+        from app.services.cashflow.engine import recompute_for_periods, parse_period
+        from app.services.llm.classifier import classify_with_llm
+
+        async with async_session_factory() as session:
+            tx = await session.get(Transaction, tx_id)
+            if tx is None or tx.deleted_at is not None:
+                return
+            outcome = await classify_with_llm(session, tx)
+            # If the LLM landed a high-confidence match, the row's category
+            # changed → its month's cashflow snapshot must be refreshed.
+            if outcome.matched:
+                period = parse_period(tx.occurred_at)
+                if period:
+                    await recompute_for_periods(session, [period])
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.warning("llm_classification_task_failed", tx_id=tx_id, error=str(exc)[:200])
+
+
+async def _dispatch_llm_classification(tx_ids: list[int]) -> None:
+    """Fire-and-forget async dispatch for L2 classification.
+
+    Uses `asyncio.create_task`; tasks live on the running event loop and
+    are not awaited (so the caller's HTTP request isn't blocked). MVP —
+    if throughput becomes an issue, swap for a small in-process queue.
+    """
+    import asyncio
+
+    for tx_id in tx_ids:
+        try:
+            asyncio.create_task(_classify_one_with_llm(tx_id))
+        except RuntimeError:
+            # No running loop (e.g. CLI / test contexts). Skip silently —
+            # the row stays in inbox, the user can run /refresh-matching later.
+            logger.debug("llm_dispatch_skipped_no_loop", tx_id=tx_id)
 
 
 async def _backfill_transfer_category(db: AsyncSession, tx: Transaction, resolver) -> None:

@@ -115,10 +115,22 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - `services/valuation/` 估值时**只读本地表**——上游挂掉也能基于上次缓存正常显示组合估值。
 - 折算原则：原始 transaction 保留原币，**只在汇总展示时折算到 `BASE_CURRENCY`**（默认 `CNY`）。
 
+### LLM 智能分类（P1-1，2026-05-08 实装）
+
+- **Provider 抽象**：`backend/app/services/llm/`：`provider.py` 定义 `LLMProvider` Protocol → 当前唯一实现 `gemini.py`（`google-genai` SDK）。新加 OpenAI / Anthropic = 新增一个 provider 文件，无需改其他代码。
+- **运行时配置**：环境变量只放 secret（`GEMINI_API_KEY`），其他可调项（`llm_enabled` / `llm_model` / `llm_monthly_usd_budget` / `llm_confidence_threshold` / `llm_use_grounding` / `llm_max_notes_in_prompt`）放在 `app_settings` KV 表，可经 `/api/v1/llm/settings` 改，不必重启。lifespan 启动时 idempotent seed 默认值。
+- **三层管道**：`services/categorizer/engine.py::categorize_transaction` 返回 `MatchResult(matched, requires_llm)`；`services/ingestion/__init__.py` 在 L1 后追加 L2 异步派遣（`asyncio.create_task` + 各任务起独立 session）。L2 实现：`services/llm/classifier.py::classify_with_llm` —— 检索 top-N 知识库条目（按 token 重合度）→ 构造 prompt → Provider 调用 → 解析 JSON → 写 `tx.categorization_method/confidence/llm_reason` 或在 inbox stash `metadata.llm_suggestion`。
+- **「污染」语义**：L1 命中 + `rule.requires_llm=True` ⇒ 不短路，路由到 L2。每当用户改分类同时写了 `user_note`，`services/categorizer/engine.py::record_note_to_kb` 把同 keyword 的 L1 规则全部翻为 `requires_llm=True` 并新增一行 `categorization_notes`（解决 PayPal+amount 复合规则）。
+- **来源限制**：仅 `source ∈ {pdf_import, bank_api}` 的交易走 LLM；`manual` / `mcp_agent` 跳过（用户已亲自录入）。
+- **成本/预算**：`services/llm/cost_tracker.py` 按月 KV 累加（`app_settings` 中 `llm_monthly_cost_usd_YYYY_MM`）；超额时 classifier 直接返回 abstain。
+- **API 端点**：`/api/v1/categorization-notes` (CRUD)、`/api/v1/llm/settings` (GET/PUT)、`/api/v1/llm/cost`。
+- **前端**：Settings 页两个新 section —— 「智能分类」(LLMSettingsForm) + 「分类知识库」(CategorizationNotesTable)；Inbox 行内显示 ✨ LLM 推荐 + 一键采纳。
+
 ### MCP Server 与后端的关系
 
 - `mcp-server/run.sh` 把 `backend/` 加入 `PYTHONPATH`，所以 MCP server 直接 `from app.models import ...` 复用同一份 ORM 模型与服务。
 - MCP server 当前用**同步** `sqlite3` 连接（见 `finance_mcp/server.py` 头部），后端用 **async** `aiosqlite`——两侧通过 SQLite WAL 模式安全共享。
+- **LLM 路径**：MCP `add_transaction` 不走 LLM（source=`mcp_agent`，与 `manual` 同样跳过自动分类）。如果想让 agent 也享受 LLM 分类，未来可在 `services/llm/classifier.py` 改条件。
 
 ## Code Conventions
 
@@ -134,3 +146,4 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - 必填：`FINANCE_TRACKER_API_TOKEN`（32 字节 hex）。未设置时启动会自动生成临时 token 并 warn——**不要把这个临时 token 当持久化值**。
 - `BASE_CURRENCY` 控制汇总折算的目标币种，默认 `CNY`。
 - 银行同步密钥用 `FINANCE_BANK_ENCRYPTION_KEY` 加密后入库（`bank_connections` 表）。
+- LLM 分类需要 `GEMINI_API_KEY`（去 https://aistudio.google.com/apikey 申请）。运行时其他 LLM 配置（model/budget/threshold/grounding）走 Settings UI，不在 env。

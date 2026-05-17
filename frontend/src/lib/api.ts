@@ -660,6 +660,37 @@ export async function fetchUnpairedTransfers(): Promise<UnpairedTransfer[]> {
   return request("/api/v1/transactions/transfers/unpaired");
 }
 
+export interface CounterLegCandidate {
+  transaction_id: number;
+  account_id: number;
+  account_name: string | null;
+  occurred_at: string;
+  amount: string;
+  // Signed difference: candidate.amount - source.amount. Positive = candidate
+  // is larger. UI formats with explicit + / - prefix.
+  amount_diff: string;
+  currency: string;
+  type: string;
+  description: string | null;
+  raw_description: string | null;
+  days_diff: number | null;
+  // 'free'             — unpaired, clean candidate
+  // 'synthetic_bound'  — currently paired to a synthetic mirror leg; binding
+  //                      will retire the synthetic and pair to the real leg
+  status: "free" | "synthetic_bound";
+}
+
+export async function fetchCounterLegCandidates(
+  txId: number,
+  windowDays = 10,
+  amountTolerance: string | number = "0.01",
+): Promise<CounterLegCandidate[]> {
+  const tol = String(amountTolerance);
+  return request(
+    `/api/v1/transactions/transfers/${txId}/counter-leg-candidates?window_days=${windowDays}&amount_tolerance=${encodeURIComponent(tol)}`,
+  );
+}
+
 export async function unbindTransferCounter(
   id: number,
 ): Promise<{ transaction_id: number; counterpart_id: number | null; deleted_synthetic: boolean }> {
@@ -679,6 +710,9 @@ export interface RefreshMatchingSummary {
   subaccount_orphans_categorized: number;
   reenqueued_to_inbox: number;
   periods_recomputed: number;
+  // Rows queued for asynchronous L2 LLM classification (fire-and-forget;
+  // results land in the inbox or on the row's metadata.llm_suggestion).
+  llm_dispatched: number;
 }
 
 export async function refreshAllMatching(): Promise<RefreshMatchingSummary> {
@@ -717,6 +751,10 @@ export async function markAsTransfer(
     counterAccountId?: number | null;
     direction?: "in" | "out";
     categoryId?: number | null;
+    // Allowed |out - in| amount diff; default 0.01 (cent precision).
+    // Pass a larger value (e.g. "5") for manual binding when the legs
+    // legitimately differ (uneven split / rounded reimbursement).
+    amountTolerance?: string | number;
   },
 ): Promise<TransactionOut> {
   return request(`/api/v1/transactions/${id}/mark-transfer`, {
@@ -726,6 +764,8 @@ export async function markAsTransfer(
       counter_account_id: options?.counterAccountId ?? null,
       transfer_direction: options?.direction ?? null,
       category_id: options?.categoryId ?? null,
+      amount_tolerance:
+        options?.amountTolerance != null ? String(options.amountTolerance) : null,
     }),
   });
 }
@@ -838,4 +878,117 @@ export async function confirmStatement(id: number): Promise<{ import_id: number;
 
 export async function deleteStatement(id: number): Promise<{ id: number; deleted: boolean }> {
   return request(`/api/v1/statements/${id}`, { method: "DELETE" });
+}
+
+// ─── Categorization Notes (knowledge base) ─────────────────────────────
+
+export interface CategorizationNoteOut {
+  id: number;
+  category_id: number;
+  category_name: string | null;
+  trigger_text: string;
+  note_text: string;
+  source_transaction_id: number | null;
+  usage_count: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CategorizationNoteCreateInput {
+  category_id: number;
+  trigger_text: string;
+  note_text: string;
+  enabled?: boolean;
+}
+
+export interface CategorizationNoteUpdateInput {
+  category_id?: number;
+  trigger_text?: string;
+  note_text?: string;
+  enabled?: boolean;
+}
+
+export async function fetchCategorizationNotes(params?: {
+  category_id?: number;
+  enabled?: boolean;
+}): Promise<CategorizationNoteOut[]> {
+  const search = new URLSearchParams();
+  if (params?.category_id !== undefined) search.set("category_id", String(params.category_id));
+  if (params?.enabled !== undefined) search.set("enabled", String(params.enabled));
+  const qs = search.toString();
+  return request(`/api/v1/categorization-notes${qs ? `?${qs}` : ""}`);
+}
+
+export async function createCategorizationNote(
+  data: CategorizationNoteCreateInput,
+): Promise<CategorizationNoteOut> {
+  return request(`/api/v1/categorization-notes`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateCategorizationNote(
+  id: number,
+  data: CategorizationNoteUpdateInput,
+): Promise<CategorizationNoteOut> {
+  return request(`/api/v1/categorization-notes/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteCategorizationNote(
+  id: number,
+): Promise<{ id: number; deleted: boolean }> {
+  return request(`/api/v1/categorization-notes/${id}`, { method: "DELETE" });
+}
+
+// ─── LLM settings + cost ───────────────────────────────────────────────
+
+export interface LLMSettingsOut {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  monthly_usd_budget: number;
+  confidence_threshold: number;
+  use_grounding: boolean;
+  max_notes_in_prompt: number;
+  api_key_present: boolean;
+}
+
+export interface LLMSettingsUpdateInput {
+  enabled?: boolean;
+  model?: string;
+  monthly_usd_budget?: number;
+  confidence_threshold?: number;
+  use_grounding?: boolean;
+  max_notes_in_prompt?: number;
+  // Empty string clears the stored key. Omit to leave it untouched.
+  gemini_api_key?: string;
+}
+
+export interface LLMCostOut {
+  used_usd: number;
+  budget_usd: number;
+  remaining_usd: number;
+  period: string;
+}
+
+export async function fetchLLMSettings(): Promise<LLMSettingsOut> {
+  return request(`/api/v1/llm/settings`);
+}
+
+export async function updateLLMSettings(
+  data: LLMSettingsUpdateInput,
+): Promise<LLMSettingsOut> {
+  return request(`/api/v1/llm/settings`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function fetchLLMCost(): Promise<LLMCostOut> {
+  return request(`/api/v1/llm/cost`);
 }

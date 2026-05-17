@@ -28,6 +28,7 @@ dependencies = [
     "yfinance>=0.2.40",
     "pycoingecko>=3.1",
     "cryptography>=43.0",
+    "google-genai>=0.3",
 ]
 
 [project.optional-dependencies]

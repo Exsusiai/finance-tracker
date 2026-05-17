@@ -259,6 +259,12 @@ class MarkTransferIn(BaseModel):
     # Counter account id (no existing counter tx). When set, the route auto-
     # creates a mirror leg in that account so both balances reflect the move.
     counter_account_id: int | None = None
+    # Allowed |out_amount - in_amount| when binding two existing legs.
+    # Default 0.01 enforces cent-precision matching. Manual flows (paying
+    # for friends, uneven split, rounding) can pass a larger value to
+    # accept the pair anyway. Same-currency only — cross-currency pairs
+    # are still rejected outright.
+    amount_tolerance: str | None = None
 
 
 # ─── PDF Import ─────────────────────────────────────────────────────────────
@@ -499,6 +505,7 @@ class RuleOut(BaseModel):
     priority: int
     enabled: bool
     hit_count: int
+    requires_llm: bool = False
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -515,6 +522,69 @@ class RuleTestOut(BaseModel):
     rule_id: int | None = None
     category_id: int | None = None
     category_name: str | None = None
+
+
+# ─── Categorization Notes (knowledge base) ─────────────────────────────────
+
+class NoteCreate(BaseModel):
+    category_id: int
+    trigger_text: str = Field(min_length=1, max_length=2000)
+    note_text: str = Field(min_length=1, max_length=4000)
+    enabled: bool = True
+
+
+class NoteUpdate(BaseModel):
+    category_id: int | None = None
+    trigger_text: str | None = Field(default=None, max_length=2000)
+    note_text: str | None = Field(default=None, max_length=4000)
+    enabled: bool | None = None
+
+
+class NoteOut(BaseModel):
+    id: int
+    category_id: int
+    category_name: str | None = None
+    trigger_text: str
+    note_text: str
+    source_transaction_id: int | None = None
+    usage_count: int
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+# ─── LLM settings ──────────────────────────────────────────────────────────
+
+class LLMSettingsOut(BaseModel):
+    enabled: bool
+    provider: str
+    model: str
+    monthly_usd_budget: float
+    confidence_threshold: float
+    use_grounding: bool
+    max_notes_in_prompt: int
+    api_key_present: bool  # never echoes the secret itself
+
+
+class LLMSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    model: str | None = None
+    monthly_usd_budget: float | None = Field(default=None, ge=0)
+    confidence_threshold: float | None = Field(default=None, ge=0, le=1)
+    use_grounding: bool | None = None
+    max_notes_in_prompt: int | None = Field(default=None, ge=0, le=100)
+    # Provider API key (write-only). Empty string clears it. NEVER echoed
+    # back via GET — `api_key_present` boolean is the only read signal.
+    gemini_api_key: str | None = None
+
+
+class LLMCostOut(BaseModel):
+    used_usd: float
+    budget_usd: float
+    remaining_usd: float
+    period: str  # "YYYY-MM"
 
 
 # ─── System / Settings ─────────────────────────────────────────────────────

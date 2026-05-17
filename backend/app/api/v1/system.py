@@ -129,6 +129,23 @@ async def refresh_matching(
             ctx.summary[k] = 0
         raise
 
+    # Dispatch LLM tasks AFTER commit so they observe the committed state
+    # when they open their own sessions. Without the explicit commit here,
+    # tasks that read `tx_id` would see pre-pipeline state (the outer
+    # session hasn't committed yet — get_db only commits on return).
+    # Only count rows actually dispatched: if LLM is disabled / no key,
+    # we don't fire the tasks (they'd just be no-ops) and the summary
+    # accurately shows 0 so the user knows the rows fell through to inbox.
+    if ctx.llm_targets:
+        from app.services import app_settings as app_settings_svc
+        runtime = await app_settings_svc.get_llm_settings(db)
+        api_key = await app_settings_svc.get_gemini_api_key(db)
+        if runtime.enabled and api_key:
+            await db.commit()
+            from app.services.ingestion import _dispatch_llm_classification
+            await _dispatch_llm_classification(list(ctx.llm_targets))
+            ctx.summary["llm_dispatched"] = len(ctx.llm_targets)
+
     return ApiSuccess(data=ctx.summary)
 
 

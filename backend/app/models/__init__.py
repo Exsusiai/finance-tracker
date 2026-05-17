@@ -14,6 +14,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -207,6 +208,11 @@ class Transaction(Base):
     # classification "clue" — surfaced to the LLM-fallback path (P1-1c) as
     # few-shot context for similar future transactions.
     user_note: Mapped[str | None] = mapped_column(Text)
+    # Audit columns for the L1/L2 classification pipeline.
+    # method ∈ {'rule','llm','manual'}; confidence is 0..1 only when method='llm'.
+    categorization_method: Mapped[str | None] = mapped_column(String(20))
+    categorization_confidence: Mapped[float | None] = mapped_column(Float())
+    llm_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     deleted_at: Mapped[str | None] = mapped_column(String(30))
@@ -379,6 +385,14 @@ class CategorizationRule(Base):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     hit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # When True, a hit on this rule does NOT short-circuit auto-classification —
+    # the ingestion pipeline routes the transaction to the LLM (L2) instead.
+    # Set automatically when the user attaches a free-form note to a category
+    # change, signalling that simple keyword equality is insufficient
+    # (composite conditions like "PayPal AND amount=2.99" need an LLM).
+    requires_llm: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
@@ -393,4 +407,60 @@ class CategorizationRule(Base):
             "field IN ('description','counterparty','raw_description')",
             name="ck_rule_field",
         ),
+        Index("ix_rules_requires_llm", "requires_llm"),
     )
+
+
+# ─── Categorization Note (knowledge base for LLM) ───────────────────────────
+
+class CategorizationNote(Base):
+    """User-maintained classification knowledge base.
+
+    Each note is a natural-language hint ("PayPal 每月 2.99 EUR 是订阅 X")
+    that gets injected into the LLM prompt as few-shot context. Notes are
+    primarily created by the inbox-confirm flow when the user attaches a
+    user_note to a manual classification, but can also be edited directly
+    from the Settings → 知识库 UI.
+    """
+
+    __tablename__ = "categorization_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    category_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("categories.id", ondelete="CASCADE"), nullable=False
+    )
+    trigger_text: Mapped[str] = mapped_column(Text, nullable=False)
+    note_text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_transaction_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("transactions.id", ondelete="SET NULL")
+    )
+    usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+
+    category: Mapped["Category"] = relationship()
+    source_transaction: Mapped["Transaction | None"] = relationship()
+
+    __table_args__ = (
+        Index("ix_notes_category", "category_id"),
+        Index("ix_notes_enabled", "enabled"),
+    )
+
+
+# ─── App Settings (KV store) ────────────────────────────────────────────────
+
+class AppSetting(Base):
+    """Generic key-value runtime config.
+
+    Used for LLM tunables (provider/model/budget/threshold/grounding) that
+    we want to edit from the Settings UI without restarting the backend.
+    Values are TEXT; callers cast on read. See `app.services.app_settings`
+    for typed accessors.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)

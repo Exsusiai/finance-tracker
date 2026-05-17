@@ -1,13 +1,24 @@
 # Finance Tracker — 项目进度
 
-> 修订日期: 2026-05-07
+> 修订日期: 2026-05-08
 > 根据"是否真正闭环并验证过"打分；详细分析见 `docx/REQUIREMENT_GAP.md`，剩余优先级见 `docx/ROADMAP.md`。
 
 ## 项目信息
 - **Repo**: https://github.com/Exsusiai/finance-tracker
-- **Git**: `master` branch
+- **Git**: `feat/llm-classification` 分支（基于 `master`，待合并）
 - **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ Sprint 0+1+2+3+4 完成 + 2026-05-06/07 UX 改造（详见 `docx/WORKLOG_2026-05-07.md`）。下一步：架构审查（agent 评估中）→ 修高优 bug → P1-4（链上钱包）→ P1-1（LLM）
+- **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT 完成 + **P1-1 LLM 智能分类已实装**（feat 分支）。下一步：用户提供 GEMINI_API_KEY → 端到端 UAT → 合并；之后 P1-4（链上钱包）
+
+## 2026-05-08 新交付：P1-1 LLM 智能分类
+详见 [docx/LLM_CLASSIFICATION_PLAN.md](docx/LLM_CLASSIFICATION_PLAN.md)：
+- **三层管道**：L1 关键词（命中 + `requires_llm=False` 短路）→ L2 LLM（Gemini，可联网）→ L3 inbox
+- **「污染」机制**：用户对一笔交易写备注后，同 keyword 的 L1 规则自动 `requires_llm=True`，下次必走 LLM（解决 PayPal+amount 复合规则问题）
+- **知识库**：`categorization_notes` 表 + Inbox 改分类时备注自动入库 + 注入 LLM prompt 作 few-shot
+- **Provider 抽象**：`LLMProvider` Protocol，今日仅 Gemini，未来扩展 OpenAI/Anthropic
+- **运行时配置**：`app_settings` KV 表（provider/model/budget/threshold/grounding/max_notes）
+- **成本守门**：月度 USD 累计 + 超额自动降级
+- **UI**：Settings 页加「智能分类」+ 「分类知识库」两个 section；Inbox 行内显示 ✨ LLM 推荐 + 采纳按钮
+- **测试**：17 个 LLM 单测全过；全套回归 117 个全过
 
 ## 2026-05-07 新交付速览
 12 项功能（详见 [docx/WORKLOG_2026-05-07.md](docx/WORKLOG_2026-05-07.md)）：
