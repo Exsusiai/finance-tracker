@@ -14,7 +14,7 @@ import {
 } from "@/lib/api";
 import { mutate } from "swr";
 import { ASSET_CLASS_LABELS, cn, CURRENCY_GROUPS } from "@/lib/utils";
-import { AccountForm } from "@/components/account-form";
+import { AccountForm, INVESTMENT_TYPES } from "@/components/account-form";
 
 interface HoldingFormProps {
   accounts: AccountOut[];
@@ -60,9 +60,15 @@ export function HoldingForm({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
 
-  const [accountId, setAccountId] = useState<number>(
-    initialHolding?.account_id ?? defaultAccountId ?? (accounts[0]?.id ?? 0),
-  );
+  // Prefer an investment-type account as the initial pick so the
+  // select isn't sitting on an out-of-options value (the picker filters
+  // out bank / credit_card / cash / other below).
+  const [accountId, setAccountId] = useState<number>(() => {
+    if (initialHolding?.account_id) return initialHolding.account_id;
+    if (defaultAccountId) return defaultAccountId;
+    const firstInvestment = accounts.find((a) => INVESTMENT_TYPES.has(a.type));
+    return firstInvestment?.id ?? accounts[0]?.id ?? 0;
+  });
   const [quantity, setQuantity] = useState(initialHolding?.quantity ?? "");
   const [avgCost, setAvgCost] = useState(initialHolding?.avg_cost ?? "");
   const [costCurrency, setCostCurrency] = useState(
@@ -416,11 +422,19 @@ export function HoldingForm({
                   className="flex-1 px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   <option value="">选择账户</option>
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} ({a.currency})
-                    </option>
-                  ))}
+                  {/* Holdings are an investment-account concept; we
+                      exclude bank / credit_card / cash / other from the
+                      picker so the user can't accidentally attach a
+                      stock position to a checking account. The set
+                      lives in account-form.tsx for single-source-of-
+                      truth. */}
+                  {accounts
+                    .filter((a) => INVESTMENT_TYPES.has(a.type))
+                    .map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name} ({a.currency})
+                      </option>
+                    ))}
                 </select>
                 {!isEdit && (
                   <button

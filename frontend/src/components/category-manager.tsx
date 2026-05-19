@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { mutate as swrMutate } from "swr";
 import { useCategories } from "@/lib/hooks";
 import {
@@ -49,10 +49,15 @@ export function CategoryManager() {
     return { parents, children };
   }, [categories, activeKind, selectedParentId]);
 
-  // Auto-select first parent when kind changes
-  if (parents.length > 0 && !parents.some((p) => p.id === selectedParentId)) {
-    queueMicrotask(() => setSelectedParentId(parents[0].id));
-  }
+  // Auto-select first parent when kind changes. Lives in an effect (not
+  // inline-during-render) so React 19 doesn't yell about state updates
+  // racing with unmount — the old `queueMicrotask` shortcut leaked when
+  // the component was torn down between render and microtask flush.
+  useEffect(() => {
+    if (parents.length > 0 && !parents.some((p) => p.id === selectedParentId)) {
+      setSelectedParentId(parents[0].id);
+    }
+  }, [parents, selectedParentId]);
 
   if (isLoading) return <LoadingSpinner />;
 

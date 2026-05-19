@@ -141,7 +141,15 @@ export function LLMSettingsForm() {
             <span className="text-xs text-emerald-600 dark:text-emerald-400">{keyFlash}</span>
           )}
         </div>
-        <div className="flex gap-2">
+        {/* form wrapper silences the orphan password-field DOM warning
+            + lets browsers wire up password-manager affordances. */}
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (apiKeyInput.trim() && !savingKey) handleSaveKey();
+          }}
+        >
           <input
             type={showKey ? "text" : "password"}
             value={apiKeyInput}
@@ -160,8 +168,7 @@ export function LLMSettingsForm() {
             {showKey ? "🙈" : "👁️"}
           </button>
           <button
-            type="button"
-            onClick={handleSaveKey}
+            type="submit"
             disabled={!apiKeyInput.trim() || savingKey}
             className="px-3 py-2 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-40"
           >
@@ -177,7 +184,7 @@ export function LLMSettingsForm() {
               清除
             </button>
           )}
-        </div>
+        </form>
         <p className="text-[10px] text-muted-foreground">
           Key 存于本地 SQLite 的 app_settings 表 (明文), 永不返回到 API 响应中。
           若 .env 也设置了 GEMINI_API_KEY, 此处保存的值优先生效。
