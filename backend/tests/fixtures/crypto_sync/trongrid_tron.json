@@ -1,0 +1,33 @@
+{
+  "_meta": {
+    "endpoint": "https://api.trongrid.io/v1/accounts/{addr}",
+    "note": "TronGrid /v1/accounts/<addr> returns balance (TRX in sun, 1 TRX = 1e6 sun) + trc20 array (each item is {contract_address: token_amount_str}). Decimals come from /v1/contracts/<contract>."
+  },
+  "account": {
+    "data": [
+      {
+        "address": "ExampleTronAddressXXXXXXXXXXXXXXXX",
+        "balance": 5000000,
+        "create_time": 1700000000000,
+        "trc20": [
+          {"TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": "1000000"},
+          {"TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj": "500000"}
+        ]
+      }
+    ],
+    "success": true,
+    "meta": {"page_size": 1}
+  },
+  "contract_metadata": {
+    "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": {"symbol": "USDT", "decimals": 6, "name": "Tether USD"},
+    "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj": {"symbol": "USDC", "decimals": 6, "name": "USD Coin"}
+  },
+  "_expected": {
+    "_note": "Native TRX = 5000000 sun = 5 TRX. USDT-TRC20 = 1000000 / 1e6 = 1 USDT. USDC-TRC20 = 500000 / 1e6 = 0.5 USDC. The TRC-20 array shape is unusual: each element is a single-key dict.",
+    "balances": [
+      {"symbol": "TRX", "contract": null, "quantity": "5", "decimals": 6},
+      {"symbol": "USDT", "contract": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "quantity": "1", "decimals": 6},
+      {"symbol": "USDC", "contract": "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj", "quantity": "0.5", "decimals": 6}
+    ]
+  }
+}

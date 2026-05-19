@@ -16,6 +16,9 @@ from app.db import get_db
 from app.models import Account, Transaction
 from app.models import touch_updated_at
 from app.services.cashflow import parse_period, recompute_period
+from app.services.wallet_sync.holdings_value import (
+    compute_holdings_value_per_account,
+)
 from app.schemas import (
     AccountCreate,
     AccountOut,
@@ -56,6 +59,7 @@ def _account_to_out(a: Account) -> AccountOut:
         currency=a.currency,
         initial_balance=_normalize_amount(a.initial_balance),
         is_active=a.is_active,
+        include_in_total=a.include_in_total,
         notes=a.notes,
         metadata_json=a.metadata_json,
         created_at=a.created_at,
@@ -105,15 +109,31 @@ async def list_all_balances(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return current balance for all active accounts (from v_account_balance view)."""
+    """Return current balance for all active accounts.
+
+    Fiat / cash / brokerage accounts read from ``v_account_balance``
+    (initial_balance + SUM(transactions)). Crypto wallet / exchange
+    accounts have no transactions of their own — their worth lives on
+    ``asset_holdings`` × the latest CoinGecko price, so we add that
+    value on top (initial_balance is 0 there by design).
+    """
     stmt = text("""
-        SELECT account_id, account_name, currency, balance
-        FROM v_account_balance
+        SELECT v.account_id, v.account_name, v.currency, v.balance, a.type
+        FROM v_account_balance v
+        JOIN accounts a ON a.id = v.account_id
     """)
-    result = await db.execute(stmt)
-    rows = result.all()
+    rows = (await db.execute(stmt)).all()
+
+    crypto_account_ids = [r[0] for r in rows if r[4] in ("crypto_wallet", "exchange")]
+    crypto_value = await compute_holdings_value_per_account(db, crypto_account_ids)
+
     balances = [
-        BalanceOut(account_id=r[0], account_name=r[1], currency=r[2], balance=_normalize_amount(r[3]))
+        BalanceOut(
+            account_id=r[0],
+            account_name=r[1],
+            currency=r[2],
+            balance=_normalize_amount(Decimal(str(r[3] or 0)) + crypto_value.get(r[0], Decimal("0"))),
+        )
         for r in rows
     ]
     return ApiSuccess(data=balances)
@@ -140,16 +160,21 @@ async def get_account_balance(
     db: AsyncSession = Depends(get_db),
 ):
     stmt = text("""
-        SELECT account_id, account_name, currency, balance
-        FROM v_account_balance
-        WHERE account_id = :aid
+        SELECT v.account_id, v.account_name, v.currency, v.balance, a.type
+        FROM v_account_balance v
+        JOIN accounts a ON a.id = v.account_id
+        WHERE v.account_id = :aid
     """)
-    result = await db.execute(stmt, {"aid": account_id})
-    row = result.first()
+    row = (await db.execute(stmt, {"aid": account_id})).first()
     if not row:
         raise NotFoundError("Account", account_id)
+    balance = Decimal(str(row[3] or 0))
+    if row[4] in ("crypto_wallet", "exchange"):
+        crypto = await compute_holdings_value_per_account(db, [account_id])
+        balance += crypto.get(account_id, Decimal("0"))
     return ApiSuccess(data=BalanceOut(
-        account_id=row[0], account_name=row[1], currency=row[2], balance=_normalize_amount(row[3])
+        account_id=row[0], account_name=row[1], currency=row[2],
+        balance=_normalize_amount(balance),
     ))
 
 

@@ -17,6 +17,7 @@ from app.api.v1 import (
     bank_sync,
     notes,
     llm,
+    wallet_sync,
 )
 
 api_router = APIRouter()
@@ -35,3 +36,6 @@ api_router.include_router(notion.router, prefix="/notion", tags=["Notion Sync"])
 api_router.include_router(bank_sync.router, prefix="/bank-sync", tags=["Bank Sync"])
 api_router.include_router(notes.router, prefix="/categorization-notes", tags=["Knowledge Base"])
 api_router.include_router(llm.router, prefix="/llm", tags=["LLM Classification"])
+# wallet_sync owns sub-routes under /accounts/{id}/… so it mounts at the
+# api root rather than under its own prefix.
+api_router.include_router(wallet_sync.router, tags=["Wallet Sync"])

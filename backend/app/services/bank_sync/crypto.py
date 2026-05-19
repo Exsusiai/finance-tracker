@@ -10,12 +10,24 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 def _get_key() -> bytes:
-    """Get encryption key from environment variable.
+    """Get encryption key from runtime config.
 
-    The key must be a 32-byte (64 hex chars) string stored in
-    FINANCE_BANK_ENCRYPTION_KEY environment variable.
+    Reads from Settings (pydantic-settings, which loads .env at startup)
+    first, then falls back to os.environ for the test path where the env
+    var is set directly without going through Settings. The previous
+    implementation read os.environ only — that breaks for the production
+    flow because pydantic-settings populates Settings without writing
+    back to os.environ.
     """
-    key_hex = os.environ.get("FINANCE_BANK_ENCRYPTION_KEY", "")
+    key_hex = ""
+    # Prefer Settings so a value in .env is honoured.
+    try:
+        from app.core.config import get_settings
+        key_hex = get_settings().finance_bank_encryption_key or ""
+    except Exception:
+        pass
+    if not key_hex:
+        key_hex = os.environ.get("FINANCE_BANK_ENCRYPTION_KEY", "")
     if not key_hex:
         raise RuntimeError(
             "FINANCE_BANK_ENCRYPTION_KEY not set. "
@@ -53,3 +65,28 @@ def decrypt_credentials(encrypted: str) -> dict[str, Any]:
     aesgcm = AESGCM(key)
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return json.loads(plaintext.decode("utf-8"))
+
+
+def encrypt_str(value: str) -> str:
+    """Encrypt a single string to a base64 blob.
+
+    Format: base64(nonce[12] + ciphertext + tag[16]). Each call uses a
+    fresh nonce so the same plaintext does NOT produce stable ciphertext
+    (defence in depth — leaking that two columns hold the same value is
+    useless to an attacker).
+    """
+    key = _get_key()
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)
+    ciphertext = aesgcm.encrypt(nonce, value.encode("utf-8"), None)
+    return base64.b64encode(nonce + ciphertext).decode("ascii")
+
+
+def decrypt_str(encrypted: str) -> str:
+    """Inverse of :func:`encrypt_str`."""
+    key = _get_key()
+    raw = base64.b64decode(encrypted)
+    nonce = raw[:12]
+    ciphertext = raw[12:]
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(nonce, ciphertext, None).decode("utf-8")

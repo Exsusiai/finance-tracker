@@ -74,6 +74,15 @@ class Settings(BaseSettings):
     # `app_settings` KV table so the UI can edit them without a restart.
     gemini_api_key: str = ""
 
+    # --- Crypto wallet sync (P1-4) ---
+    # Alchemy API key — required for every EVM chain (Ethereum / Arbitrum /
+    # Optimism / Base / Polygon / zkSync / Linea / Scroll / Mantle / Blast).
+    # Free tier of 300M Compute Units / month is plenty for personal use.
+    # Sign up: https://www.alchemy.com  (no key = EVM sync disabled; other
+    # chains keep working). Bitcoin, Solana, Tron use public endpoints and
+    # don't require a key.
+    alchemy_api_key: str = ""
+
     # --- Bank sync (GoCardless / Nordigen) ---
     # Encrypted credentials are stored per-connection in DB.
     # This key encrypts/decrypts them. Generate once and keep safe!

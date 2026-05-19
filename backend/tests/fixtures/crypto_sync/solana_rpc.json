@@ -1,0 +1,85 @@
+{
+  "_meta": {
+    "endpoint": "https://api.mainnet-beta.solana.com",
+    "note": "Two JSON-RPC calls. getBalance returns lamports (1 SOL = 1e9 lamports). getTokenAccountsByOwner returns SPL token accounts with parsed amount + decimals embedded."
+  },
+  "getBalance": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "context": {"slot": 100000000},
+      "value": 2500000000
+    }
+  },
+  "getTokenAccountsByOwner": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "context": {"slot": 100000000},
+      "value": [
+        {
+          "account": {
+            "data": {
+              "parsed": {
+                "info": {
+                  "isNative": false,
+                  "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+                  "owner": "ExampleOwnerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                  "tokenAmount": {
+                    "amount": "150000000",
+                    "decimals": 6,
+                    "uiAmount": 150.0,
+                    "uiAmountString": "150"
+                  }
+                },
+                "type": "account"
+              },
+              "program": "spl-token",
+              "space": 165
+            },
+            "executable": false,
+            "lamports": 2039280,
+            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "rentEpoch": 0
+          },
+          "pubkey": "TokAcct1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        },
+        {
+          "account": {
+            "data": {
+              "parsed": {
+                "info": {
+                  "isNative": false,
+                  "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                  "owner": "ExampleOwnerXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                  "tokenAmount": {
+                    "amount": "75000000",
+                    "decimals": 6,
+                    "uiAmount": 75.0,
+                    "uiAmountString": "75"
+                  }
+                },
+                "type": "account"
+              },
+              "program": "spl-token",
+              "space": 165
+            },
+            "executable": false,
+            "lamports": 2039280,
+            "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "rentEpoch": 0
+          },
+          "pubkey": "TokAcct2XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+        }
+      ]
+    }
+  },
+  "_expected": {
+    "_note": "Native = 2500000000 lamports = 2.5 SOL. Es9v... = USDT-SPL (150). EPjF... = USDC-SPL (75). Symbol identification by mint address: we keep mint as contract; symbol resolution is upstream's job (CoinGecko by contract).",
+    "balances": [
+      {"symbol": "SOL", "contract": null, "quantity": "2.5", "decimals": 9},
+      {"symbol": null, "contract": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "quantity": "150", "decimals": 6},
+      {"symbol": null, "contract": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "quantity": "75", "decimals": 6}
+    ]
+  }
+}

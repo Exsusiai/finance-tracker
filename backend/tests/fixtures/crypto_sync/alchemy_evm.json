@@ -1,0 +1,62 @@
+{
+  "_meta": {
+    "endpoint": "https://eth-mainnet.g.alchemy.com/v2/<KEY>",
+    "request": {
+      "method": "alchemy_getTokenBalances",
+      "params": ["0x1111111111111111111111111111111111111111", "erc20"]
+    },
+    "note": "Two-step shape: getTokenBalances returns balances + getTokenMetadata enriches each token. Native ETH balance comes from a separate eth_getBalance call. Numbers are hex-encoded (wei / token base units)."
+  },
+  "eth_getBalance": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": "0x1bc16d674ec80000"
+  },
+  "alchemy_getTokenBalances": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "address": "0x1111111111111111111111111111111111111111",
+      "tokenBalances": [
+        {
+          "contractAddress": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+          "tokenBalance": "0x0000000000000000000000000000000000000000000000000000000005f5e100"
+        },
+        {
+          "contractAddress": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "tokenBalance": "0x000000000000000000000000000000000000000000000000000000003b9aca00"
+        },
+        {
+          "contractAddress": "0x6b175474e89094c44da98b954eedeac495271d0f",
+          "tokenBalance": "0x0000000000000000000000000000000000000000000000056bc75e2d63100000"
+        }
+      ]
+    }
+  },
+  "alchemy_getTokenMetadata": {
+    "0xdac17f958d2ee523a2206206994597c13d831ec7": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {"decimals": 6, "logo": null, "name": "Tether USD", "symbol": "USDT"}
+    },
+    "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {"decimals": 6, "logo": null, "name": "USD Coin", "symbol": "USDC"}
+    },
+    "0x6b175474e89094c44da98b954eedeac495271d0f": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "result": {"decimals": 18, "logo": null, "name": "Dai Stablecoin", "symbol": "DAI"}
+    }
+  },
+  "_expected": {
+    "_note": "What the parser should return. Native ETH = 0x1bc16d674ec80000 wei = 2 ETH. USDT = 0x5f5e100 = 1e8 = 100 USDT (6 decimals). USDC = 0x3b9aca00 = 1e9 = 1000 USDC (6 decimals). DAI = 0x56bc75e2d63100000 = 1e20 = 100 DAI (18 decimals).",
+    "balances": [
+      {"symbol": "ETH", "contract": null, "quantity": "2", "decimals": 18},
+      {"symbol": "USDT", "contract": "0xdac17f958d2ee523a2206206994597c13d831ec7", "quantity": "100", "decimals": 6},
+      {"symbol": "USDC", "contract": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "quantity": "1000", "decimals": 6},
+      {"symbol": "DAI", "contract": "0x6b175474e89094c44da98b954eedeac495271d0f", "quantity": "100", "decimals": 18}
+    ]
+  }
+}

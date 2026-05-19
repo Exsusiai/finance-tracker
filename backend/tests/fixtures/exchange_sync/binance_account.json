@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "endpoint": "GET https://api.binance.com/api/v3/account",
+    "auth": "Header X-MBX-APIKEY + query param `signature` = HMAC-SHA256(query_string, api_secret)",
+    "note": "Spot account only. `balances` is the full list; we filter out (free + locked) == 0."
+  },
+  "account": {
+    "makerCommission": 10,
+    "takerCommission": 10,
+    "buyerCommission": 0,
+    "sellerCommission": 0,
+    "canTrade": true,
+    "canWithdraw": false,
+    "canDeposit": false,
+    "updateTime": 1700000000000,
+    "accountType": "SPOT",
+    "balances": [
+      {"asset": "BTC",  "free": "0.50000000", "locked": "0.10000000"},
+      {"asset": "ETH",  "free": "5.00000000", "locked": "0.00000000"},
+      {"asset": "USDT", "free": "1000.00000000", "locked": "250.00000000"},
+      {"asset": "BNB",  "free": "0.00000000", "locked": "0.00000000"},
+      {"asset": "DOGE", "free": "0.00000001", "locked": "0.00000000"}
+    ],
+    "permissions": ["SPOT"]
+  },
+  "_expected": {
+    "_note": "Skip BNB (both 0). DOGE kept (1 sat > 0). BTC = 0.5+0.1 = 0.6, ETH = 5, USDT = 1250, DOGE = 0.00000001. Symbol stays uppercase; contract is None because CEX entries are not on-chain.",
+    "balances": [
+      {"symbol": "BTC",  "contract": null, "quantity": "0.6",        "decimals": 8},
+      {"symbol": "ETH",  "contract": null, "quantity": "5",          "decimals": 8},
+      {"symbol": "USDT", "contract": null, "quantity": "1250",       "decimals": 8},
+      {"symbol": "DOGE", "contract": null, "quantity": "0.00000001", "decimals": 8}
+    ]
+  }
+}

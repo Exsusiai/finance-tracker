@@ -67,7 +67,12 @@ class PaginationMeta(BaseModel):
 
 class AccountCreate(BaseModel):
     name: str = Field(max_length=255)
-    type: str = Field(pattern=r"^(bank|credit_card|brokerage|crypto_wallet|cash|other)$")
+    # Mirrors models.AccountType + ck_account_type CHECK. When adding a
+    # new type, sync FOUR places: this regex, models.AccountType,
+    # the Account.__table_args__ CHECK, and a new alembic migration.
+    type: str = Field(
+        pattern=r"^(bank|credit_card|brokerage|crypto_wallet|exchange|cash|other)$"
+    )
     institution: str | None = None
     account_number: str | None = None
     iban: str | None = None
@@ -85,6 +90,7 @@ class AccountUpdate(BaseModel):
     iban: str | None = None
     currency: str | None = None
     is_active: bool | None = None
+    include_in_total: bool | None = None
     notes: str | None = None
     metadata_json: str | None = None
 
@@ -99,6 +105,7 @@ class AccountOut(BaseModel):
     currency: str
     initial_balance: str
     is_active: bool
+    include_in_total: bool = True
     notes: str | None
     metadata_json: str | None
     created_at: str
@@ -585,6 +592,68 @@ class LLMCostOut(BaseModel):
     budget_usd: float
     remaining_usd: float
     period: str  # "YYYY-MM"
+
+
+# ─── Wallet Sync (P1-4) ────────────────────────────────────────────────────
+
+
+class ChainAddressIn(BaseModel):
+    chain: str = Field(min_length=1, max_length=50)
+    address: str = Field(min_length=1, max_length=128)
+    label: str | None = Field(default=None, max_length=255)
+
+
+class ChainAddressOut(BaseModel):
+    id: int
+    chain: str
+    address: str
+    label: str | None = None
+    last_synced_at: str | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class ExchangeConnectionIn(BaseModel):
+    exchange: str = Field(min_length=1, max_length=50)
+    api_key: str = Field(min_length=1)
+    api_secret: str = Field(min_length=1)
+    # Required for Bitget; ignored on Binance. Validated again service-side
+    # so the user gets a clean 4xx rather than upstream "Invalid sign".
+    passphrase: str | None = None
+
+
+class ExchangeConnectionOut(BaseModel):
+    """Never echoes secrets back to the client.
+
+    The frontend shows ``has_credentials`` to indicate the row exists; to
+    rotate the key the user PUTs a fresh ``ExchangeConnectionIn``.
+    """
+
+    id: int
+    exchange: str
+    has_credentials: bool
+    has_passphrase: bool
+    last_synced_at: str | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+
+
+class SyncResultOut(BaseModel):
+    label: str
+    chain: str | None = None
+    exchange: str | None = None
+    synced: int
+    error: str | None = None
+
+
+class SyncSummaryOut(BaseModel):
+    account_id: int
+    account_type: str
+    total_synced: int
+    total_errors: int
+    results: list[SyncResultOut]
 
 
 # ─── System / Settings ─────────────────────────────────────────────────────

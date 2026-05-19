@@ -46,6 +46,7 @@ import {
   AccountForm,
   ACCOUNT_TYPE_ICONS,
   ACCOUNT_TYPE_LABELS,
+  INVESTMENT_TYPES,
 } from "@/components/account-form";
 
 type SortKey =
@@ -319,21 +320,34 @@ export default function AssetsPage() {
               </svg>
               新建账户
             </button>
-            <button
-              onClick={() => openAddHolding()}
-              disabled={!hasAccounts}
-              title={
-                hasAccounts
-                  ? "持仓用于股票/加密/黄金等投资品；银行存取款请用账户卡上的「存/取款」"
-                  : "请先创建至少一个账户"
-              }
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              添加持仓
-            </button>
+            {/* Holdings only apply to investment-type accounts (brokerage
+                / crypto_wallet / exchange). Disable the top-level CTA
+                when the user has no such account yet — adds to a bank
+                account would never reach the UI anyway since the form
+                filters its account picker. */}
+            {(() => {
+              const investmentAccountCount = (accounts ?? []).filter((a) =>
+                INVESTMENT_TYPES.has(a.type),
+              ).length;
+              const enabled = investmentAccountCount > 0;
+              return (
+                <button
+                  onClick={() => openAddHolding()}
+                  disabled={!enabled}
+                  title={
+                    enabled
+                      ? "持仓用于股票 / 加密 / 黄金等投资品；银行存取款请用账户卡上的「存/取款」"
+                      : "请先创建至少一个投资类账户（券商 / 加密钱包 / 交易所）"
+                  }
+                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  添加持仓
+                </button>
+              );
+            })()}
           </div>
         </div>
 
@@ -1313,9 +1327,16 @@ function AccountsPanel({
             key={a.id}
             className={cn(
               "rounded-xl border border-border bg-card p-5 transition-colors",
-              a.is_active ? "hover:border-primary/40" : "opacity-60",
+              a.is_active && a.include_in_total
+                ? "hover:border-primary/40"
+                : "opacity-60",
             )}
           >
+            {!a.include_in_total && (
+              <div className="mb-2 text-[10px] px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-300 font-medium inline-block">
+                不计入总资产
+              </div>
+            )}
             <div className="flex items-start justify-between mb-3 gap-3">
               <div className="flex items-start gap-3 min-w-0">
                 <span className="text-2xl shrink-0" aria-hidden>
@@ -1352,18 +1373,26 @@ function AccountsPanel({
                   </p>
                 );
               })()}
-              <p className="text-xs text-muted-foreground mt-1">
-                持仓数 {hCount}
-              </p>
+              {INVESTMENT_TYPES.has(a.type) && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  持仓数 {hCount}
+                </p>
+              )}
             </div>
 
             <div className="mt-4 flex flex-wrap items-center gap-1.5">
-              <button
-                onClick={() => onAddHolding(a.id)}
-                className="text-xs px-2.5 py-1.5 rounded-md text-primary hover:bg-primary/10 transition-colors"
-              >
-                + 添加持仓
-              </button>
+              {/* Holdings are an investment-account concept (stocks, crypto,
+                  gold, …). Bank / credit card / cash accounts only carry
+                  transactions, so we hide the "add holding" affordance for
+                  them. */}
+              {INVESTMENT_TYPES.has(a.type) && (
+                <button
+                  onClick={() => onAddHolding(a.id)}
+                  className="text-xs px-2.5 py-1.5 rounded-md text-primary hover:bg-primary/10 transition-colors"
+                >
+                  + 添加持仓
+                </button>
+              )}
               {bal && (
                 <button
                   onClick={() => onAdjust(bal)}

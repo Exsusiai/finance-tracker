@@ -13,6 +13,7 @@ import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { cn, formatCurrency } from "@/lib/utils";
 import { CategoryManager } from "@/components/category-manager";
 import { SubaccountListEditor } from "@/components/subaccount-list-editor";
+import { SyncAccountButton } from "@/components/sync-account-button";
 import { LLMSettingsForm } from "@/components/llm-settings-form";
 import { CategorizationNotesTable } from "@/components/categorization-notes-table";
 
@@ -122,7 +123,7 @@ export default function SettingsPage() {
                     key={a.id}
                     className={cn(
                       "rounded-xl border border-border bg-card p-5 transition-colors",
-                      a.is_active
+                      a.is_active && a.include_in_total
                         ? "hover:border-primary/40"
                         : "opacity-60",
                     )}
@@ -143,9 +144,19 @@ export default function SettingsPage() {
                           )}
                         </div>
                       </div>
-                      <span className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium shrink-0">
-                        {typeLabel}
-                      </span>
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium">
+                          {typeLabel}
+                        </span>
+                        {!a.include_in_total && (
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-300 font-medium"
+                            title="此账户已在「编辑」中关闭了「纳入总资产」"
+                          >
+                            不计入总资产
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-end justify-between gap-3">
                       <div>
@@ -181,6 +192,11 @@ export default function SettingsPage() {
                       <p className="text-[10px] text-muted-foreground mt-2">
                         已停用
                       </p>
+                    )}
+                    {(a.type === "crypto_wallet" || a.type === "exchange") && (
+                      <div className="mt-2 pt-2 border-t border-border/60 flex justify-end">
+                        <SyncAccountButton accountId={a.id} />
+                      </div>
                     )}
                     <SubaccountListEditor account={a} />
                   </div>
@@ -338,7 +354,16 @@ function ApiTokenInput() {
           <span className="ml-1 text-amber-600 dark:text-amber-400">未设置</span>
         )}
       </div>
-      <div className="flex gap-2">
+      {/* Wrapping in a <form> silences the DOM warning about an orphan
+          password field + lets browsers/password managers recognise the
+          input. Submit handler stops the default page reload. */}
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleSave();
+        }}
+      >
         <input
           type="password"
           value={token}
@@ -349,20 +374,21 @@ function ApiTokenInput() {
           autoComplete="off"
         />
         <button
-          onClick={handleSave}
+          type="submit"
           className="px-3 py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
         >
           保存
         </button>
         {hasStored && (
           <button
+            type="button"
             onClick={handleClear}
             className="px-3 py-2 text-sm font-medium rounded-md border border-border hover:bg-muted transition-colors"
           >
             清除
           </button>
         )}
-      </div>
+      </form>
       {saved && (
         <p className="text-xs text-emerald-600 dark:text-emerald-400">已保存，刷新页面后生效</p>
       )}

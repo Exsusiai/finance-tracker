@@ -14,7 +14,7 @@ from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db import get_db
-from app.models import AssetHolding, Asset, MarketPrice, FxRate
+from app.models import Account, AssetHolding, Asset, MarketPrice, FxRate
 from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
@@ -409,6 +409,17 @@ async def _convert_to_base(
       4. Triangulate via USD pivot
       Returns None when no path is available.
     """
+    # USDT is a USD-pegged stablecoin; the fiat FX scheduler doesn't
+    # populate USDT rows, so without this alias every crypto holding
+    # (priced in USDT by the wallet_sync pipeline) would be silently
+    # dropped from net_worth aggregation. Same trick for USDC / DAI —
+    # all major USD-pegged stablecoins.
+    _USD_PEGGED = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FRAX"}
+    if src_currency in _USD_PEGGED:
+        src_currency = "USD"
+    if base_currency in _USD_PEGGED:
+        base_currency = "USD"
+
     if src_currency == base_currency:
         return amount
 
@@ -420,8 +431,11 @@ async def _convert_to_base(
     if inverse is not None and inverse > 0:
         return amount / inverse
 
-    # Triangulate via USD
-    for pivot in ("USD", "EUR"):
+    # Triangulate via a pivot currency. CNY is critical because the live
+    # FX scheduler emits everything keyed `base_currency='CNY'`, so for
+    # most (src, base) combos the only viable bridge is CNY. USD / EUR
+    # kept for legacy / cached-rate paths.
+    for pivot in ("CNY", "USD", "EUR"):
         if pivot in (src_currency, base_currency):
             continue
         a_direct = await _latest_fx_rate(db, src_currency, pivot)
@@ -453,14 +467,22 @@ async def net_worth(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
-    """Aggregate cash (account balances) + investments (holdings market value) into total net worth."""
+    """Aggregate cash (account balances) + investments (holdings market value) into total net worth.
+
+    Honours per-account ``include_in_total`` — accounts the user
+    explicitly excluded are dropped from BOTH cash and investment
+    aggregation but still appear in the per-account balance list.
+    """
     base_currency = settings.base_currency
 
-    # 1. Cash: account balances grouped by currency
+    # 1. Cash: account balances grouped by currency. JOIN accounts to
+    # drop opted-out rows from the SUM.
     balances_stmt = text("""
-        SELECT currency, SUM(balance) AS total
-        FROM v_account_balance
-        GROUP BY currency
+        SELECT v.currency, SUM(v.balance) AS total
+        FROM v_account_balance v
+        JOIN accounts a ON a.id = v.account_id
+        WHERE a.include_in_total = 1 AND a.deleted_at IS NULL
+        GROUP BY v.currency
     """)
     balances_result = await db.execute(balances_stmt)
     cash_total = Decimal("0")
@@ -485,7 +507,19 @@ async def net_worth(
     # Sprint 4 FIX-22 (review V3 §V3-P1-5): track original_value AND
     # base_value per quote currency, so callers reading
     # investment_by_currency["EUR"] aren't surprised that the value is in CNY.
-    inv_stmt = select(AssetHolding, Asset).join(Asset, AssetHolding.asset_id == Asset.id)
+    # P2.3: same opt-out check as the cash side — JOIN accounts +
+    # filter include_in_total + is_active (skip soft-deleted holdings
+    # too, which the per-chain re-sync may have left at quantity=0).
+    inv_stmt = (
+        select(AssetHolding, Asset)
+        .join(Asset, AssetHolding.asset_id == Asset.id)
+        .join(Account, Account.id == AssetHolding.account_id)
+        .where(
+            Account.include_in_total == True,  # noqa: E712
+            Account.deleted_at.is_(None),
+            AssetHolding.is_active == True,  # noqa: E712
+        )
+    )
     inv_result = await db.execute(inv_stmt)
     investment_total = Decimal("0")
     investment_by_currency: dict[str, dict[str, Decimal]] = {}

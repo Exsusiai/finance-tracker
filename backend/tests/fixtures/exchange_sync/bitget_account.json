@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "endpoints": [
+      "GET https://api.bitget.com/api/v2/spot/account/assets — spot",
+      "GET https://api.bitget.com/api/v2/mix/account/accounts?productType=USDT-FUTURES — USDT-M futures",
+      "GET https://api.bitget.com/api/v2/mix/account/accounts?productType=USDC-FUTURES — USDC-M futures",
+      "GET https://api.bitget.com/api/v2/mix/account/accounts?productType=COIN-FUTURES — coin-margined futures"
+    ],
+    "auth": "Headers: ACCESS-KEY / ACCESS-SIGN / ACCESS-TIMESTAMP / ACCESS-PASSPHRASE. ACCESS-SIGN = base64(HMAC_SHA256(timestamp + METHOD + requestPath + queryString + body, secret)). queryString is included for GET URLs with ?params.",
+    "note": "v2 API. Spot returns asset objects; futures returns margin-coin accounts. We aggregate (available + locked / available + frozen) across ALL four endpoints and dedupe by coin symbol. unrealizedPL is intentionally NOT counted — keeps net worth from flickering with PnL."
+  },
+  "spot_assets": {
+    "code": "00000",
+    "msg": "success",
+    "requestTime": 1700000000000,
+    "data": [
+      {"coin": "BTC",  "available": "0.20000000", "frozen": "0.05000000", "locked": "0", "limitAvailable": "0", "uTime": "1700000000000"},
+      {"coin": "USDT", "available": "500.00000000", "frozen": "0.00000000", "locked": "0", "limitAvailable": "0", "uTime": "1700000000000"},
+      {"coin": "SOL",  "available": "10.00000000", "frozen": "0.00000000", "locked": "0", "limitAvailable": "0", "uTime": "1700000000000"},
+      {"coin": "XRP",  "available": "0.00000000", "frozen": "0.00000000", "locked": "0", "limitAvailable": "0", "uTime": "1700000000000"}
+    ]
+  },
+  "usdt_futures": {
+    "code": "00000",
+    "msg": "success",
+    "requestTime": 1700000000000,
+    "data": [
+      {
+        "marginCoin": "USDT",
+        "available": "300.00000000",
+        "locked": "50.00000000",
+        "equity": "351.20000000",
+        "unrealizedPL": "1.20000000"
+      }
+    ]
+  },
+  "usdc_futures": {
+    "code": "00000",
+    "msg": "success",
+    "requestTime": 1700000000000,
+    "data": [
+      {
+        "marginCoin": "USDC",
+        "available": "100.00000000",
+        "locked": "0.00000000",
+        "equity": "100.00000000",
+        "unrealizedPL": "0.00000000"
+      }
+    ]
+  },
+  "coin_futures": {
+    "code": "00000",
+    "msg": "success",
+    "requestTime": 1700000000000,
+    "data": [
+      {
+        "marginCoin": "BTC",
+        "available": "0.01000000",
+        "locked": "0.00500000",
+        "equity": "0.01500000",
+        "unrealizedPL": "0"
+      },
+      {
+        "marginCoin": "ETH",
+        "available": "0",
+        "locked": "0",
+        "equity": "0",
+        "unrealizedPL": "0"
+      }
+    ]
+  },
+  "_expected": {
+    "_note": "BTC: spot 0.25 + coin-futures 0.015 = 0.265. USDT: spot 500 + usdt-futures (300+50) = 850. USDC: usdc-futures 100. SOL: spot 10. XRP: 0 (skipped). ETH coin-futures: 0 (skipped). unrealizedPL NOT counted.",
+    "balances": [
+      {"symbol": "BTC",  "contract": null, "quantity": "0.265", "decimals": 8},
+      {"symbol": "USDT", "contract": null, "quantity": "850",   "decimals": 8},
+      {"symbol": "USDC", "contract": null, "quantity": "100",   "decimals": 8},
+      {"symbol": "SOL",  "contract": null, "quantity": "10",    "decimals": 8}
+    ]
+  }
+}

@@ -49,6 +49,9 @@ class AccountType(StrEnum):
     credit_card = "credit_card"
     brokerage = "brokerage"
     crypto_wallet = "crypto_wallet"
+    # P1-4: CEX (Binance / Bitget / …) with read-only API keys stored
+    # encrypted in `exchange_connections`.
+    exchange = "exchange"
     cash = "cash"
     other = "other"
 
@@ -69,6 +72,12 @@ class Account(Base):
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
     initial_balance: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Per-account opt-out from grand-total aggregation. When False the
+    # account still appears in lists & per-account views but is dropped
+    # from net_worth (cash + investment) and balance summaries. Used for
+    # e.g. business / shared / experimental accounts the user doesn't
+    # want to count toward their personal net worth.
+    include_in_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     notes: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
@@ -83,7 +92,7 @@ class Account(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('bank','credit_card','brokerage','crypto_wallet','cash','other')",
+            "type IN ('bank','credit_card','brokerage','crypto_wallet','exchange','cash','other')",
             name="ck_account_type",
         ),
     )
@@ -294,10 +303,23 @@ class AssetHolding(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     asset_id: Mapped[int] = mapped_column(Integer, ForeignKey("assets.id", ondelete="RESTRICT"), nullable=False)
+    # P1-4: chain that this holding sits on. Empty string for non-crypto
+    # holdings (stocks, cash, gold, …) — kept NOT NULL so the
+    # (account_id, asset_id, chain) unique works cleanly under SQLite NULL
+    # semantics. For crypto: "ethereum" / "arbitrum" / "bitcoin" / etc.
+    chain: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
     avg_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     cost_currency: Mapped[str | None] = mapped_column(String(10))
     last_synced_at: Mapped[str | None] = mapped_column(String(30))
+    # P1-4 sync semantics: re-sync writes `is_active` + `quantity` based on
+    # whether the token still appeared in the latest fetch.
+    #   - present this round  → is_active=True,  quantity=<fetched>
+    #   - missing this round  → is_active=False, quantity=0
+    # is_active is kept separate from quantity so the UI can hide stale
+    # rows by default while still preserving the row identity (history
+    # of last_synced_at, created_at, …).
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
@@ -306,7 +328,10 @@ class AssetHolding(Base):
     asset: Mapped["Asset"] = relationship(back_populates="holdings")
 
     __table_args__ = (
-        UniqueConstraint("account_id", "asset_id", name="uq_holding_account_asset"),
+        UniqueConstraint(
+            "account_id", "asset_id", "chain",
+            name="uq_holding_account_asset_chain",
+        ),
     )
 
 
@@ -464,3 +489,86 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+
+
+# ─── Chain Addresses (P1-4 crypto wallet) ──────────────────────────────────
+
+
+class ChainAddress(Base):
+    """One on-chain address that belongs to a `crypto_wallet` account.
+
+    Each account can aggregate addresses across chains — e.g. one ETH +
+    one BTC + one SOL address are all part of the same "wallet" entity.
+    `(account_id, chain, address)` is unique. The same EVM address may
+    legitimately appear on multiple chains (Ethereum + Arbitrum + Base
+    share addresses) — each as its own row.
+    """
+
+    __tablename__ = "chain_addresses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    # Free-form chain id (e.g. "ethereum", "arbitrum", "bitcoin", "solana",
+    # "tron"). Validated in service layer, not via DB CHECK, so adding a new
+    # chain doesn't require a migration.
+    chain: Mapped[str] = mapped_column(String(50), nullable=False)
+    address: Mapped[str] = mapped_column(String(128), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(255))
+    # Last successful sync (UTC ISO-8601). NULL = never synced.
+    last_synced_at: Mapped[str | None] = mapped_column(String(30))
+    last_sync_status: Mapped[str | None] = mapped_column(String(20))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id", "chain", "address",
+            name="uq_chain_address_account_chain_addr",
+        ),
+        Index("ix_chain_addresses_account_id", "account_id"),
+    )
+
+
+# ─── Exchange Connections (P1-4 CEX read-only API) ─────────────────────────
+
+
+class ExchangeConnection(Base):
+    """Read-only API credentials for a CEX account (Binance / Bitget).
+
+    Mirrors the `bank_connections` pattern: AES-256-GCM encrypted blobs
+    keyed by `FINANCE_BANK_ENCRYPTION_KEY`. `api_passphrase_enc` is kept
+    nullable because Binance/Bitget don't use a passphrase, but OKX-style
+    exchanges that we may add later do.
+    """
+
+    __tablename__ = "exchange_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    api_key_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    api_secret_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    api_passphrase_enc: Mapped[str | None] = mapped_column(Text)
+    last_synced_at: Mapped[str | None] = mapped_column(String(30))
+    last_sync_status: Mapped[str | None] = mapped_column(String(20))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+
+    __table_args__ = (
+        CheckConstraint(
+            "exchange IN ('binance','bitget')",
+            name="ck_exchange_conn_exchange",
+        ),
+        UniqueConstraint(
+            "account_id", "exchange",
+            name="uq_exchange_conn_account_exchange",
+        ),
+        Index("ix_exchange_conn_account_id", "account_id"),
+    )

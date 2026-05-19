@@ -551,6 +551,7 @@ export interface AccountOut {
   currency: string;
   initial_balance: string;
   is_active: boolean;
+  include_in_total: boolean;
   notes: string | null;
   metadata_json: string | null;
   created_at: string;
@@ -581,6 +582,7 @@ export interface AccountUpdateInput {
   iban?: string | null;
   currency?: string;
   is_active?: boolean;
+  include_in_total?: boolean;
   notes?: string;
   metadata_json?: string | null;
 }
@@ -991,4 +993,108 @@ export async function updateLLMSettings(
 
 export async function fetchLLMCost(): Promise<LLMCostOut> {
   return request(`/api/v1/llm/cost`);
+}
+
+// ─── Wallet sync (P1-4) ─────────────────────────────────────────────────────
+
+export interface ChainAddressOut {
+  id: number;
+  chain: string;
+  address: string;
+  label: string | null;
+  last_synced_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+}
+
+export interface ChainAddressInput {
+  chain: string;
+  address: string;
+  label?: string | null;
+}
+
+export async function fetchChainAddresses(
+  accountId: number,
+): Promise<ChainAddressOut[]> {
+  return request(`/api/v1/accounts/${accountId}/addresses`);
+}
+
+export async function addChainAddress(
+  accountId: number,
+  data: ChainAddressInput,
+): Promise<ChainAddressOut> {
+  return request(`/api/v1/accounts/${accountId}/addresses`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteChainAddress(
+  accountId: number,
+  addrId: number,
+): Promise<{ deleted: number }> {
+  return request(`/api/v1/accounts/${accountId}/addresses/${addrId}`, {
+    method: "DELETE",
+  });
+}
+
+export interface ExchangeConnectionOut {
+  id: number;
+  exchange: string;
+  has_credentials: boolean;
+  has_passphrase: boolean;
+  last_synced_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+}
+
+export interface ExchangeConnectionInput {
+  exchange: "binance" | "bitget";
+  api_key: string;
+  api_secret: string;
+  passphrase?: string | null;
+}
+
+export async function fetchExchangeConnection(
+  accountId: number,
+): Promise<ExchangeConnectionOut | null> {
+  return request(`/api/v1/accounts/${accountId}/exchange-connection`);
+}
+
+export async function upsertExchangeConnection(
+  accountId: number,
+  data: ExchangeConnectionInput,
+): Promise<ExchangeConnectionOut> {
+  return request(`/api/v1/accounts/${accountId}/exchange-connection`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteExchangeConnection(
+  accountId: number,
+): Promise<{ deleted: number }> {
+  return request(`/api/v1/accounts/${accountId}/exchange-connection`, {
+    method: "DELETE",
+  });
+}
+
+export interface SyncResultOut {
+  label: string;
+  chain: string | null;
+  exchange: string | null;
+  synced: number;
+  error: string | null;
+}
+
+export interface SyncSummaryOut {
+  account_id: number;
+  account_type: string;
+  total_synced: number;
+  total_errors: number;
+  results: SyncResultOut[];
+}
+
+export async function syncAccount(accountId: number): Promise<SyncSummaryOut> {
+  return request(`/api/v1/accounts/${accountId}/sync`, { method: "POST" });
 }
