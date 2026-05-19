@@ -2,9 +2,11 @@
 
 > 起源：用户 2026-05-03 提出"新建加密钱包账户时只填公钥即同步"
 >
+> **状态（2026-05-19）**：✅ **阶段 1 已实装** + Phase 1 价格自动 + Phase 2 include_in_total / Bitget 合约。可用、稳定、有 79 项单测覆盖。剩余可选扩展：Binance 合约钱包、持仓表 UI 加列、长尾链补全（P2）。
+>
 > 决策范围（用户已确认 2026-05-03）：
 > - **覆盖**：主流 L1 + L2 全部纳入
-> - **范围**：仅现货持仓，**不含**质押 / LP / 借贷 / 衍生品
+> - **范围**：仅现货持仓 + CEX 合约钱包余额（按用户 2026-05-19 修订加入合约）
 > - **多地址聚合**：同一"加密钱包账户"可包含跨链多个地址（ETH+BTC+SOL 视为同一钱包）
 > - **预算**：以免费 tier 优先；不需要任何前置开销即可使用（解释见 §4）
 
@@ -138,20 +140,27 @@
 
 ## 6. 修订后的实施分期
 
-### 阶段 1（P1-4 第一波，约 3-4 天）
-- `AccountForm` `type=crypto_wallet` → **多地址输入框**（每行一个，前端按前缀自动识别链 + label）
-- `AccountForm` `type=exchange`（**新增枚举**）→ 选择 Binance / Bitget → 输入 API key + secret（**`finance_bank_encryption_key` 加密入库**，复用现有 `bank_connections` 加密管道）
-- 后端：
-  - 链同步 service（按链 dispatch）：Alchemy（全 EVM L1+L2）/ Blockstream（BTC）/ Helius（Solana）/ TronGrid（Tron）
-  - CEX 同步 service：Binance `GET /api/v3/account` + Bitget `GET /api/v2/spot/account/assets`（仅现货账户余额，不含合约/质押/理财）
-  - 统一接口：`POST /api/v1/accounts/{id}/sync` → 按 `account.type` 分发
-- 前端账户卡片增加「**立即同步**」按钮（手动触发）
-- 自动 upsert `asset_holdings.quantity`；未识别 token 在 `assets` 表新建（CoinGecko `simple/token_price` by contract address 拿价）
+### ✅ 阶段 1 已交付（2026-05-18~19）
+- ✅ `AccountForm` `type=crypto_wallet` 多地址输入（每行选链 + 地址 + 备注；创建后立刻进「添加地址」模式不关弹窗）
+- ✅ `AccountForm` `type=exchange`（新增枚举，machine 选 Binance / Bitget）+ API key/secret/passphrase（AES-256-GCM 加密入 `exchange_connections.api_*_enc` 三列，复用 `FINANCE_BANK_ENCRYPTION_KEY`）
+- ✅ 链同步 service `services/crypto_sync/`：Alchemy（11 EVM L1+L2）+ Blockstream（BTC）+ 公共 Solana RPC（**Helius 砍掉，公共 RPC 已足够**）+ TronGrid
+- ✅ CEX 同步 `services/exchange_sync/`：
+  - Binance `GET /api/v3/account`（仅现货）
+  - Bitget spot + USDT-M + USDC-M + COIN-M 四端点聚合，按 coin 跨端点 `sum(available + locked)`（不计 unrealizedPL）
+- ✅ Orchestrator `POST /api/v1/accounts/{id}/sync` 按 `account.type` 分发；per-source 失败不中断
+- ✅ 账户卡 ↻ 立即同步 按钮 + 每错误源详情显示
+- ✅ 价格自动发现 `services/market_data/coingecko.py`：同步后按 chain per-contract 拉 `token_price`（免费 tier 1-call 限制） + 按 ticker 拉 `simple/price` for natives
+- ✅ Spam 过滤 `services/wallet_sync/spam_filter.py`（URL / CLAIM / VISIT 等关键词；symbol 长度 > 20 字符）
+- ✅ Per-(chain, account) upsert：缺失 token 设 `quantity=0, is_active=False`；asset 按 symbol 去重
+- ✅ 加密总值进 `net_worth`（USDT/USDC/DAI 别名 USD；CNY pivot 三角换算）
+- ✅ `accounts.include_in_total` 字段 + AccountForm checkbox + 卡片 dim + 「不计入总资产」徽章
 
-### 阶段 2（P2，按需逐链/扩展）
-- 长尾链补全：BNB / AVAX / Polygon / Cosmos / Polkadot / Cardano / Sui / Aptos / TON
-- 接入 APScheduler（依赖 P0-1）→ 改为日级自动同步
-- 第二批 CEX：OKX / Coinbase / Kraken（视用户需要）
+### 阶段 2（可选 / P2）
+- ❌ **Binance 合约钱包**（USDT-M `/fapi/v2/account` + 币本位 `/dapi/v1/account`）— 与 Bitget 同 pattern，半天工作量；用户可选
+- ❌ **持仓表 UI 加列**（数量 / 当前价 / 市值 / 成本价）— 成本价手工录入（链上拿不到买入价上下文）；用户明确想要
+- ❌ 长尾链补全：BNB Smart Chain / AVAX C-Chain（Alchemy 支持，加映射）/ Cosmos / Polkadot / Cardano / Sui / Aptos / TON
+- ❌ 接入 APScheduler 改自动日级同步（依赖 P0-1）
+- ❌ 第二批 CEX：OKX / Coinbase / Kraken
 
 ### 阶段 3（暂不规划）
 - 质押 / LP / 借贷头寸（用户已明确"仅现货"）

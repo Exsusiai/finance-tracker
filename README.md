@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-✅ **已可用** — 5 家欧洲银行 PDF 解析（AMEX-DE / N26 / Revolut / TFBank / Advanzia）+ 自动分类与学习 + 跨账户转账识别 + 多币种切换 + 7 个 MCP tools。Sprint 0–4 + 2026-05-06/07 UAT 大版本（25 项关键修复、agent 多维架构审查、alembic 启用、22 项回归测试）已合入。
+✅ **已可用** — 5 家欧洲银行 PDF 解析 + 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密折算）+ 账户级「不计入总资产」开关 + 7 个 MCP tools。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈已合入；**242 个单测全过**。
 
 详细进度：`PROGRESS.md` · 最近一日工作日志：`docx/WORKLOG_2026-05-07.md` · 剩余优先级：`docx/ROADMAP.md` · 完整需求：`docx/PRD.md`
 
@@ -35,7 +35,9 @@ cd frontend && npm install && npm run dev -- -p 3010
 | **自动分类** | 4 大类（转账/支出/收入/收入子项）30+ 子类种子；70+ 规则关键词；用户改分类弹窗三选一传播范围（仅本笔 / 同名一起改 / 以后别再自动归类）+ 备注合并；同名预览数；inbox 自动通过命中规则的 tx |
 | **跨账户转账识别** | 评分制配对（金额 50 + 日期 0..30 + 描述提示 0..30 + IBAN +40，阈值 75 自动配对）+ 双向兜底解决无方向描述；MarkTransferDialog 必选转账分类；未配对面板列出所有 single-leg 跨行转账，可手动绑定对手账户（实腿优先 dedup，避免与已存在真腿重复造镜像）；synthetic mirror 后续真腿自动接管；解除绑定 + delete 自动清对手指针；子账户三层识别（关键词 / 用户清单 / 同账户 ±X 金额匹配）；防双计月度支出 |
 | **全局重新匹配** | 一键重跑 10 步流水线（孤儿指针清理 → 类型重判 → 规则重分类 → 子账户/IBAN 检测 → 跨账户配对 → orphan 修复 → 内部储蓄补全 → 重入收件箱 → cashflow 重算）；尊重 `source=manual` 与 `user_note`，永不覆盖手动行；type 重判带 audit trail，可单笔撤销 |
-| **资产估值** | yfinance + CoinGecko + open.er-api 实时取价；APScheduler 定时刷新；7 种显示币种切换（CNY/USD/EUR/USDT/HKD/JPY/GBP）；FX direct/inverse/三角换算；记账域 fixed EUR、资产域可切换 |
+| **资产估值** | yfinance + CoinGecko + open.er-api 实时取价；APScheduler 定时刷新；7 种显示币种切换（CNY/USD/EUR/USDT/HKD/JPY/GBP）；FX direct/inverse/三角换算（含 CNY pivot）；USDT/USDC/DAI 等 stablecoin 自动别名 USD；记账域 fixed EUR、资产域可切换 |
+| **🆕 加密钱包 / CEX 同步**（P1-4） | 一个钱包账户聚合多链多地址（EVM L1+L2 / BTC / Solana / Tron，全部走免费节点）；CEX 走只读 API key（Binance 现货；Bitget 现货 + USDT-M + USDC-M + COIN-M 合约钱包聚合）；同步后自动 CoinGecko 拉价 + 写 holdings；垃圾空投 token 过滤；账户级「不计入总资产」开关 |
+| **🆕 LLM 智能分类**（P1-1） | 三层管道：L1 关键词 → L2 Gemini（可联网 grounding，知识库 few-shot 注入）→ L3 inbox 人工兜底；用户备注「污染」机制让 PayPal+amount 复合规则下次必走 LLM；月度成本上限自动 abstain；Settings UI 全可调 |
 | **现金流分析** | 月度 income/expense/savings/transfer/other snapshot；transaction CRUD 后自动重算；记账页月份导航 ◀▶ + ←/→ 快捷键；分类视图层级化（一级类目 → 二级 → 明细 + 占比条） |
 | **Agent 接口** | MCP server 7 tools（已 6 轮回归测试 9 bug 全修）；Anthropic / OpenAI / 任何 stdio MCP 客户端都能接 |
 

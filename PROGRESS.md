@@ -1,13 +1,48 @@
 # Finance Tracker — 项目进度
 
-> 修订日期: 2026-05-08
+> 修订日期: 2026-05-19
 > 根据"是否真正闭环并验证过"打分；详细分析见 `docx/REQUIREMENT_GAP.md`，剩余优先级见 `docx/ROADMAP.md`。
 
 ## 项目信息
 - **Repo**: https://github.com/Exsusiai/finance-tracker
-- **Git**: `feat/llm-classification` 分支（基于 `master`，待合并）
-- **本地端口**: Backend `8010`, Frontend `3010`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT 完成 + **P1-1 LLM 智能分类已实装**（feat 分支）。下一步：用户提供 GEMINI_API_KEY → 端到端 UAT → 合并；之后 P1-4（链上钱包）
+- **Git**: `master` 分支（feat/llm-classification 已合并；P1-4 + Phase 1/2 已 commit，本地领先 origin 2-4 个 commit）
+- **本地端口**: Backend `8010`, Frontend `3002`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
+- **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT + **P1-1 LLM 智能分类** + **P1-4 加密钱包 / CEX 同步 + 总资产计入 + include_in_total** 全部已实装。下一步：稳定化（doc + code review）→ 等用户拍板 P1-2 GoCardless / P1-3 Notion / P1-5 储蓄口径
+
+## 2026-05-18~19 新交付：P1-4 加密钱包 + CEX 同步全栈
+详见 [docx/CRYPTO_WALLET_PLAN.md](docx/CRYPTO_WALLET_PLAN.md)。核心交付：
+
+**数据模型 + 迁移**（alembic `3317bd446ae0` + `7bc98bcff7fe`）：
+- AccountType 加 `exchange` 枚举；ck_account_type CHECK 同步
+- `chain_addresses` 表（按 chain 聚合多个地址到一个加密钱包账户）
+- `exchange_connections` 表（AES-256-GCM 加密 api_key/secret/passphrase 三列，复用 FINANCE_BANK_ENCRYPTION_KEY）
+- `asset_holdings.chain` + `.is_active` 列；(account_id, asset_id, chain) 替换原 unique
+- `accounts.include_in_total` 字段（账户级排除总资产统计）
+
+**链同步**（`services/crypto_sync/`）：覆盖 11 条 EVM L1+L2（Ethereum/Arbitrum/Optimism/Base/Polygon/zkSync/Linea/Scroll/Mantle/Blast，全部走 Alchemy）+ BTC（Blockstream）+ Solana（公共 RPC）+ Tron（TronGrid）
+
+**CEX 同步**（`services/exchange_sync/`）：
+- Binance：`/api/v3/account` HMAC-SHA256 hex sig
+- Bitget：spot + USDT-M + USDC-M + COIN-M 四端点聚合，`available + locked` per coin（不计 unrealizedPL）
+
+**价格自动发现**（`services/market_data/coingecko.py`）：同步后按 chain 批量拉 token_price（per-contract loop，应对免费 tier 1-call 限制）+ 按 ticker 拉 native price；USDT/USDC/DAI 等 USD-pegged 别名为 USD 解决 fiat 折算
+
+**Orchestrator**（`services/wallet_sync/`）：
+- 垃圾空投 token 过滤（URL / CLAIM / VISIT 等关键词）
+- per-(chain, account) upsert 持仓；缺失 token 设 quantity=0 + is_active=False
+- 失败不阻断（单链 / 单 CEX 端点错误隔离在该 source 行）
+- 价格刷新去重（同 asset 多链共享 Asset 行，避免 UNIQUE 违反）
+
+**前端**：
+- AccountForm 加 `exchange` 类型 + IBAN/初始余额按类型条件渲染 + 创建后不关弹窗直接进「添加地址 / API 凭据」+ 「纳入总资产」checkbox
+- 内嵌 ChainAddressesEditor / ExchangeConnectionEditor（用 `<div>` 避免嵌套 `<form>` 折叠）
+- 账户卡 ↻ 立即同步按钮（每错误源详情显示）+ 「不计入总资产」徽章 + dim
+- bank / credit_card 自动隐藏「+ 添加持仓」入口
+- 机构字段对 exchange 用下拉（仅显示已对接 binance/bitget）
+
+**汇率折算修复**：`_convert_to_base` 三角换算 pivot 加 CNY（项目 FX 源全部 `base_currency='CNY'`）
+
+**测试**：79 项新单测（spam_filter 28、coingecko 11、chain providers 15、exchange providers 14、wallet schema 14、orchestrator 8、upsert 7、API 10、holdings_value 7、usdt_alias 9）+ 全套 **242 passed**
 
 ## 2026-05-08 新交付：P1-1 LLM 智能分类
 详见 [docx/LLM_CLASSIFICATION_PLAN.md](docx/LLM_CLASSIFICATION_PLAN.md)：
@@ -173,10 +208,10 @@
 ### 🟡 P1（优先做）
 | # | 任务 | 估时 | 依赖 |
 |---|------|------|------|
-| **P1-1a** | LLM 兜底分类（关键词 miss → 调 LLM） | 1 天 | 用户选 LLM provider + 月度预算 |
-| **P1-1c** | 知识库注入 LLM（rules + 关键词 + 用户备注 作 few-shot） | 1 天 | P1-1a |
-| **P1-1d** | 知识库管理 UI（settings 页表格） | 0.5 天 | P1-1b（已完成） |
-| **P1-4** | 链上加密钱包同步（公钥即同步，多链多地址）+ Binance/Bitget CEX API | 3-4 天 | 决策已敲定，可立即开工。详见 `docx/CRYPTO_WALLET_PLAN.md` |
+| **P1-1a-d** | LLM 兜底分类 | — | ✅ 已实装（2026-05-08）|
+| **P1-4** | 链上加密钱包同步 + CEX | — | ✅ 已实装（2026-05-18~19，含 Phase 1 价格 + Phase 2 include_in_total / Bitget 合约） |
+| **P1-4-ext** | Binance 合约钱包（USDT-M + 币本位，同 Bitget pattern） | 0.5 天 | 可选扩展；用户尚未明确要 |
+| **P1-4-ext** | 持仓表 UI 加列（数量 / 当前价 / 市值 / 成本价；成本价手工录入） | 1 天 | 用户已提过想看每个币种的当前价/市值 |
 | **P1-5** | "储蓄"计算口径定义 + 单测 | 0.5 天 | 等用户给定义（自动 income−expense？还是手动标记？） |
 
 ### 🟢 P2（工程化债务）
@@ -201,6 +236,10 @@
 
 | 日期 | Commit | 动作 |
 |------|--------|------|
+| 2026-05-19 | `cf9cfa4` | fix(ux): 嵌套 form / React 19 state-during-render / 持仓表单范围限制 |
+| 2026-05-18~19 | `ca6d756` | feat(crypto-sync): P1-4 加密钱包 + CEX 同步全栈 + 总资产计入 + include_in_total（6300+ 行）|
+| 2026-05-09 | `6b6ce32` | feat(transfer-matcher): 5 天窗口 + 手动绑定 + 自定义金额容差 + 信用卡还款方向 |
+| 2026-05-08 | `707dd3b` | feat(llm-classification): P1-1 智能分类三层管道 + 知识库 |
 | 2026-05-05 | `ad84112` | 内联分类编辑支持跨 kind 切换（支出/收入/转账）+ apply_to_similar 加 type 守卫保护跨 kind 改时不误级联 |
 | 2026-05-05 | `69d4fc0` | 共享 InlineCategoryPicker 组件 + 分类视图明细行可内联编辑 + 级联范围扩到已分类条目（`source!=manual` AND `type!=transfer`） |
 | 2026-05-05 | `c41a757` | inbox 自动通过（命中规则 + transfer 直接 is_pending=False）+ apply_to_similar_pending 同描述级联 |
@@ -218,12 +257,12 @@
 
 ## 下一步
 
-按 `docx/ROADMAP.md` 的 **P1 修订执行序列** 推进。剩余**最优先**：
+P1-1 + P1-4 主体均闭环。**当前阶段（2026-05-19）**：稳定化（updated docs + 多 agent 代码审查）。
 
-1. **P1-1a + P1-1c LLM fallback 接入**（依赖你回答 LLM provider）
-2. **P1-4 链上钱包 + CEX**（决策已敲定，可独立开工）
-3. **P1-1d 知识库管理 UI**（依赖 P1-1a/c）
-4. **P1-5 储蓄口径**（依赖你给定义）
-5. **P1-2 GoCardless** / **P1-3 Notion**（视用户决策）
+之后按 `docx/ROADMAP.md` 推进，剩余排序：
 
-工程化债务 (P2) 可在功能稳定后插入。
+1. **P1-4-ext 持仓表 UI 加列**（数量 / 当前价 / 市值 / 成本价）— 用户已提出明确需求
+2. **P1-4-ext Binance 合约钱包**（与 Bitget 同 pattern，半天）— 用户可选
+3. **P1-5 储蓄口径** — 依赖你给定义
+4. **P1-2 GoCardless** / **P1-3 Notion** — 依赖外部账号 / token
+5. **P2 工程化债务**（CI / Dockerfile / E2E / 生产 Bearer）— 功能稳定后插入

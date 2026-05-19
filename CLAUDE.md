@@ -126,6 +126,23 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - **API 端点**：`/api/v1/categorization-notes` (CRUD)、`/api/v1/llm/settings` (GET/PUT)、`/api/v1/llm/cost`。
 - **前端**：Settings 页两个新 section —— 「智能分类」(LLMSettingsForm) + 「分类知识库」(CategorizationNotesTable)；Inbox 行内显示 ✨ LLM 推荐 + 一键采纳。
 
+### 加密钱包 / CEX 同步（P1-4，2026-05-18~19 实装）
+
+- **包结构**：
+  - `services/crypto_sync/`：一个链一个 provider 文件 + `dispatch(chain, api_key)` 路由。Alchemy（11 EVM L1+L2）/ Blockstream（BTC）/ 公共 Solana RPC / TronGrid。所有 provider 接受可注入的 `httpx.AsyncClient`，测试通过 `MockTransport` stub 不打外网。
+  - `services/exchange_sync/`：`ExchangeProvider` Protocol + Binance / Bitget 实现 + `sign.py` 集中 HMAC 工具（method 强制大写避免 Bitget 40006）。Bitget 调 4 个端点（spot + USDT-M + USDC-M + COIN-M），按 coin 跨端点 `sum(available + locked)`，**不计 unrealizedPL**。
+  - `services/wallet_sync/`：跨切面 orchestrator。`sync_account` 按 `account.type` 派遣 → 收齐 `BalanceItem` → `apply_balance_snapshot` upsert 持仓 + 缺失 token 设 `quantity=0, is_active=False` → `_refresh_prices_for_account` 拉 CoinGecko 价格写 `market_prices`。`spam_filter.is_spam_token` 在 upsert 前过滤空投诈骗 token；`holdings_value.compute_holdings_value_per_account` 给 `/balances` 加 `SUM(quantity × latest_price)`。
+  - `services/market_data/coingecko.py`：`fetch_native_price` by ticker / `fetch_token_prices` by contract（**per-contract 循环**，免费 tier 每调用 1 合约的限制）。
+- **数据模型**：
+  - `chain_addresses (id, account_id, chain, address, label, last_sync_*)`，`(account_id, chain, address)` 唯一约束。
+  - `exchange_connections`：仿 `bank_connections`，三列加密 (`api_key_enc / api_secret_enc / api_passphrase_enc`)，AES-256-GCM via `FINANCE_BANK_ENCRYPTION_KEY`。
+  - `asset_holdings` 加 `chain`（NOT NULL DEFAULT `''`，非加密用 `''`）+ `is_active`（缺失 token 标 False），`(account_id, asset_id, chain)` 唯一。
+  - `accounts.include_in_total` 默认 1；`net_worth` 两条腿都 JOIN accounts 过滤。
+- **API**：`POST /accounts/{id}/sync`（阻塞同步，返回 `SyncSummary`）/ `/accounts/{id}/addresses` CRUD / `/accounts/{id}/exchange-connection`（PUT 加密入库，secrets 绝不回显）。`/accounts/balances` 对 crypto / exchange 类型在 v_account_balance 之外追加 `holdings × 最新价`。
+- **汇率**：`holdings.py::_convert_to_base` 把 USDT/USDC/DAI 等 **USD-pegged stablecoin 别名为 USD**；三角换算 pivot 含 **CNY**（项目 FX 源全部 `base_currency='CNY'`）。
+- **环境变量**：`ALCHEMY_API_KEY`（必填，EVM 链同步）；`FINANCE_BANK_ENCRYPTION_KEY`（32 字节 hex，必须，否则 exchange 凭据写入 500）。BTC / Solana / Tron 不需要 key。
+- **前端**：`AccountForm` 加 `exchange` 枚举 + 类型条件渲染（IBAN 仅 bank/credit_card，初始余额隐藏 crypto/exchange）+ 创建后切「添加地址 / API 凭据」模式不关弹窗。`ChainAddressesEditor` / `ExchangeConnectionEditor` 内嵌时**必须用 `<div>`**（嵌套 form 会被浏览器折叠触发外层 submit）。`SyncAccountButton` ↻ 显示每个错误源详情。`INVESTMENT_TYPES = {brokerage, crypto_wallet, exchange}` 在 bank / credit_card 等账户上隐藏「添加持仓」入口。
+
 ### MCP Server 与后端的关系
 
 - `mcp-server/run.sh` 把 `backend/` 加入 `PYTHONPATH`，所以 MCP server 直接 `from app.models import ...` 复用同一份 ORM 模型与服务。
@@ -145,5 +162,8 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - `.env` 在项目根目录（**不是** `backend/.env`）；`Settings` 通过 `_PROJECT_ROOT / ".env"` 读取。
 - 必填：`FINANCE_TRACKER_API_TOKEN`（32 字节 hex）。未设置时启动会自动生成临时 token 并 warn——**不要把这个临时 token 当持久化值**。
 - `BASE_CURRENCY` 控制汇总折算的目标币种，默认 `CNY`。
-- 银行同步密钥用 `FINANCE_BANK_ENCRYPTION_KEY` 加密后入库（`bank_connections` 表）。
+- 银行同步密钥用 `FINANCE_BANK_ENCRYPTION_KEY` 加密后入库（`bank_connections` 表 + `exchange_connections` 表）。**P1-4 后也是必填**：交易所 API key 走同一加密路径。生成：`python -c "import os; print(os.urandom(32).hex())"`。
 - LLM 分类需要 `GEMINI_API_KEY`（去 https://aistudio.google.com/apikey 申请）。运行时其他 LLM 配置（model/budget/threshold/grounding）走 Settings UI，不在 env。
+- 加密钱包 EVM 链同步需要 `ALCHEMY_API_KEY`（https://www.alchemy.com 免费注册，300M CU/mo）。BTC / Solana / Tron 走公共端点不需要 key。
+
+**注意：** 改 `.env` 后 `uvicorn --reload` **不会**自动读取（pydantic-settings 是启动一次性载入）。必须 kill 进程 + 重新 `uvicorn` 启动。

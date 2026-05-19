@@ -145,13 +145,15 @@ V1 21 项问题修复进度：
 
 | # | 任务 | 状态 | 依赖/前置 | 验收标准 |
 |---|---|---|---|---|
-| **P1-1a** | LLM 分类 fallback 基础版 | ❌ 待启动 | 用户决定 LLM provider + 月度预算（推荐 Anthropic Haiku 4.5 / 月预算 ≤ 5 USD） | L1 关键词 miss → L2 LLM 调用；置信度 ≥ 阈值（settings 表可调）写入分类，否则进 inbox。详见 `docx/CLASSIFICATION_PLAN.md` §3 |
-| **P1-1b** | 用户备注体系 | ✅ 2026-05-04 | — | `transactions.user_note` 字段；inbox 行内 textarea 输入；提交时与分类一起写入 |
-| **P1-1c** | 知识库注入 LLM | ❌ 待启动 | P1-1a + P1-1b（已就绪） | LLM 调用时把 rules + 关键词 + 用户备注（最近 N 条相关）作为 prompt 上下文 |
-| **P1-1d** | 知识库管理 UI | ❌ 待启动 | P1-1a/b/c | settings 页加「知识库」section：表格列出所有备注 + 来源 + 使用次数；可编辑 / 删除 / 导出 |
+| **P1-1a** | LLM 分类 fallback 基础版 | ✅ 2026-05-08 | — | Gemini provider；L1 miss / requires_llm → L2 LLM；置信度阈值 settings 表可调 |
+| **P1-1b** | 用户备注体系 | ✅ 2026-05-04 | — | `transactions.user_note` 字段；inbox 行内 textarea |
+| **P1-1c** | 知识库注入 LLM | ✅ 2026-05-08 | — | LLM prompt 自动注入相关 categorization_notes 作 few-shot |
+| **P1-1d** | 知识库管理 UI | ✅ 2026-05-08 | — | Settings 页 CategorizationNotesTable + 自动从用户备注沉淀 |
 | **P1-2** | GoCardless 银行直连联调 | ⏸️ scaffold | 用户决策 + GoCardless 账号 | N26 / Revolut 真实账户连接，每日同步交易入库 |
 | **P1-3** | Notion 同步联调 + 形态决策 | ⏸️ scaffold | 用户提供 integration token + 决定库结构 | `POST /notion/setup` 一键建库；transactions / cashflow / assets 三模块每日同步成功 |
-| **P1-4** | **链上加密钱包同步**（公钥即同步，多链多地址）+ **Binance/Bitget CEX API** | ❌ 待启动 | 决策已敲定 | ① 多地址聚合一个钱包账户 ② Alchemy + Blockstream + Helius + TronGrid 覆盖 EVM / BTC / SOL / Tron ③ Binance + Bitget 现货 API。详见 `docx/CRYPTO_WALLET_PLAN.md` |
+| **P1-4** | **链上加密钱包 + CEX API**（多链多地址聚合 / Binance / Bitget / 价格自动发现 / include_in_total） | ✅ 2026-05-18~19 | — | 11 EVM 链 + BTC + Solana + Tron；Binance 现货；Bitget 现货 + 三套合约钱包；CoinGecko 价格自动；总值含加密；包含「不计入总资产」开关。详见 `docx/CRYPTO_WALLET_PLAN.md` |
+| **P1-4-ext** | 持仓表 UI 加列（数量 / 当前价 / 市值 / 成本价） | ❌ 待启动 | — | 用户已提需求；成本价手工录入（链上拿不到买入价上下文） |
+| **P1-4-ext** | Binance 合约钱包（USDT-M + 币本位） | ❌ 待启动 | — | 与 Bitget 同 pattern；半天可完成 |
 | **P1-5** | "储蓄"口径定义 + 实现 | ❌ 待启动 | PRD 二次澄清 | `cash_flow_snapshots.savings_total` 计算口径文档化、有单测 |
 
 ---
@@ -178,27 +180,36 @@ V1 21 项问题修复进度：
 
 ---
 
-## 修订后的执行序列（2026-05-06）
+## 修订后的执行序列（2026-05-19）
 
-| 顺序 | 阶段 | 估时 | 依赖你 |
+| 顺序 | 阶段 | 估时 | 状态 |
 |---|---|---|---|
-| 1 | **Sprint 0** R0 资金正确性修复（FIX-1/2/3） | 1-2 天 | 无 |
-| 2 | **Sprint 1** R1 数据一致性 + 测试（FIX-4~7） | 2-3 天 | 无 |
-| 3 | **Sprint 2** R2 GitHub 公开前安全（FIX-8~12） | 0.5-1 天 | 无 |
-| 4 | **P1-4** 链上钱包 + Binance/Bitget CEX | 3-4 天 | 无（决策已敲定） |
-| 5 | **P1-1a/c/d** LLM fallback + 知识库 | 2-3 天 | LLM provider + 月预算 |
-| 6 | **P1-2** GoCardless（含 FIX-13/14/15） | 1-2 天 | GoCardless 账号 |
-| 7 | **P1-3** Notion 同步（含 FIX-16） | 1-2 天 | Notion token + 库结构 |
-| 8+ | **P2** 工程化债务（Alembic / Dockerfile / E2E / CI） | 视优先级 | |
+| 1 | **Sprint 0** R0 资金正确性修复 | 1-2 天 | ✅ 2026-05-06 |
+| 2 | **Sprint 1** R1 数据一致性 + 测试 | 2-3 天 | ✅ 2026-05-06 |
+| 3 | **Sprint 2** R2 GitHub 公开前安全 | 0.5-1 天 | ✅ 2026-05-06 |
+| 4 | **Sprint 3** V1 partial 闭合 | 1 天 | ✅ 2026-05-06 |
+| 5 | **Sprint 4** review V3 派生 | 1 天 | ✅ 2026-05-06 |
+| 6 | **UAT 大版本**（2026-05-07） | 1 天 | ✅ 2026-05-07 |
+| 7 | **P1-1a/c/d** LLM fallback + 知识库 | 2-3 天 | ✅ 2026-05-08 |
+| 8 | **transfer-matcher** 改进（5 天窗口 + 手动绑 + 容差） | 1 天 | ✅ 2026-05-09 |
+| 9 | **P1-4** 链上钱包 + CEX + 价格 + include_in_total | 3-4 天 | ✅ 2026-05-18~19 |
+| 10 | **稳定化 sprint**：docs + 多 agent code review + 修 review 出的 bug | 1-2 天 | 🚧 进行中（2026-05-19） |
+| 11 | **P1-4-ext** 持仓 UI 加列 + Binance 合约（可选）| 1-1.5 天 | 待启动 |
+| 12 | **P1-2** GoCardless | 1-2 天 | 依赖账号 |
+| 13 | **P1-3** Notion | 1-2 天 | 依赖 token + 库结构 |
+| 14 | **P1-5** 储蓄口径 | 0.5 天 | 依赖用户定义 |
+| 15+ | **P2** 工程化债务（Dockerfile / E2E / CI / 生产 Bearer） | 视优先级 | 待启动 |
 
 ---
 
 ## 决策待澄清（用户输入）
 
-1. **LLM 提供商 + 月度预算**（动 P1-1a 必答）：Anthropic Claude Haiku / OpenAI GPT-4o-mini / 本地 Ollama？月预算？
+1. ~~LLM 提供商~~（已答 2026-05-04：Gemini）
 2. ~~置信度阈值~~（已答 2026-05-04：放进 settings 表，可调，默认 0.7）
 3. ~~是否对手动 manual 走 LLM~~（已答：不走，仅 PDF / bank_api）
 4. **GoCardless 沙箱 vs 生产**：愿意在欧洲账户上联调？
 5. **Notion 库结构**：扁平一张 transactions DB，还是按月分库？asset 走 page 还是 DB？
 6. **储蓄口径**：自动 `income - expense - 必要支出`？还是手动标记某些 transactions 为 savings？
 7. ~~链上钱包覆盖~~（已答：主流 L1+L2 全覆盖；只算现货；多链多地址聚合到同一账户。见 `docx/CRYPTO_WALLET_PLAN.md`）
+8. **Binance 合约钱包要不要加？**（已对 Bitget 加了 USDT-M / USDC-M / COIN-M）
+9. **持仓表 UI 加列优先级？**（用户提过想看每个币种当前价 / 市值；成本价手工录入 vs 不显示）
