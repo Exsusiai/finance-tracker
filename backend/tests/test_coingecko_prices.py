@@ -27,6 +27,15 @@ from app.services.market_data.coingecko import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_rate_limit_sleep(monkeypatch):
+    """Tests use MockTransport so there's no real network — the prod
+    pacing sleep between per-contract calls just slows the suite."""
+    monkeypatch.setattr(
+        "app.services.market_data.coingecko._PER_CALL_DELAY_SEC", 0.0
+    )
+
+
 class TestStaticMaps:
     def test_native_coin_ids_cover_supported_chains(self):
         for sym in ("ETH", "BTC", "SOL", "TRX", "MATIC"):

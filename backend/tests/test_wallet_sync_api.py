@@ -122,7 +122,7 @@ class TestChainAddresses:
         r = await client.post(
             f"/api/v1/accounts/{acc_id}/addresses",
             headers=AUTH,
-            json={"chain": "Ethereum", "address": "0xABC", "label": "main"},
+            json={"chain": "Ethereum", "address": "0xABcdefABcdefABcdefABcdefABcdefABcdefABcd", "label": "main"},
         )
         assert r.status_code == 201
         new_id = r.json()["data"]["id"]
@@ -133,14 +133,14 @@ class TestChainAddresses:
         r = await client.post(
             f"/api/v1/accounts/{acc_id}/addresses",
             headers=AUTH,
-            json={"chain": "ethereum", "address": "0xABC"},
+            json={"chain": "ethereum", "address": "0xABcdefABcdefABcdefABcdefABcdefABcdefABcd"},
         )
         assert r.status_code == 409
 
         # List shows it.
         r = await client.get(f"/api/v1/accounts/{acc_id}/addresses", headers=AUTH)
         rows = r.json()["data"]
-        assert len(rows) == 1 and rows[0]["address"] == "0xABC"
+        assert len(rows) == 1 and rows[0]["address"] == "0xABcdefABcdefABcdefABcdefABcdefABcdefABcd"
 
         # Delete.
         r = await client.delete(f"/api/v1/accounts/{acc_id}/addresses/{new_id}", headers=AUTH)
@@ -236,7 +236,7 @@ class TestSync:
         await client.post(
             f"/api/v1/accounts/{acc_id}/addresses",
             headers=AUTH,
-            json={"chain": "ethereum", "address": "0xeee"},
+            json={"chain": "ethereum", "address": "0xeEEeEEEEeEEeEeEEeEEeEEeEEeEEeEeEEeEEEeEE"},
         )
 
         def fake_dispatch(chain, alchemy_api_key):

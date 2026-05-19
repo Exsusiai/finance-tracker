@@ -180,9 +180,9 @@ export function AccountForm({
           notes: notes.trim() || undefined,
         });
       } else {
-        // POST AccountCreate doesn't carry include_in_total (server
-        // defaults to true). We immediately PATCH it if the user
-        // toggled off — see post-create branch above.
+        // Single POST with include_in_total — backend now accepts it
+        // on create, removing the previous two-step pattern where a
+        // failed PATCH would silently drop the flag (FE-M5 / 2026-05-19).
         result = await createAccount({
           name: name.trim(),
           type,
@@ -190,11 +190,9 @@ export function AccountForm({
           iban: ibanClean ?? undefined,
           currency,
           initial_balance: balance,
+          include_in_total: includeInTotal,
           notes: notes.trim() || undefined,
         });
-        if (!includeInTotal) {
-          result = await updateAccount(result.id, { include_in_total: false });
-        }
       }
       // For crypto_wallet / exchange we keep the modal open after the
       // initial create so the user can immediately add addresses / API

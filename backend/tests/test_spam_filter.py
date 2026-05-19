@@ -28,9 +28,17 @@ LEGIT = [
     ("UNI",     "Uniswap"),
     ("WETH",    "Wrapped Ether"),
     ("ACHIVX",  "ACHIVX"),  # unknown but symbol-only is not enough to mark spam
+    # ───── Real CoinGecko-listed tokens whose ticker matches a scam-word
+    #       (see ERR-20260519-001 / Py-HIGH spam-filter false-positive).
+    ("FREE",    "FreeRossDAO"),
+    ("GIFT",    "Gifto"),
 ]
 
 SPAM = [
+    # Even safelisted tickers must still be caught when the NAME is
+    # obviously spam (covers attempts to use legit symbols as cover).
+    ("FREE", "Visit free-airdrop.xyz to claim 1000 USDT"),
+    ("GIFT", "CLAIM YOUR FREE GIFT BONUS AT t.me/spam"),
     # URL / domain shillers (the bulk of real airdrop spam).
     ("ARB | T.ME/S/CLAIMARB | GET REWARD", "ARB | T.ME/S/CLAIMARB | GET REWARD"),
     ("ARB | T.ME/S/CLAIMARB | *VISIT TO CLAIM", "ARB | T.ME/S/CLAIMARB | *VISIT TO CLAIM"),

@@ -571,6 +571,7 @@ export interface AccountCreateInput {
   iban?: string;
   currency: string;
   initial_balance?: string;
+  include_in_total?: boolean;
   notes?: string;
 }
 
@@ -1040,7 +1041,10 @@ export async function deleteChainAddress(
 
 export interface ExchangeConnectionOut {
   id: number;
-  exchange: string;
+  // Narrowed to the literal union — backend enforces this via the
+  // `ck_exchange_conn_exchange` CHECK and the dispatcher whitelist,
+  // so any string outside this set is a bug the UI shouldn't accept.
+  exchange: "binance" | "bitget";
   has_credentials: boolean;
   has_passphrase: boolean;
   last_synced_at: string | null;

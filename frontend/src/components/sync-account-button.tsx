@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ApiError, syncAccount, type SyncSummaryOut } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -19,9 +19,16 @@ export function SyncAccountButton({
   const [busy, setBusy] = useState(false);
   const [lastSummary, setLastSummary] = useState<SyncSummaryOut | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Synchronous guard against double-fires inside React's async render
+  // window (FE-H3 / 2026-05-19) — the `disabled` attribute alone can
+  // miss a second click that happens before setBusy(true) commits.
+  const inFlightRef = useRef(false);
 
   async function handleClick() {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setError(null);
+    setLastSummary(null);  // drop stale per-source errors before new run
     try {
       setBusy(true);
       const s = await syncAccount(accountId);
@@ -31,6 +38,7 @@ export function SyncAccountButton({
       setError(e instanceof ApiError ? e.message : "同步失败");
     } finally {
       setBusy(false);
+      inFlightRef.current = false;
     }
   }
 
@@ -63,9 +71,9 @@ export function SyncAccountButton({
               exchange failed and why — not just an opaque counter. */}
           {lastSummary.results
             .filter((r) => r.error)
-            .map((r, idx) => (
+            .map((r) => (
               <span
-                key={idx}
+                key={r.label}
                 className="text-[10px] text-destructive text-right leading-snug"
                 title={r.error ?? ""}
               >

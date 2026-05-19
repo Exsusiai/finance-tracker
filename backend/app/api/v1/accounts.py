@@ -96,6 +96,7 @@ async def create_account(
         iban=body.iban,
         currency=body.currency,
         initial_balance=Decimal(body.initial_balance),
+        include_in_total=body.include_in_total,
         notes=body.notes,
         metadata_json=body.metadata_json,
     )

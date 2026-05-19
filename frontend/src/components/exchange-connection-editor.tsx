@@ -9,6 +9,17 @@ import {
   upsertExchangeConnection,
 } from "@/lib/api";
 
+// IDs for label/htmlFor pairing — accessibility (a11y M-3).
+let _idCounter = 0;
+function _useStableId(prefix: string): string {
+  // useState lazy initializer keeps the id stable across renders
+  // without pulling in useId (Next 15 supports useId too; this avoids
+  // SSR hydration mismatch risk on a leaf form).
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const [id] = useState(() => `${prefix}-${++_idCounter}`);
+  return id;
+}
+
 const EXCHANGES: Array<{ value: "binance" | "bitget"; label: string; passphrase: boolean }> = [
   { value: "binance", label: "Binance",      passphrase: false },
   { value: "bitget",  label: "Bitget",       passphrase: true },
@@ -21,6 +32,7 @@ interface ExchangeConnectionEditorProps {
 export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditorProps) {
   const [existing, setExisting] = useState<ExchangeConnectionOut | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [okMsg, setOkMsg] = useState<string | null>(null);
 
@@ -31,16 +43,31 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
   const [passphrase, setPassphrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  const exchangeId = _useStableId("exch");
+  const keyId = _useStableId("key");
+  const secretId = _useStableId("secret");
+  const passphraseId = _useStableId("pass");
+
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setLoadFailed(false);
     fetchExchangeConnection(accountId)
       .then((r) => {
         if (!alive) return;
         setExisting(r);
-        if (r) setExchange(r.exchange as "binance" | "bitget");
+        // Backend's CHECK constraint guarantees `r.exchange` is one of
+        // the literal union members (`'binance' | 'bitget'`), so the
+        // assignment is safe without runtime narrowing. If a future
+        // exchange is added this assignment becomes a type error which
+        // is the right signal to update the UI options.
+        if (r) setExchange(r.exchange);
       })
-      .catch((e) => alive && setError(e instanceof ApiError ? e.message : "加载失败"))
+      .catch((e) => {
+        if (!alive) return;
+        setError(e instanceof ApiError ? e.message : "加载失败");
+        setLoadFailed(true);
+      })
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
@@ -132,8 +159,9 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
 
       <div className="space-y-2">
         <div>
-          <label className="block text-xs font-medium mb-1">交易所</label>
+          <label htmlFor={exchangeId} className="block text-xs font-medium mb-1">交易所</label>
           <select
+            id={exchangeId}
             value={exchange}
             onChange={(e) => setExchange(e.target.value as "binance" | "bitget")}
             className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
@@ -146,10 +174,11 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
           </select>
         </div>
         <div>
-          <label className="block text-xs font-medium mb-1">
+          <label htmlFor={keyId} className="block text-xs font-medium mb-1">
             API Key {existing && <span className="text-muted-foreground">（提交即覆盖已有）</span>}
           </label>
           <input
+            id={keyId}
             type="password"
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
@@ -158,8 +187,9 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
           />
         </div>
         <div>
-          <label className="block text-xs font-medium mb-1">API Secret</label>
+          <label htmlFor={secretId} className="block text-xs font-medium mb-1">API Secret</label>
           <input
+            id={secretId}
             type="password"
             value={apiSecret}
             onChange={(e) => setApiSecret(e.target.value)}
@@ -169,8 +199,9 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
         </div>
         {needsPassphrase && (
           <div>
-            <label className="block text-xs font-medium mb-1">Passphrase（Bitget 创建 key 时设置的）</label>
+            <label htmlFor={passphraseId} className="block text-xs font-medium mb-1">Passphrase（Bitget 创建 key 时设置的）</label>
             <input
+              id={passphraseId}
               type="password"
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
@@ -186,8 +217,13 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
         <button
           type="button"
           onClick={() => void handleSubmit()}
-          disabled={submitting}
-          className="w-full px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          // FE-H4: don't allow save when the initial GET failed —
+          // we don't know whether a connection already exists so a
+          // PUT could overwrite blindly. User can retry by refreshing
+          // the panel.
+          disabled={submitting || loadFailed}
+          title={loadFailed ? "初始加载失败，请刷新页面后重试" : undefined}
+          className="w-full px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {submitting ? "保存中…" : existing ? "更新凭据" : "保存凭据"}
         </button>

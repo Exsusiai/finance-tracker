@@ -353,6 +353,15 @@ class MarketPrice(Base):
 
     __table_args__ = (
         UniqueConstraint("asset_id", "source", "quoted_at", name="uq_price_asset_source_time"),
+        # Latest-price-per-asset lookup is the hottest read path
+        # (holdings_value._SQL, holdings.py portfolio_summary, etc.).
+        # The existing unique key has source between currency and time,
+        # so it can't service "MAX(quoted_at) WHERE asset_id=? AND
+        # currency='USDT'". This composite covers it.
+        Index(
+            "ix_market_prices_asset_currency_quoted",
+            "asset_id", "currency", "quoted_at",
+        ),
     )
 
 
@@ -565,6 +574,17 @@ class ExchangeConnection(Base):
         CheckConstraint(
             "exchange IN ('binance','bitget')",
             name="ck_exchange_conn_exchange",
+        ),
+        # Defence against empty-string sneaking past NOT NULL when the
+        # encrypt step misbehaves (DB-H4 finding 2026-05-19). A 0-length
+        # encrypted blob is always a bug — decrypt would fail at runtime.
+        CheckConstraint(
+            "length(api_key_enc) > 0",
+            name="ck_exchange_conn_api_key_nonempty",
+        ),
+        CheckConstraint(
+            "length(api_secret_enc) > 0",
+            name="ck_exchange_conn_api_secret_nonempty",
         ),
         UniqueConstraint(
             "account_id", "exchange",

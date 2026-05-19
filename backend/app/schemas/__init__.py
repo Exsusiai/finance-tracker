@@ -78,6 +78,10 @@ class AccountCreate(BaseModel):
     iban: str | None = None
     currency: str = Field(max_length=10)
     initial_balance: str = "0"
+    # Accept include_in_total on create so the frontend can submit it in
+    # one POST instead of POST-then-PATCH (FE-M5 finding 2026-05-19 —
+    # the two-step pattern silently dropped the flag if the PATCH failed).
+    include_in_total: bool = True
     notes: str | None = None
     metadata_json: str | None = None
 
@@ -597,10 +601,78 @@ class LLMCostOut(BaseModel):
 # ─── Wallet Sync (P1-4) ────────────────────────────────────────────────────
 
 
+# Whitelist of chains the backend can actually sync. Must mirror
+# crypto_sync.dispatch(). Used by ChainAddressIn to reject typos /
+# arbitrary strings before they end up in /v1/accounts/{id}/addresses
+# (Sec-H2 finding — see also services/wallet_sync/orchestrator.py).
+_SUPPORTED_CHAINS: frozenset[str] = frozenset({
+    # EVM family
+    "ethereum", "arbitrum", "optimism", "base", "polygon",
+    "polygon-zkevm", "zksync", "linea", "scroll", "mantle", "blast",
+    # non-EVM
+    "bitcoin", "solana", "tron",
+})
+
+# Per-chain address format regex. Conservative — rejects anything that
+# isn't structurally a valid address for that chain. Defends the URL
+# interpolation in providers (Sec-H2 finding 2026-05-19).
+import re as _re
+_ADDRESS_PATTERNS: dict[str, "_re.Pattern[str]"] = {
+    "ethereum":      _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "arbitrum":      _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "optimism":      _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "base":          _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "polygon":       _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "polygon-zkevm": _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "zksync":        _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "linea":         _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "scroll":        _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "mantle":        _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    "blast":         _re.compile(r"^0x[a-fA-F0-9]{40}$"),
+    # Bitcoin: legacy 1.../3..., bech32 bc1.../tb1...
+    "bitcoin":       _re.compile(r"^(?:bc1|tb1|[13])[a-zA-Z0-9]{25,87}$"),
+    # Solana base58 32-byte pubkey
+    "solana":        _re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$"),
+    # Tron addresses always start with T
+    "tron":          _re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$"),
+}
+
+
 class ChainAddressIn(BaseModel):
     chain: str = Field(min_length=1, max_length=50)
     address: str = Field(min_length=1, max_length=128)
     label: str | None = Field(default=None, max_length=255)
+
+    @field_validator("chain", mode="after")
+    @classmethod
+    def _normalise_chain(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in _SUPPORTED_CHAINS:
+            raise ValueError(
+                f"unsupported chain {v!r}; supported: {sorted(_SUPPORTED_CHAINS)}"
+            )
+        return v
+
+    @field_validator("address", mode="after")
+    @classmethod
+    def _validate_address(cls, v: str, info) -> str:
+        v = v.strip()
+        chain = info.data.get("chain")  # already normalised by validator above
+        # If chain itself failed validation we'd never reach here, but be
+        # defensive — fall back to a tolerant check that at least bans
+        # path-separator characters (the SSRF concern).
+        if not chain:
+            if "/" in v or ".." in v:
+                raise ValueError("address contains illegal characters")
+            return v
+        pattern = _ADDRESS_PATTERNS.get(chain)
+        if pattern is None:
+            # Chain is in _SUPPORTED_CHAINS but somehow not in the regex
+            # table — treat as defensive deny.
+            raise ValueError(f"no address validator wired for chain {chain!r}")
+        if not pattern.fullmatch(v):
+            raise ValueError(f"address does not match expected format for {chain}")
+        return v
 
 
 class ChainAddressOut(BaseModel):
@@ -617,11 +689,14 @@ class ChainAddressOut(BaseModel):
 
 class ExchangeConnectionIn(BaseModel):
     exchange: str = Field(min_length=1, max_length=50)
-    api_key: str = Field(min_length=1)
-    api_secret: str = Field(min_length=1)
+    # Cap secrets at 512 chars so a misbehaving client can't ship a
+    # multi-MB header (Sec-M4 finding 2026-05-19). Real CEX keys are
+    # all under 128 chars.
+    api_key: str = Field(min_length=1, max_length=512)
+    api_secret: str = Field(min_length=1, max_length=512)
     # Required for Bitget; ignored on Binance. Validated again service-side
     # so the user gets a clean 4xx rather than upstream "Invalid sign".
-    passphrase: str | None = None
+    passphrase: str | None = Field(default=None, max_length=512)
 
 
 class ExchangeConnectionOut(BaseModel):

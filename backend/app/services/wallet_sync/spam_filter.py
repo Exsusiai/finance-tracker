@@ -41,6 +41,17 @@ _SCAM_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Allow-list for symbols that match a scam-word literally but are real
+# CoinGecko-listed projects. The check runs as `symbol.upper() in set`
+# BEFORE the regex, so it only short-circuits the *symbol-only* false
+# positive — a name like "Claim Your FREE 1000 USDT" still gets flagged
+# because the name still contains other scam words.
+_SYMBOL_SAFELIST: frozenset[str] = frozenset({
+    "FREE",    # FreeRossDAO
+    "GIFT",    # Gifto
+    "REWARD",  # placeholder for any future real token with this ticker
+})
+
 _MAX_SYMBOL_LEN = 20
 
 
@@ -68,8 +79,24 @@ def is_spam_token(symbol: str | None, name: str | None) -> bool:
     if _URL_PATTERN.search(haystack):
         return True
 
-    # Rule 2: scam verbs.
+    # Rule 2: scam verbs — UNLESS the symbol is a known legit ticker
+    # that happens to match a scam word verbatim (FREE / GIFT / REWARD).
+    # The safelist only saves the symbol → if the surrounding NAME also
+    # screams airdrop the regex will still match it from `name`.
     if _SCAM_WORDS.search(haystack):
+        sym_upper = s.upper()
+        if sym_upper in _SYMBOL_SAFELIST:
+            # Re-run the regex against name alone to catch
+            # "FREE 1000 USDT CLAIM HERE" style spam that uses the
+            # legit symbol as cover.
+            if n and _SCAM_WORDS.search(n):
+                # Drop the symbol token from the name match so a name
+                # like "Free Ross DAO" (just literal "Free") passes;
+                # only spam-around-it ("Free 1000 USDT visit ...") trips.
+                stripped = re.sub(rf"\b{re.escape(s)}\b", "", n, flags=re.IGNORECASE)
+                if _SCAM_WORDS.search(stripped) or _URL_PATTERN.search(stripped):
+                    return True
+            return False
         return True
 
     return False

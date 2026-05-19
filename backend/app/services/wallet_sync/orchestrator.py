@@ -21,10 +21,12 @@ provider modules.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Iterable
 
+import httpx
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,12 +45,41 @@ from app.services.crypto_sync import dispatch as _crypto_dispatch
 from app.services.exchange_sync import dispatch as _exchange_dispatch
 from app.services.market_data.coingecko import (
     fetch_native_price,
+    fetch_native_prices,
     fetch_token_prices,
 )
 from app.services.wallet_sync.spam_filter import is_spam_token
 from app.services.wallet_sync.upsert import apply_balance_snapshot
 
 log = structlog.get_logger(__name__)
+
+
+# Patterns that may carry secrets into an upstream error message. Used by
+# `_safe_error_text` to scrub before persisting to `last_sync_error` (DB +
+# echoed to UI). The Alchemy API key in particular sits as the LAST
+# path segment of every URL.
+_ALCHEMY_KEY_RE = re.compile(r"/v2/[A-Za-z0-9_-]{20,}")
+_BINANCE_SIG_RE = re.compile(r"signature=[A-Za-z0-9]+")
+
+
+def _safe_error_text(exc: Exception, *, max_len: int = 250) -> str:
+    """Return a UI-safe one-liner for an exception.
+
+    Strategy:
+    - For httpx.HTTPStatusError, only the status code (URL contains secrets).
+    - For httpx network errors, the class name + first 100 chars of repr.
+    - For everything else, ``str(exc)`` truncated, with known secret
+      patterns scrubbed defensively. If ``str(exc)`` is empty, fall back
+      to the exception class name.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.HTTPError):
+        return f"{exc.__class__.__name__}: upstream connection error"
+    msg = str(exc) or exc.__class__.__name__
+    msg = _ALCHEMY_KEY_RE.sub("/v2/<redacted>", msg)
+    msg = _BINANCE_SIG_RE.sub("signature=<redacted>", msg)
+    return msg[:max_len]
 
 
 # Indirection — tests monkeypatch these.
@@ -150,17 +181,21 @@ async def _sync_crypto_wallet(
                 synced=synced, error=None,
             ))
         except Exception as exc:  # noqa: BLE001 — capture & continue is intentional
-            msg = str(exc) or exc.__class__.__name__
+            # Server-side log keeps full repr for debugging; UI / DB
+            # gets the scrubbed version so an Alchemy API key embedded
+            # in an httpx URL can't leak via `last_sync_error`.
             log.warning(
                 "wallet_sync_chain_failed",
-                account_id=acc.id, chain=row.chain, error=msg,
+                account_id=acc.id, chain=row.chain,
+                error_class=exc.__class__.__name__, error_repr=repr(exc),
             )
+            safe = _safe_error_text(exc)
             row.last_synced_at = now
             row.last_sync_status = "error"
-            row.last_sync_error = msg[:500]
+            row.last_sync_error = safe
             summary.results.append(SyncResult(
                 label=label, chain=row.chain, exchange=None,
-                synced=0, error=msg,
+                synced=0, error=safe,
             ))
 
 
@@ -198,17 +233,18 @@ async def _sync_exchange(
                 synced=synced, error=None,
             ))
         except Exception as exc:  # noqa: BLE001
-            msg = str(exc) or exc.__class__.__name__
             log.warning(
                 "wallet_sync_exchange_failed",
-                account_id=acc.id, exchange=row.exchange, error=msg,
+                account_id=acc.id, exchange=row.exchange,
+                error_class=exc.__class__.__name__, error_repr=repr(exc),
             )
+            safe = _safe_error_text(exc)
             row.last_synced_at = now
             row.last_sync_status = "error"
-            row.last_sync_error = msg[:500]
+            row.last_sync_error = safe
             summary.results.append(SyncResult(
                 label=label, chain=None, exchange=row.exchange,
-                synced=0, error=msg,
+                synced=0, error=safe,
             ))
 
 
@@ -287,14 +323,14 @@ async def _refresh_prices_for_account(db: AsyncSession, account_id: int) -> None
                 continue
             _record(asset.id, price)
 
-    # 2) Native + CEX lookups, one HTTP call per ticker.
-    for symbol, assets in by_native_symbol.items():
-        if not symbol:
-            continue
-        price = await fetch_native_price(symbol)
-        if price is None:
-            continue
-        for asset in assets:
-            _record(asset.id, price)
+    # 2) Native + CEX lookups: ONE batched CoinGecko call for all
+    #    distinct tickers (saves N round-trips when an account holds
+    #    many native symbols, e.g. BTC + ETH + SOL + BNB + ...).
+    distinct_symbols = [s for s in by_native_symbol.keys() if s]
+    if distinct_symbols:
+        prices_by_symbol = await fetch_native_prices(distinct_symbols)
+        for symbol, price in prices_by_symbol.items():
+            for asset in by_native_symbol.get(symbol, []):
+                _record(asset.id, price)
 
     await db.flush()

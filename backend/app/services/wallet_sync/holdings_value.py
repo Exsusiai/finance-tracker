@@ -21,6 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Latest-USDT price per asset. SQLite supports correlated subqueries
 # cheaply for our small dataset; no need for a CTE / window function.
+#
+# JOIN accounts + filter on deleted_at IS NULL so soft-deleted crypto /
+# exchange accounts don't leak into the net_worth total (Py-HIGH
+# finding 2026-05-19). The `account_ids` filter callers pass *can* be
+# an unfiltered list (e.g. all crypto accounts) — this defensive
+# JOIN ensures the helper is safe regardless.
 _SQL = """
 SELECT
     h.account_id      AS account_id,
@@ -33,7 +39,9 @@ SELECT
         LIMIT 1
     )) AS value
 FROM asset_holdings h
+JOIN accounts a ON a.id = h.account_id
 WHERE h.is_active = 1
+  AND a.deleted_at IS NULL
 {account_filter}
 GROUP BY h.account_id
 """

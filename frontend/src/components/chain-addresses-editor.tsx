@@ -168,7 +168,9 @@ export function ChainAddressesEditor({ accountId }: ChainAddressesEditorProps) {
 
       <div className="space-y-2 pt-2 border-t border-border">
         <div className="grid grid-cols-[120px_1fr] gap-2">
+          <label htmlFor="chain-editor-chain" className="sr-only">链</label>
           <select
+            id="chain-editor-chain"
             value={newChain}
             onChange={(e) => setNewChain(e.target.value)}
             className="px-2 py-2 text-sm rounded-lg border border-border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
@@ -179,7 +181,9 @@ export function ChainAddressesEditor({ accountId }: ChainAddressesEditorProps) {
               </option>
             ))}
           </select>
+          <label htmlFor="chain-editor-address" className="sr-only">地址</label>
           <input
+            id="chain-editor-address"
             type="text"
             value={newAddress}
             onChange={(e) => setNewAddress(e.target.value)}

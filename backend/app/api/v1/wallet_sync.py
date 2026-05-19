@@ -15,6 +15,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
@@ -102,8 +103,11 @@ async def add_address(account_id: int, body: ChainAddressIn, db: _db_dep):
     db.add(row)
     try:
         await db.flush()
-    except Exception as exc:
-        # Most likely unique violation on (account, chain, address).
+    except IntegrityError as exc:
+        # Specific case we know about: unique violation on
+        # (account, chain, address). Everything else (DB timeout,
+        # connection errors, etc.) keeps propagating as 5xx so the
+        # client doesn't see a misleading 409.
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "Address already registered on this chain for this account",

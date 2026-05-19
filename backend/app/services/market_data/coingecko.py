@@ -17,6 +17,7 @@ to avoid hitting the live API.
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from typing import Final
 
@@ -81,6 +82,13 @@ NATIVE_COIN_IDS: Final[dict[str, str]] = {
 
 _BASE_URL = "https://api.coingecko.com"
 
+# CoinGecko free tier permits ~30 calls / minute. fetch_token_prices is
+# now per-contract (the batched form was capped to 1 contract by their
+# 2024 policy), so a wallet with N ERC-20 tokens issues N sequential
+# calls. 2.1s between calls = 28 calls / minute, comfortably under the
+# rate limit. Tunable so tests can override to 0.
+_PER_CALL_DELAY_SEC: Final[float] = 2.1
+
 
 def _decimal_or_none(value) -> Decimal | None:
     """CoinGecko returns 0 when it has no price info — surface as None
@@ -103,30 +111,75 @@ async def fetch_native_price(
 
     Hardcodes USDT == 1 since CoinGecko doesn't offer USDT as a
     `vs_currency` and we'd otherwise round-trip for a known stablecoin.
+
+    For looking up many tickers at once, prefer
+    :func:`fetch_native_prices` — CoinGecko's ``/simple/price`` accepts
+    a comma-separated ``ids`` list, so one call handles N symbols.
     """
     if not symbol:
         return None
-    sym = symbol.strip().upper()
-    if sym == "USDT":
-        return Decimal("1")
-    coin_id = NATIVE_COIN_IDS.get(sym)
-    if not coin_id:
-        return None
+    result = await fetch_native_prices([symbol], http=http)
+    return result.get(symbol.strip().upper())
+
+
+async def fetch_native_prices(
+    symbols: list[str] | tuple[str, ...] | set[str],
+    *,
+    http: httpx.AsyncClient | None = None,
+) -> dict[str, Decimal]:
+    """Batched ``/simple/price`` lookup for many native tickers in one
+    HTTP call.
+
+    Returns ``{UPPERCASE_SYMBOL → USD price}``. USDT is hardcoded to 1
+    (CoinGecko doesn't quote it as a vs_currency). Unknown symbols are
+    silently omitted.
+    """
+    out: dict[str, Decimal] = {}
+    # Bucket symbols. Hardcode USDT == 1 before any HTTP.
+    coin_id_to_sym: dict[str, str] = {}
+    for raw in symbols:
+        if not raw:
+            continue
+        sym = raw.strip().upper()
+        if sym == "USDT":
+            out[sym] = Decimal("1")
+            continue
+        cid = NATIVE_COIN_IDS.get(sym)
+        if cid is None:
+            continue
+        coin_id_to_sym[cid] = sym
+
+    if not coin_id_to_sym:
+        return out
+
     owns = http is None
     client = http or httpx.AsyncClient(base_url=_BASE_URL, timeout=15.0)
     try:
         resp = await client.get(
             "/api/v3/simple/price",
-            params={"ids": coin_id, "vs_currencies": "usd"},
+            params={
+                "ids": ",".join(coin_id_to_sym.keys()),
+                "vs_currencies": "usd",
+            },
         )
         resp.raise_for_status()
-        return _decimal_or_none(resp.json().get(coin_id, {}).get("usd"))
+        body = resp.json()
     except httpx.HTTPError as exc:
-        log.warning("coingecko_native_price_failed", symbol=sym, error=str(exc))
-        return None
+        log.warning(
+            "coingecko_native_prices_failed",
+            symbols=sorted(coin_id_to_sym.values()),
+            error=str(exc),
+        )
+        return out  # partial (USDT may already be in there)
     finally:
         if owns:
             await client.aclose()
+
+    for cid, sym in coin_id_to_sym.items():
+        price = _decimal_or_none(body.get(cid, {}).get("usd"))
+        if price is not None:
+            out[sym] = price
+    return out
 
 
 async def fetch_token_prices(
@@ -158,7 +211,12 @@ async def fetch_token_prices(
     client = http or httpx.AsyncClient(base_url=_BASE_URL, timeout=15.0)
     out: dict[str, Decimal] = {}
     try:
-        for contract in contracts:
+        for i, contract in enumerate(contracts):
+            # Pace requests so we stay under CoinGecko free tier's
+            # ~30 calls/min cap. Skip the sleep before the first call
+            # so a single-contract wallet doesn't pay the delay.
+            if i > 0 and _PER_CALL_DELAY_SEC > 0:
+                await asyncio.sleep(_PER_CALL_DELAY_SEC)
             try:
                 resp = await client.get(
                     f"/api/v3/simple/token_price/{platform}",

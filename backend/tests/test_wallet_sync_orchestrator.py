@@ -131,9 +131,12 @@ async def _stub_coingecko(monkeypatch):
     tests can still re-monkeypatch when they want a specific price."""
     async def _noop_native(symbol, *, http=None):
         return None
+    async def _noop_native_batched(symbols, *, http=None):
+        return {}
     async def _noop_token(chain, contracts, *, http=None):
         return {}
     monkeypatch.setattr(orchestrator, "fetch_native_price", _noop_native)
+    monkeypatch.setattr(orchestrator, "fetch_native_prices", _noop_native_batched)
     monkeypatch.setattr(orchestrator, "fetch_token_prices", _noop_token)
 
 
@@ -301,11 +304,15 @@ class TestPriceRefreshDedupe:
             ])
 
         # Stub price fetcher so the test is deterministic + offline.
-        async def fake_native(symbol, *, http=None):
-            return Decimal("3000") if symbol == "ETH" else None
+        async def fake_native_prices(symbols, *, http=None):
+            return {
+                s.strip().upper(): Decimal("3000")
+                for s in symbols
+                if s.strip().upper() == "ETH"
+            }
 
         monkeypatch.setattr(orchestrator, "_dispatch_chain", fake_dispatch)
-        monkeypatch.setattr(orchestrator, "fetch_native_price", fake_native)
+        monkeypatch.setattr(orchestrator, "fetch_native_prices", fake_native_prices)
 
         summary = await orchestrator.sync_account(db, acc.id, alchemy_api_key="dummy")
         await db.commit()
@@ -317,6 +324,65 @@ class TestPriceRefreshDedupe:
         ).scalars().all()
         eth_prices = [r for r in rows if r.price == Decimal("3000")]
         assert len(eth_prices) == 1, f"expected 1 ETH price row, got {len(eth_prices)}"
+
+
+class TestSafeErrorText:
+    """Regression for Sec-H1 (2026-05-19): Alchemy API key embedded in
+    httpx exception URLs must NOT leak into `last_sync_error` (which is
+    persisted + echoed to the UI)."""
+
+    def test_alchemy_key_redacted_in_status_error(self):
+        import httpx
+        from app.services.wallet_sync.orchestrator import _safe_error_text
+
+        req = httpx.Request(
+            "POST",
+            "https://eth-mainnet.g.alchemy.com/v2/SECRETALCHEMYKEY12345abcde",
+        )
+        resp = httpx.Response(429, request=req)
+        exc = httpx.HTTPStatusError("rate limited", request=req, response=resp)
+
+        safe = _safe_error_text(exc)
+        assert "SECRETALCHEMYKEY" not in safe
+        assert "alchemy.com" not in safe
+        assert safe == "HTTP 429"
+
+    def test_alchemy_key_scrubbed_in_generic_exception_str(self):
+        from app.services.wallet_sync.orchestrator import _safe_error_text
+
+        exc = RuntimeError(
+            "downstream error from /v2/SECRETKEY9876543210abcd123: timeout"
+        )
+        safe = _safe_error_text(exc)
+        assert "SECRETKEY" not in safe
+        assert "/v2/<redacted>" in safe
+
+    def test_binance_signature_scrubbed(self):
+        from app.services.wallet_sync.orchestrator import _safe_error_text
+
+        exc = RuntimeError(
+            "bad request: signature=abc123def456 returned 400"
+        )
+        safe = _safe_error_text(exc)
+        assert "abc123def456" not in safe
+        assert "signature=<redacted>" in safe
+
+    def test_network_error_class_name(self):
+        import httpx
+        from app.services.wallet_sync.orchestrator import _safe_error_text
+
+        exc = httpx.ConnectError("nope")
+        safe = _safe_error_text(exc)
+        assert "ConnectError" in safe
+        assert "upstream connection error" in safe
+
+    def test_empty_exception_falls_back_to_class_name(self):
+        from app.services.wallet_sync.orchestrator import _safe_error_text
+
+        class MyCustomError(Exception):
+            pass
+        safe = _safe_error_text(MyCustomError())
+        assert safe == "MyCustomError"
 
 
 class TestEdges:
