@@ -565,7 +565,21 @@ export default function AssetsPage() {
                         return (
                           <tr key={h.id} className="border-t border-border hover:bg-muted/30 transition-colors">
                             <td className="px-4 py-3">
-                              <div className="font-medium text-foreground">{h.asset_name || "—"}</div>
+                              <div className="font-medium text-foreground flex items-center gap-1.5">
+                                <span>{h.asset_name || "—"}</span>
+                                {/* Chain badge: distinguishes USDC-on-arbitrum
+                                    from USDC-on-ethereum etc. (A-sprint
+                                    2026-05-20). Suppressed for native/CEX
+                                    rows where `chain` is "". */}
+                                {h.chain && (
+                                  <span
+                                    className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded bg-muted text-muted-foreground border border-border"
+                                    title={`链：${h.chain}`}
+                                  >
+                                    {h.chain}
+                                  </span>
+                                )}
+                              </div>
                               {h.symbol && <div className="text-xs text-muted-foreground">{h.symbol}</div>}
                             </td>
                             <td className="px-4 py-3">

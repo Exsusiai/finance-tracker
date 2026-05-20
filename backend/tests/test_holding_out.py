@@ -27,6 +27,7 @@ def _make_holding(
     quantity: str = "1",
     avg_cost: str | None = None,
     cost_currency: str | None = None,
+    chain: str = "",
 ) -> AssetHolding:
     h = MagicMock(spec=AssetHolding)
     h.id = 1
@@ -34,6 +35,7 @@ def _make_holding(
     h.account = MagicMock()
     h.account.name = "TestAccount"
     h.asset_id = 1
+    h.chain = chain
     h.quantity = Decimal(quantity)
     h.avg_cost = Decimal(avg_cost) if avg_cost is not None else None
     h.cost_currency = cost_currency

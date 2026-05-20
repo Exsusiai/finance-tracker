@@ -278,6 +278,22 @@ class Asset(Base):
     data_source: Mapped[str | None] = mapped_column(String(50))
     data_source_id: Mapped[str | None] = mapped_column(String(100))
     decimals: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    # A-sprint (2026-05-20): crypto Asset identity used to be
+    # (asset_class, symbol) which silently merged USDT-on-Ethereum and
+    # USDT-on-Arbitrum into ONE row sharing ONE price — a contract on
+    # one chain could poison the value of a different-chain holding
+    # with the same ticker. Identity is now (asset_class, symbol,
+    # chain, contract). Non-crypto rows (cash/stock/gold/...) keep
+    # chain='' / contract=''; native chain coins (ETH/BTC/SOL) also
+    # use '' since price is unified L1+L2. Only on-chain tokens carry
+    # both chain and contract.
+    chain: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    contract: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    # Soft-archive flag for A3 migration: when we split a legacy shared
+    # Asset row into chain-specific replacements, the original row is
+    # left in place with is_active=False so historical market_prices /
+    # any orphaned references survive for audit / rollback.
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     notes: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
@@ -291,7 +307,12 @@ class Asset(Base):
             "asset_class IN ('cash','a_share','eu_stock','us_stock','crypto','gold','bond','fund','other')",
             name="ck_asset_class",
         ),
-        UniqueConstraint("symbol", "asset_class", name="uq_asset_symbol_class"),
+        # Old `uq_asset_symbol_class` is gone — see chain/contract docstring
+        # above. New unique allows same symbol across (chain, contract).
+        UniqueConstraint(
+            "asset_class", "symbol", "chain", "contract",
+            name="uq_asset_identity",
+        ),
     )
 
 

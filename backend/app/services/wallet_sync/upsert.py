@@ -55,59 +55,67 @@ async def _get_or_create_asset(
     *,
     symbol: str | None,
     contract: str | None,
+    chain: str,
 ) -> Asset:
     """Resolve a BalanceItem to a single Asset row.
 
-    Lookup precedence:
-      1. Explicit symbol (uppercased) within asset_class='crypto'.
-      2. Contract-derived placeholder symbol (also asset_class='crypto').
+    A-sprint 2026-05-20 (V5-P1-1): Asset identity is now
+    (asset_class, symbol, chain, contract).
 
-    On miss we create the Asset with minimal fields. Symbol resolution
-    upgrades — turning ``?ES9VMFRZ`` into ``USDC`` — are a separate
-    upstream concern (P2 CoinGecko-by-contract job).
+    Storage rules:
+      - **On-chain token** (contract present): store ``chain`` as given,
+        ``contract`` lower-cased canonical (mixed-case hex addresses
+        must hash the same). USDT-ethereum and USDT-arbitrum become
+        distinct rows; same symbol on the same chain with different
+        contracts (USDC-native vs USDC.E-bridged on Arbitrum) also
+        become distinct rows.
+      - **Native chain coin** (no contract): store ``chain=''``,
+        ``contract=''``. Per decision #1, ETH-on-L1 and ETH-on-L2
+        share ONE Asset row — CoinGecko prices ETH unified, and the
+        per-holding chain discriminator lives on ``AssetHolding.chain``.
+        Caller passes ``chain`` only to make this normalisation visible.
     """
-    if symbol:
-        canonical = symbol.strip().upper()
-        existing = (
-            await db.execute(
-                select(Asset).where(
-                    Asset.symbol == canonical,
-                    Asset.asset_class == "crypto",
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return existing
-        a = Asset(
-            symbol=canonical,
-            name=canonical,
-            asset_class="crypto",
-            currency="USDT",  # crypto holdings always quote in USDT per project decision
-            data_source="onchain" if contract else "native",
-            data_source_id=contract,
-        )
-        db.add(a)
-        await db.flush()
-        return a
+    canonical_symbol = (
+        symbol.strip().upper() if symbol else _placeholder_symbol(contract or "")
+    )
+    if contract:
+        # Onchain token: identity is full (asset_class, symbol, chain, contract).
+        store_chain = chain
+        store_contract = contract.strip().lower()
+        data_source = "onchain"
+        data_source_id = store_contract
+        display_name = canonical_symbol if symbol else (contract or "unresolved")
+    else:
+        # Native coin or contract-less: normalise to chain='', contract=''
+        # so all chains share one row.
+        store_chain = ""
+        store_contract = ""
+        data_source = "native"
+        data_source_id = None
+        display_name = canonical_symbol
 
-    placeholder = _placeholder_symbol(contract or "")
     existing = (
         await db.execute(
             select(Asset).where(
-                Asset.symbol == placeholder,
+                Asset.symbol == canonical_symbol,
                 Asset.asset_class == "crypto",
+                Asset.chain == store_chain,
+                Asset.contract == store_contract,
             )
         )
     ).scalar_one_or_none()
     if existing is not None:
         return existing
+
     a = Asset(
-        symbol=placeholder,
-        name=contract or "unresolved",
+        symbol=canonical_symbol,
+        name=display_name,
         asset_class="crypto",
-        currency="USDT",
-        data_source="onchain",
-        data_source_id=contract,
+        currency="USDT",  # crypto holdings always quote in USDT per project decision
+        chain=store_chain,
+        contract=store_contract,
+        data_source=data_source,
+        data_source_id=data_source_id,
     )
     db.add(a)
     await db.flush()
@@ -137,7 +145,7 @@ async def apply_balance_snapshot(
 
     for item in items:
         asset = await _get_or_create_asset(
-            db, symbol=item.symbol, contract=item.contract
+            db, symbol=item.symbol, contract=item.contract, chain=chain
         )
         present_asset_ids.add(asset.id)
         present_count += 1

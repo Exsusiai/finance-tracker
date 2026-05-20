@@ -115,8 +115,14 @@ class TestFreshInsert:
         assert by_symbol["ETH"].is_active is True
         assert by_symbol["USDT"].quantity == Decimal("100")
 
-    async def test_asset_reused_across_chains(self, db: AsyncSession):
-        """USDT on Ethereum and USDT on Arbitrum share the same Asset row."""
+    async def test_token_split_per_chain_contract(self, db: AsyncSession):
+        """USDT on Ethereum and USDT on Arbitrum are DIFFERENT Asset rows
+        — different contracts, potentially different prices.
+
+        (A-sprint 2026-05-20: old behaviour merged them into one shared
+        row sharing one price, which silently poisoned valuation when
+        either contract's price moved off-peg or got hijacked. See
+        V5-P1-1 / .learnings ERR-20260520 family.)"""
         acc = await _make_account(db, "Wallet-Reuse")
         await apply_balance_snapshot(
             db, acc.id, "ethereum",
@@ -129,7 +135,10 @@ class TestFreshInsert:
         await db.commit()
 
         assets = (await db.execute(select(Asset).where(Asset.symbol == "USDT"))).scalars().all()
-        assert len(assets) == 1, "Same symbol must map to a single Asset row"
+        assert len(assets) == 2, "Same symbol on different chains must split"
+        assert {a.chain for a in assets} == {"ethereum", "arbitrum"}
+        # Contracts are lower-cased canonical form so equality is stable.
+        assert {a.contract for a in assets} == {"0xdac17", "0xfd086"}
 
         hs = await _holdings(db, acc.id)
         assert len(hs) == 2

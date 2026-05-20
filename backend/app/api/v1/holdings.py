@@ -59,6 +59,7 @@ def _holding_to_out(
         symbol=asset.symbol if asset else None,
         asset_name=asset.name if asset else None,
         asset_class=asset.asset_class if asset else None,
+        chain=h.chain,
         quantity=str(h.quantity),
         avg_cost=str(h.avg_cost) if h.avg_cost else None,
         cost_currency=h.cost_currency,

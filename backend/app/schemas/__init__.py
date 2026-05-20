@@ -377,6 +377,12 @@ class HoldingOut(BaseModel):
     symbol: str | None = None
     asset_name: str | None = None
     asset_class: str | None = None
+    # Which chain this position lives on. Empty string for non-crypto
+    # holdings (stocks / cash / gold) and for CEX-pooled crypto. For
+    # on-chain crypto: "ethereum" / "arbitrum" / "bitcoin" / "solana"
+    # / "tron" / etc. Same symbol on different chains = distinct rows
+    # (A-sprint 2026-05-20). UI uses this to render a chain badge.
+    chain: str = ""
     quantity: str
     avg_cost: str | None
     cost_currency: str | None

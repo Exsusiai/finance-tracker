@@ -110,6 +110,10 @@ export interface HoldingOut {
   symbol: string | null;
   asset_name: string | null;
   asset_class: string | null;
+  /** Chain this position sits on. "" for non-crypto and CEX-pooled crypto.
+   *  Same symbol on different chains = distinct holdings
+   *  (A-sprint 2026-05-20 — USDC-on-arbitrum vs USDC-on-ethereum). */
+  chain: string;
   quantity: string;
   avg_cost: string | null;
   cost_currency: string | null;
