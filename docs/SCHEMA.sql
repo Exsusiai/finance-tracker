@@ -156,10 +156,16 @@ CREATE TABLE assets (
     decimals        INTEGER NOT NULL DEFAULT 2,
     notes           TEXT,
     metadata_json   TEXT,
+    -- A-sprint 2026-05-20 (alembic 05f31889722c): 链标识与合约地址，非链上资产留空字符串
+    chain           VARCHAR(50) NOT NULL DEFAULT '',   -- "ethereum" | "bitcoin" | "solana" | "" (非链上)
+    contract        VARCHAR(128) NOT NULL DEFAULT '',  -- ERC-20 合约地址，原生代币留 ""
+    is_active       BOOLEAN NOT NULL DEFAULT 1,        -- 0 = 已下架/停用
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     CHECK (asset_class IN ('cash','a_share','eu_stock','us_stock','crypto','gold','bond','fund','other')),
-    UNIQUE (symbol, asset_class)
+    -- A-sprint 2026-05-20: 唯一约束扩展为 (asset_class, symbol, chain, contract)
+    -- 支持同 symbol 在不同链或不同合约地址的多行（如 USDC on Ethereum vs USDC on Solana）
+    UNIQUE (asset_class, symbol, chain, contract)
 );
 CREATE INDEX idx_assets_class ON assets(asset_class);
 

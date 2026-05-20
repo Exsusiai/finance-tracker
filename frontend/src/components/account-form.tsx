@@ -374,12 +374,16 @@ export function AccountForm({
                 币种 <span className="text-destructive">*</span>
               </label>
               <select
-                value={currency}
+                // Crypto / exchange accounts MUST use USDT — backend
+                // schema validator rejects anything else (V6-P1-3). Lock
+                // the picker rather than letting the user pick EUR and
+                // get a 422.
+                value={CRYPTO_TYPES.has(type) ? "USDT" : currency}
                 onChange={(e) => {
                   setCurrency(e.target.value);
                   setCurrencyTouched(true);
                 }}
-                disabled={isEdit || !!created}
+                disabled={isEdit || !!created || CRYPTO_TYPES.has(type)}
                 className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {CURRENCY_GROUPS.map((g) => (

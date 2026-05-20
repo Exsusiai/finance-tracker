@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-✅ **已可用** — 5 家欧洲银行 PDF 解析 + 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密折算）+ 账户级「不计入总资产」开关 + 7 个 MCP tools。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈已合入；**242 个单测全过**。
+✅ **已可用** — 5 家欧洲银行 PDF 解析 + 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密折算）+ 账户级「不计入总资产」开关 + 7 个 MCP tools。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈已合入；**306 个单测全过**。
 
 详细进度：`PROGRESS.md` · 最近一日工作日志：`docx/WORKLOG_2026-05-07.md` · 剩余优先级：`docx/ROADMAP.md` · 完整需求：`docx/PRD.md`
 

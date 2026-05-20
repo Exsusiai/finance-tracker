@@ -101,6 +101,16 @@ def _recompute_snapshot_sql(base_currency: str) -> str:
     """
     base = base_currency.upper().replace("'", "")
     expr = _AMOUNT_BASE_EXPR_SYNC.replace("%BASE%", base)
+    # V6-P1-4 (2026-05-20): exclude same-bank sub-account transfers (N26
+    # main → Saving Space etc.) from `transfer_total` so MCP matches the
+    # REST snapshot (cashflow/engine.py::_NOT_SUBACCOUNT). The clause
+    # treats NULL / invalid metadata as not-subaccount (three-valued
+    # logic via COALESCE).
+    not_subaccount = (
+        "COALESCE("
+        "json_valid(metadata_json) AND "
+        "json_extract(metadata_json, '$.subaccount') = 1, 0) = 0"
+    )
     return f"""
         INSERT OR REPLACE INTO cash_flow_snapshots
             (period_year, period_month, base_currency,
@@ -110,7 +120,8 @@ def _recompute_snapshot_sql(base_currency: str) -> str:
             ?, ?, ?,
             COALESCE(SUM(CASE WHEN type = 'income'  THEN ABS({expr}) ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN type = 'expense' THEN ABS({expr}) ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN type = 'transfer' THEN ABS({expr}) ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN type = 'transfer' AND {not_subaccount}
+                              THEN ABS({expr}) ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN type = 'income'  THEN  ABS({expr})
                               WHEN type = 'expense' THEN -ABS({expr})
                               ELSE 0 END), 0),
@@ -930,12 +941,20 @@ async def get_cashflow(
         # silently mixed currencies into the base-currency total.
         base = settings.base_currency.upper().replace("'", "")
         expr = _AMOUNT_BASE_EXPR_SYNC.replace("%BASE%", base)
+        # V6-P1-4 (2026-05-20): exclude sub-account transfers from
+        # `transfer` so MCP cashflow matches REST exactly. Internal
+        # moves (N26 main ↔ Saving Space) are noise.
+        not_subaccount = (
+            "COALESCE(json_valid(metadata_json) AND "
+            "json_extract(metadata_json, '$.subaccount') = 1, 0) = 0"
+        )
         rows = conn.execute(f"""
             SELECT
                 substr(occurred_at, 1, 7) AS period,
                 SUM(CASE WHEN type = 'income'  THEN ABS({expr}) ELSE 0 END) AS income,
                 SUM(CASE WHEN type = 'expense' THEN ABS({expr}) ELSE 0 END) AS expense,
-                SUM(CASE WHEN type = 'transfer' THEN ABS({expr}) ELSE 0 END) AS transfer,
+                SUM(CASE WHEN type = 'transfer' AND {not_subaccount}
+                         THEN ABS({expr}) ELSE 0 END) AS transfer,
                 SUM(CASE WHEN type = 'income'  THEN  ABS({expr})
                          WHEN type = 'expense' THEN -ABS({expr})
                          ELSE 0 END) AS savings

@@ -85,6 +85,24 @@ class AccountCreate(BaseModel):
     notes: str | None = None
     metadata_json: str | None = None
 
+    @field_validator("currency", mode="after")
+    @classmethod
+    def _crypto_must_be_usdt(cls, v: str, info) -> str:
+        """V6-P1-3 (2026-05-20): crypto_wallet / exchange holdings are
+        valued in USDT by the wallet_sync pipeline. If the account
+        currency is anything else, `/accounts/balances` would add a
+        USDT-denominated holding value to an EUR/CNY-labelled bucket
+        and silently mislabel the unit. Enforce the project invariant
+        at the API edge so the bug is impossible to introduce via UI
+        ordering / direct curl / future client."""
+        t = (info.data or {}).get("type")
+        if t in ("crypto_wallet", "exchange") and v.upper() != "USDT":
+            raise ValueError(
+                f"{t} accounts must use currency=USDT (got {v!r}). "
+                "Crypto positions are quoted in USDT internally."
+            )
+        return v
+
 
 class AccountUpdate(BaseModel):
     name: str | None = None

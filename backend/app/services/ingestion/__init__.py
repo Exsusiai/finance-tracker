@@ -181,9 +181,24 @@ async def ingest_transactions(
     # stable `tx.id` only after the flush above. We DO NOT await — the
     # caller's HTTP response shouldn't be held hostage by a 1–3 s/row LLM
     # round-trip. The background tasks open their own session.
+    #
+    # V6-P1-6 race fix: `asyncio.create_task` runs concurrently with the
+    # current coroutine. The worker opens a *new* session and does
+    # `session.get(Transaction, tx_id)` — if the parent request's session
+    # hasn't committed yet, that lookup returns None and the LLM call is
+    # silently skipped. Fix: commit the session now, before dispatching, so
+    # the worker's independent session is guaranteed to see the rows.
+    #
+    # Side-effect: the caller's DB session is committed here, mid-function,
+    # rather than at endpoint exit (where `get_db` normally commits). All
+    # subsequent writes in this function (Steps 3-5) are still safe because
+    # they continue on the same session, which SQLAlchemy will re-open as
+    # needed. The final `get_db` commit at endpoint exit becomes a no-op if
+    # nothing new was written after this point, which is fine.
     if llm_target_txs:
         ids_to_classify = [tx.id for tx in llm_target_txs if tx.id is not None]
         if ids_to_classify:
+            await db.commit()  # V6-P1-6: ensure rows are visible to worker sessions
             await _dispatch_llm_classification(ids_to_classify)
             result.llm_dispatched += len(ids_to_classify)
 

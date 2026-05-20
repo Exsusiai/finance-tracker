@@ -51,7 +51,7 @@
 | `schemas/` | Pydantic v2 请求/响应模型 (与 `docs/API.md` 对齐) |
 | `api/v1/` | FastAPI route handlers (薄,只做参数校验和调用 service) |
 | `services/` | 业务逻辑层（见下表） |
-| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `b5f0a2f546ed`；新增字段走 `alembic revision --autogenerate`） |
+| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `05f31889722c`；新增字段走 `alembic revision --autogenerate`） |
 
 #### `services/` 详细结构（2026-05-18）
 
@@ -61,7 +61,7 @@
 | `pdf_parser/` | 5 家银行 parser + column-aware Revolut + 子账户 / 跨行关键词预标 |
 | `categorizer/` | 关键词规则匹配（含 `_safe_regex_search` ReDoS 防御）+ `learn_from_user_assignment` + `apply_to_similar_pending` 级联 + seed 种子；`engine.py::record_note_to_kb` 在用户改分类时同步更新 `requires_llm` 标志 |
 | `transfer_matcher/` | 跨账户配对（评分制 + IBAN +40）+ 同账户 amount-match L3（subaccount 标记）+ `pair_transactions` 写 `metadata.transfer_direction` |
-| `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot；多币种用 `COALESCE(base_amount, amount * fx_rate_to_base, amount)` |
+| `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot；多币种用 `_AMOUNT_BASE_EXPR`（`CASE` 表达式：same-currency 直取、有 `base_amount` 用 `base_amount`、有 `fx_rate_to_base` 则乘算，三者都缺时返回 NULL 跳过该行，避免混币汇总错误） |
 | `market_data/` | 取价（yfinance / CoinGecko / FX）+ `scheduler.py` AsyncIOScheduler 三 job；`coingecko.py` 含 token 价格与原生代币 native price 两种 fetcher |
 | `asset_search/` | CoinGecko + yfinance 联合查询自动识别资产 |
 | `valuation/` | 占位（旧 helper 已删，估值逻辑在 `api/v1/holdings.py`）|

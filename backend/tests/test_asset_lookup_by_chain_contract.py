@@ -262,3 +262,91 @@ class TestSpamStillFiltered:
         await db.commit()
         rows = await _assets_by_symbol(db, "VISIT FOO.XYZ TO CLAIM REWARD")
         assert rows == []
+
+
+# ─── V6-P1-2: contract case sensitivity by chain ─────────────────────────
+
+
+class TestContractCaseSensitivity:
+    async def test_evm_contract_lowercased(self, db: AsyncSession):
+        """EVM hex addresses are case-insensitive — UPPER and lower
+        forms must collapse to one Asset row."""
+        a = await _make_account(db, "Wallet-Case-Evm")
+        await apply_balance_snapshot(db, a.id, "ethereum", [
+            BalanceItem(symbol="UNI", contract="0xAbCdEf0123456789aBcDeF0123456789AbCdEf01",
+                        quantity=Decimal("1"), decimals=18),
+        ])
+        await apply_balance_snapshot(db, a.id, "ethereum", [
+            BalanceItem(symbol="UNI", contract="0xABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                        quantity=Decimal("2"), decimals=18),
+        ])
+        await db.commit()
+        unis = await _assets_by_symbol(db, "UNI")
+        assert len(unis) == 1, "EVM contract case differences must collapse"
+        assert unis[0].contract == "0xabcdef0123456789abcdef0123456789abcdef01"
+
+    async def test_solana_mint_case_preserved(self, db: AsyncSession):
+        """Solana SPL mints are case-sensitive base58 — DON'T lower-case
+        them or CoinGecko `token_price/solana?contract_addresses=...`
+        misses the token and prices come back as None."""
+        a = await _make_account(db, "Wallet-Case-Sol")
+        # USDC on Solana — real mint, mixed case must survive verbatim.
+        mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        await apply_balance_snapshot(db, a.id, "solana", [
+            BalanceItem(symbol="USDC", contract=mint,
+                        quantity=Decimal("100"), decimals=6),
+        ])
+        await db.commit()
+        # Module-scoped DB shares state with prior USDC tests on other chains
+        # — filter to the Solana row we just created.
+        sol_rows = [a for a in await _assets_by_symbol(db, "USDC") if a.chain == "solana"]
+        assert len(sol_rows) == 1
+        assert sol_rows[0].contract == mint, (
+            f"Solana mint must be stored verbatim, got {sol_rows[0].contract!r}"
+        )
+
+    async def test_tron_contract_case_preserved(self, db: AsyncSession):
+        """Tron contracts (T-prefixed base58) are also case-sensitive."""
+        a = await _make_account(db, "Wallet-Case-Tron")
+        contract = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"  # USDT-TRC20
+        await apply_balance_snapshot(db, a.id, "tron", [
+            BalanceItem(symbol="USDT", contract=contract,
+                        quantity=Decimal("50"), decimals=6),
+        ])
+        await db.commit()
+        usdts = await _assets_by_symbol(db, "USDT")
+        assert any(a.contract == contract for a in usdts), (
+            "Tron contract must survive case-preserving — found "
+            f"{[a.contract for a in usdts]}"
+        )
+
+
+# ─── V6-P1-3: AccountCreate forces crypto/exchange currency=USDT ─────────
+
+
+class TestCryptoExchangeCurrencyValidator:
+    """Schema-level guard: backend rejects crypto_wallet/exchange accounts
+    that don't use USDT, because /accounts/balances would add USDT-priced
+    holdings to a wrongly-labelled currency bucket otherwise."""
+
+    def test_crypto_wallet_with_eur_rejected(self):
+        from pydantic import ValidationError
+        from app.schemas import AccountCreate
+        import pytest as _pytest
+        with _pytest.raises(ValidationError):
+            AccountCreate(name="Bad", type="crypto_wallet", currency="EUR")
+
+    def test_exchange_with_cny_rejected(self):
+        from pydantic import ValidationError
+        from app.schemas import AccountCreate
+        import pytest as _pytest
+        with _pytest.raises(ValidationError):
+            AccountCreate(name="Bad", type="exchange", currency="CNY")
+
+    def test_crypto_wallet_with_usdt_accepted(self):
+        from app.schemas import AccountCreate
+        AccountCreate(name="Good", type="crypto_wallet", currency="USDT")
+
+    def test_bank_with_eur_still_works(self):
+        from app.schemas import AccountCreate
+        AccountCreate(name="N26", type="bank", currency="EUR")

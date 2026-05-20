@@ -670,6 +670,14 @@ async def pair_transactions(
         )).scalar_one_or_none()
         leg.category_id = replacement.id if replacement is not None else default_cat
 
+    # V6-P1-1: clear is_pending on both legs so auto-paired transfers don't
+    # stay visible in the inbox forever. Idempotent — already-False is fine.
+    out_tx.is_pending = False
+    in_tx.is_pending = False
+    import app.models as _models
+    _models.touch_updated_at(out_tx)
+    _models.touch_updated_at(in_tx)
+
 
 def _merge_meta(existing: str | None, new: dict) -> str:
     """Shallow-merge a dict into an existing JSON string (or create a fresh one)."""
@@ -1129,6 +1137,13 @@ async def mark_subaccount_pair(
             out_tx.category_id = cat_id
         if in_tx.category_id is None:
             in_tx.category_id = cat_id
+
+    # V6-P1-1: clear is_pending on both legs. Idempotent — already-False is fine.
+    out_tx.is_pending = False
+    in_tx.is_pending = False
+    import app.models as _models
+    _models.touch_updated_at(out_tx)
+    _models.touch_updated_at(in_tx)
 
 
 async def _resolve_transfer_category(

@@ -50,6 +50,33 @@ def _placeholder_symbol(contract: str) -> str:
     return f"?{head[:8]}".upper()
 
 
+# Chains whose contract addresses are case-insensitive hex (EVM family).
+# Anything not in this set is treated as case-sensitive (Solana base58
+# mints, Tron base58-with-T-prefix contracts, future Cosmos / Aptos / Sui).
+# V6-P1-2 fix: A-sprint's blanket .lower() broke SPL / TRC-20 lookups
+# because lower-cased base58 hashes mis-identify the token in CoinGecko.
+_EVM_CHAINS: frozenset[str] = frozenset({
+    "ethereum", "arbitrum", "optimism", "base", "polygon",
+    "polygon-zkevm", "zksync", "linea", "scroll", "mantle", "blast",
+    "bsc", "avalanche",
+})
+
+
+def _canonicalize_contract(contract: str, chain: str) -> str:
+    """Normalise a contract for stable lookup keys.
+
+    EVM hex addresses are checksum-stripped via lower-casing so dedupe
+    works across upstream case-mixing. Non-EVM (base58 / bech32 / etc.)
+    contracts are case-sensitive at the protocol level — return them
+    stripped only. ``chain`` is matched against a closed allow-list so
+    unknown chains default to safe-strip-only behaviour.
+    """
+    stripped = contract.strip()
+    if chain.strip().lower() in _EVM_CHAINS:
+        return stripped.lower()
+    return stripped
+
+
 async def _get_or_create_asset(
     db: AsyncSession,
     *,
@@ -80,8 +107,13 @@ async def _get_or_create_asset(
     )
     if contract:
         # Onchain token: identity is full (asset_class, symbol, chain, contract).
+        # V6-P1-2 (2026-05-20): only EVM contracts get lower-cased — EVM hex
+        # addresses are checksummed but case-insensitive at the protocol level.
+        # Solana mints (base58) and Tron contracts (base58, T-prefixed) are
+        # case-sensitive; lower-casing them silently fragments lookups and
+        # breaks CoinGecko's token_price queries.
         store_chain = chain
-        store_contract = contract.strip().lower()
+        store_contract = _canonicalize_contract(contract, chain)
         data_source = "onchain"
         data_source_id = store_contract
         display_name = canonical_symbol if symbol else (contract or "unresolved")

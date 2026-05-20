@@ -42,7 +42,7 @@
 
 **汇率折算修复**：`_convert_to_base` 三角换算 pivot 加 CNY（项目 FX 源全部 `base_currency='CNY'`）
 
-**测试**：79 项新单测（spam_filter 28、coingecko 11、chain providers 15、exchange providers 14、wallet schema 14、orchestrator 8、upsert 7、API 10、holdings_value 7、usdt_alias 9）+ 全套 **242 passed**
+**测试**：全套 **306 passed**（含 spam_filter 28、coingecko 11、chain providers 15、exchange providers 14、wallet schema 14、orchestrator 8、upsert 7、API 10、holdings_value 7、usdt_alias 9、asset_identity 9、asset_lookup_chain_contract 14、transfer_pair_clears_pending 7、llm_dispatch_race 2）
 
 ## 2026-05-08 新交付：P1-1 LLM 智能分类
 详见 [docx/LLM_CLASSIFICATION_PLAN.md](docx/LLM_CLASSIFICATION_PLAN.md)：

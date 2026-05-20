@@ -270,6 +270,9 @@
 - `unrealized_pnl`：仍仅在 `cost_currency == price_currency` 时计算，否则 `null`
 
 **Portfolio Summary 响应**
+
+> **⚠️ 2026-05-19 shape 变更**：`by_currency` 的值从字符串金额改为嵌套对象，区分原币种值和折算后的 base 值。见 Sprint 4 FIX-22。
+
 ```json
 {
   "base_currency": "CNY",
@@ -283,9 +286,9 @@
     "gold":     "150000.00"
   },
   "by_currency": {
-    "CNY": "650000.00",
-    "EUR": "300000.00",
-    "USD": "284567.89"
+    "CNY": { "original_value": "650000.00", "base_value": "650000.00" },
+    "EUR": { "original_value": "38000.00",  "base_value": "300000.00" },
+    "USD": { "original_value": "40000.00",  "base_value": "284567.89" }
   }
 }
 ```
@@ -305,6 +308,9 @@
 ```
 
 **Net Worth 响应**
+
+> **⚠️ 2026-05-19 shape 变更**：`investment_by_currency` 的值从字符串金额改为嵌套对象（同 Portfolio Summary），`cash_by_currency` 的键名也调整为 `original` / `converted`。见 Sprint 4 FIX-22。
+
 ```json
 {
   "base_currency": "CNY",
@@ -312,10 +318,13 @@
   "investment_total": "884567.89",
   "net_worth": "1234567.89",
   "cash_by_currency": {
-    "CNY": { "amount": "120000.00", "base_amount": "120000.00" },
-    "EUR": { "amount": "30000.00",  "base_amount": "230000.00" }
+    "CNY": { "original": "120000.00", "converted": "120000.00" },
+    "EUR": { "original": "30000.00",  "converted": "230000.00" }
   },
-  "investment_by_currency": { "USD": "284567.89", "CNY": "600000.00" },
+  "investment_by_currency": {
+    "USD": { "original_value": "40000.00",  "base_value": "284567.89" },
+    "CNY": { "original_value": "600000.00", "base_value": "600000.00" }
+  },
   "as_of": "2026-05-01T10:30:00Z"
 }
 ```
