@@ -187,7 +187,10 @@ async def _sync_crypto_wallet(
             log.warning(
                 "wallet_sync_chain_failed",
                 account_id=acc.id, chain=row.chain,
-                error_class=exc.__class__.__name__, error_repr=repr(exc),
+                # V5-P1-6: never log raw repr(exc) — httpx HTTPStatusError's
+                # repr contains the request URL (Alchemy key, Binance
+                # signature, etc.). _safe_error_text scrubs these.
+                error_class=exc.__class__.__name__, error=_safe_error_text(exc),
             )
             safe = _safe_error_text(exc)
             row.last_synced_at = now
@@ -236,7 +239,10 @@ async def _sync_exchange(
             log.warning(
                 "wallet_sync_exchange_failed",
                 account_id=acc.id, exchange=row.exchange,
-                error_class=exc.__class__.__name__, error_repr=repr(exc),
+                # V5-P1-6: never log raw repr(exc) — httpx HTTPStatusError's
+                # repr contains the request URL (Alchemy key, Binance
+                # signature, etc.). _safe_error_text scrubs these.
+                error_class=exc.__class__.__name__, error=_safe_error_text(exc),
             )
             safe = _safe_error_text(exc)
             row.last_synced_at = now

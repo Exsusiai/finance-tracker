@@ -1,8 +1,9 @@
 """LLM settings + cost endpoints.
 
 Read/write the runtime LLM configuration stored in `app_settings`. The
-provider API key (GEMINI_API_KEY) is read from env only — never echoed
-in responses, never accepted via this API.
+provider API key may be submitted via PUT /settings as ``gemini_api_key``; it
+is encrypted with AES-256-GCM before being stored and is never echoed back in
+responses.
 """
 from __future__ import annotations
 
@@ -50,15 +51,15 @@ async def update_llm_settings(
 ):
     payload = body.model_dump(exclude_unset=True)
 
-    # Pull api key out of the dict — it goes to a separate row (and is
-    # never echoed back). Empty string means "clear it".
+    # Pull api key out of the dict — encrypted into a separate row and never
+    # echoed back. Empty string means "clear it".
     api_key_raw = payload.pop("gemini_api_key", None)
     if api_key_raw is not None:
         trimmed = api_key_raw.strip()
         if trimmed:
-            await app_settings_svc.set_setting(db, "gemini_api_key", trimmed)
+            await app_settings_svc.set_gemini_api_key(db, trimmed)
         else:
-            await app_settings_svc.delete_setting(db, "gemini_api_key")
+            await app_settings_svc.delete_setting(db, "gemini_api_key_enc")
 
     mapping = {
         "enabled": "llm_enabled",

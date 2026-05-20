@@ -152,9 +152,21 @@ def _convert_fx(conn, amount: Decimal, src: str, base: str) -> Decimal | None:
       1. Same currency → identity
       2. Direct rate (src → base) → amount * rate
       3. Inverse rate (base → src) → amount / rate
-      4. Triangulate via USD / EUR pivot
+      4. Triangulate via CNY / USD / EUR pivot
       Returns None when no path exists.
+
+    FIX V5-P0-1: USD-pegged stablecoins (USDT, USDC, DAI …) are aliased to
+    USD before any FX lookup. wallet_sync writes market_prices.currency='USDT'
+    for on-chain holdings; the fiat FX scheduler never emits USDT rows, so
+    without this alias every crypto holding priced in USDT would silently fail
+    conversion and be excluded from net-worth totals.
     """
+    _USD_PEGGED = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FRAX"}
+    if src in _USD_PEGGED:
+        src = "USD"
+    if base in _USD_PEGGED:
+        base = "USD"
+
     if not src or src == base:
         return amount
 
@@ -221,10 +233,13 @@ async def get_total_assets(
     try:
         base_currency = currency or settings.base_currency
 
-        # 1. Account balances
+        # 1. Account balances — FIX V5-P1-2: only include accounts with
+        # include_in_total=1 and not soft-deleted, matching REST net_worth logic.
         rows = conn.execute("""
-            SELECT account_id, account_name, currency, balance
-            FROM v_account_balance
+            SELECT v.account_id, v.account_name, v.currency, v.balance
+            FROM v_account_balance v
+            JOIN accounts ac ON ac.id = v.account_id
+            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL
         """).fetchall()
         accounts = [
             {"account_id": r["account_id"], "account_name": r["account_name"],
@@ -232,18 +247,21 @@ async def get_total_assets(
             for r in rows
         ]
 
-        # 2. Portfolio holdings value
+        # 2. Portfolio holdings value — FIX V5-P1-2: filter include_in_total,
+        # deleted_at (account), and is_active (holding) to match REST net_worth.
         holdings = conn.execute("""
             SELECT ah.id, ah.quantity, ah.avg_cost, ah.cost_currency,
                    a.id AS asset_id, a.symbol, a.name, a.asset_class, a.currency AS asset_currency,
                    mp.price, mp.currency AS price_currency
             FROM asset_holdings ah
             JOIN assets a ON ah.asset_id = a.id
+            JOIN accounts ac ON ac.id = ah.account_id
             LEFT JOIN (
                 SELECT asset_id, price, currency
                 FROM market_prices mp1
                 WHERE quoted_at = (SELECT MAX(quoted_at) FROM market_prices mp2 WHERE mp2.asset_id = mp1.asset_id)
             ) mp ON mp.asset_id = a.id
+            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL AND ah.is_active = 1
         """).fetchall()
 
         total_portfolio = Decimal("0")
@@ -933,12 +951,16 @@ async def get_cashflow(
         months = []
         for r in rows:
             period = r["period"]
-            # Per-category breakdown (folded to BASE_CURRENCY)
-            cats = conn.execute("""
+            # Per-category breakdown (folded to BASE_CURRENCY).
+            # FIX V5-P1-3: use the same CASE-WHEN-NULL expression as the main
+            # totals so foreign-currency rows without an FX path are excluded
+            # (NULL) rather than silently counted at raw amount via the old
+            # COALESCE(..., t.amount) fallback.
+            cats = conn.execute(f"""
                 SELECT
                     c.name,
                     c.kind,
-                    SUM(ABS(COALESCE(t.base_amount, t.amount * t.fx_rate_to_base, t.amount))) AS total,
+                    SUM(ABS({expr})) AS total,
                     COUNT(*) AS cnt
                 FROM transactions t
                 LEFT JOIN categories c ON t.category_id = c.id
@@ -994,6 +1016,8 @@ async def get_asset_allocation(
     try:
         bc = base_currency or settings.base_currency
 
+        # FIX V5-P1-2: filter include_in_total, deleted_at, is_active so
+        # allocation totals match REST /portfolio/net-worth.
         holdings = conn.execute("""
             SELECT ah.id, ah.quantity, ah.avg_cost, ah.cost_currency,
                    a.id AS asset_id, a.symbol, a.name, a.asset_class,
@@ -1001,11 +1025,13 @@ async def get_asset_allocation(
                    mp.price, mp.currency AS price_currency
             FROM asset_holdings ah
             JOIN assets a ON ah.asset_id = a.id
+            JOIN accounts ac ON ac.id = ah.account_id
             LEFT JOIN (
                 SELECT asset_id, price, currency
                 FROM market_prices mp1
                 WHERE quoted_at = (SELECT MAX(quoted_at) FROM market_prices mp2 WHERE mp2.asset_id = mp1.asset_id)
             ) mp ON mp.asset_id = a.id
+            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL AND ah.is_active = 1
         """).fetchall()
 
         total_value = Decimal("0")
@@ -1061,11 +1087,13 @@ async def get_asset_allocation(
                 "assets": items,
             }
 
-        # Cash from accounts
+        # Cash from accounts — FIX V5-P1-2: only include_in_total + not deleted.
         cash_rows = conn.execute("""
-            SELECT currency, SUM(balance) AS total
-            FROM v_account_balance
-            GROUP BY currency
+            SELECT v.currency, SUM(v.balance) AS total
+            FROM v_account_balance v
+            JOIN accounts ac ON ac.id = v.account_id
+            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL
+            GROUP BY v.currency
         """).fetchall()
         cash_total = Decimal("0")
         cash_by_cur = {}

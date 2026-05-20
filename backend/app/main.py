@@ -255,9 +255,17 @@ async def lifespan(app: FastAPI):
         await seed_db.commit()
 
     # Seed LLM-related app_settings rows (idempotent — only inserts missing keys).
-    from app.services.app_settings import seed_defaults as seed_app_settings
+    from app.services.app_settings import (
+        seed_defaults as seed_app_settings,
+        _migrate_legacy_gemini_key_to_encrypted,
+    )
     async with async_session_factory() as seed_db:
         await seed_app_settings(seed_db)
+        await seed_db.commit()
+
+    # Encrypt any plaintext gemini_api_key left from pre-V5 deployments.
+    async with async_session_factory() as seed_db:
+        await _migrate_legacy_gemini_key_to_encrypted(seed_db)
         await seed_db.commit()
 
     # 2026-05-06: backfill 内部储蓄 for orphan single-leg subaccount transfers.

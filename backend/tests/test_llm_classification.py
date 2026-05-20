@@ -366,11 +366,11 @@ async def test_gemini_key_app_settings_overrides_env(db, monkeypatch):
     monkeypatch.setattr(_gs(), "gemini_api_key", "env-key")
     # No stored key → falls back to env
     assert (await get_gemini_api_key(db)) == "env-key"
-    # Stored key wins
-    await app_settings_svc.set_setting(db, "gemini_api_key", "ui-key")
+    # Stored key wins (now encrypted via set_gemini_api_key)
+    await app_settings_svc.set_gemini_api_key(db, "ui-key")
     assert (await get_gemini_api_key(db)) == "ui-key"
     # Clearing returns env again
-    await app_settings_svc.delete_setting(db, "gemini_api_key")
+    await app_settings_svc.delete_setting(db, "gemini_api_key_enc")
     assert (await get_gemini_api_key(db)) == "env-key"
 
 

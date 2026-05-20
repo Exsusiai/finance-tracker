@@ -190,9 +190,20 @@ async def upsert_exchange_connection(
     ).scalar_one_or_none()
 
     now = _utcnow_str()
-    key_enc = encrypt_str(body.api_key)
-    secret_enc = encrypt_str(body.api_secret)
-    pp_enc = encrypt_str(body.passphrase) if body.passphrase else None
+    # V5-P2-3 / 2026-05-20: surface missing FINANCE_BANK_ENCRYPTION_KEY as a
+    # 400 configuration error instead of a generic 500. The user can fix
+    # this by editing .env (see .env.example) — telling them so directly
+    # is much better than a stack trace in the browser console.
+    try:
+        key_enc = encrypt_str(body.api_key)
+        secret_enc = encrypt_str(body.api_secret)
+        pp_enc = encrypt_str(body.passphrase) if body.passphrase else None
+    except RuntimeError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Backend not configured for encrypted credentials: "
+            "set FINANCE_BANK_ENCRYPTION_KEY in .env (see .env.example), then restart.",
+        ) from exc
 
     if existing is None:
         row = ExchangeConnection(

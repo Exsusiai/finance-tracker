@@ -16,12 +16,22 @@ logger = logging.getLogger(__name__)
 
 
 async def refresh_crypto_prices(db: AsyncSession) -> dict[str, Any]:
-    """Refresh crypto prices (CoinGecko) for all crypto assets with data_source set."""
+    """Refresh crypto prices (CoinGecko) for legacy/manual crypto assets.
+
+    Excludes ``data_source IN ('onchain','native')`` — those rows are
+    created by the P1-4 wallet_sync pipeline and have a contract address
+    (or no source id at all) as ``data_source_id``. Sending those values
+    to ``/simple/price?ids=`` returns 404 because the endpoint expects a
+    CoinGecko coin id. The wallet_sync orchestrator handles their prices
+    via ``fetch_token_prices`` / ``fetch_native_prices`` already.
+    (V5-P2-4, 2026-05-20)
+    """
     result = {"prices_updated": 0, "errors": []}
     try:
         stmt = select(Asset).where(
             Asset.asset_class == "crypto",
             Asset.data_source.is_not(None),
+            Asset.data_source.notin_(("onchain", "native")),
         )
         assets = (await db.execute(stmt)).scalars().all()
         for asset in assets:

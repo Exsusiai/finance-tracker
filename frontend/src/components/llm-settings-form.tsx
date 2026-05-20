@@ -186,7 +186,7 @@ export function LLMSettingsForm() {
           )}
         </form>
         <p className="text-[10px] text-muted-foreground">
-          Key 存于本地 SQLite 的 app_settings 表 (明文), 永不返回到 API 响应中。
+          Key 经 FINANCE_BANK_ENCRYPTION_KEY 加密 (AES-256-GCM) 后入库, 永不返回到 API 响应中。
           若 .env 也设置了 GEMINI_API_KEY, 此处保存的值优先生效。
         </p>
       </div>

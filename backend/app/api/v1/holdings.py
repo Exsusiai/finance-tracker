@@ -237,10 +237,18 @@ async def portfolio_summary(
     """Calculate total portfolio value in base currency."""
     base_currency = settings.base_currency
 
-    # Get all holdings with asset info and latest prices
+    # Get all holdings with asset info and latest prices.
+    # Only include holdings from accounts that are opted-in to grand-total
+    # aggregation and are not soft-deleted; skip inactive holdings too.
     stmt = (
         select(AssetHolding, Asset)
         .join(Asset, AssetHolding.asset_id == Asset.id)
+        .join(Account, Account.id == AssetHolding.account_id)
+        .where(
+            Account.include_in_total == True,  # noqa: E712
+            Account.deleted_at.is_(None),
+            AssetHolding.is_active == True,  # noqa: E712
+        )
     )
     result = await db.execute(stmt)
     rows = result.all()
@@ -314,7 +322,16 @@ async def portfolio_breakdown(
     """Return portfolio breakdown by class and currency (for pie charts)."""
     base_currency = settings.base_currency
 
-    stmt = select(AssetHolding, Asset).join(Asset, AssetHolding.asset_id == Asset.id)
+    stmt = (
+        select(AssetHolding, Asset)
+        .join(Asset, AssetHolding.asset_id == Asset.id)
+        .join(Account, Account.id == AssetHolding.account_id)
+        .where(
+            Account.include_in_total == True,  # noqa: E712
+            Account.deleted_at.is_(None),
+            AssetHolding.is_active == True,  # noqa: E712
+        )
+    )
     result = await db.execute(stmt)
     rows = result.all()
 

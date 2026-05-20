@@ -172,13 +172,19 @@ export default function DashboardPage() {
         <div className="rounded-xl border border-border bg-card p-6 mb-6">
           <p className="text-sm text-muted-foreground mb-1">总资产</p>
           <p className="text-3xl md:text-4xl font-bold text-card-foreground mb-1">
-            {grandTotal.value > 0 ? formatCurrency(grandTotal.value, displayCurrency) : "—"}
+            {netWorth
+              ? formatCurrency(
+                  displayCurrency === baseCurrency
+                    ? parseFloat(netWorth.net_worth)
+                    : (convertAmount(parseFloat(netWorth.net_worth), baseCurrency, displayCurrency, fxMap) ??
+                        parseFloat(netWorth.net_worth)),
+                  displayCurrency === baseCurrency ||
+                    convertAmount(parseFloat(netWorth.net_worth), baseCurrency, displayCurrency, fxMap) != null
+                    ? displayCurrency
+                    : baseCurrency,
+                )
+              : "—"}
           </p>
-          {!grandTotal.allConverted && (
-            <p className="text-[10px] text-amber-600 dark:text-amber-400 mb-3">
-              ⚠ 部分币种缺少汇率，未计入合计
-            </p>
-          )}
           <p className="text-[10px] text-muted-foreground mb-4">
             按所选显示币种合计；下方按账户原币展示
           </p>

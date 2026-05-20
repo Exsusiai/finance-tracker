@@ -104,19 +104,66 @@ async def delete_setting(db: AsyncSession, key: str) -> bool:
     return True
 
 
+async def set_gemini_api_key(db: AsyncSession, raw_key: str) -> None:
+    """Encrypt *raw_key* with AES-256-GCM and persist to ``gemini_api_key_enc``.
+
+    Uses the same ``encrypt_str`` helper that exchange/bank credentials use so
+    the key is never written in plaintext to the KV store.
+    """
+    from app.services.bank_sync.crypto import encrypt_str
+
+    encrypted = encrypt_str(raw_key)
+    await set_setting(db, "gemini_api_key_enc", encrypted)
+
+
 async def get_gemini_api_key(db: AsyncSession) -> str | None:
-    """Resolve the Gemini API key. UI-stored value wins over env so users
-    can override deployment defaults without touching the .env file.
+    """Resolve the Gemini API key. Priority order:
+
+    1. Encrypted DB row ``gemini_api_key_enc`` (set via Settings UI)
+    2. Env / .env ``GEMINI_API_KEY`` (deployment default)
 
     Returns None when neither source has a key set.
     """
     from app.core.config import get_settings as _get_app_settings
+    from app.services.bank_sync.crypto import decrypt_str
 
-    stored = await get_setting(db, "gemini_api_key", default=None)
-    if stored:
-        return stored
+    encrypted = await get_setting(db, "gemini_api_key_enc", default=None)
+    if encrypted:
+        try:
+            return decrypt_str(encrypted)
+        except Exception:
+            logger.warning("gemini_api_key_dec_failed", hint="key may be from different encryption key")
+
     env_key = _get_app_settings().gemini_api_key
     return env_key or None
+
+
+async def _migrate_legacy_gemini_key_to_encrypted(db: AsyncSession) -> None:
+    """One-shot migration: move plaintext ``gemini_api_key`` → ``gemini_api_key_enc``.
+
+    Idempotent — skips if the plaintext row is already gone or if an
+    encrypted row already exists (so a subsequent startup is a no-op).
+    """
+    plaintext_row = (
+        await db.execute(select(AppSetting).where(AppSetting.key == "gemini_api_key"))
+    ).scalar_one_or_none()
+
+    if plaintext_row is None:
+        return  # nothing to migrate
+
+    # Don't overwrite an already-encrypted row that arrived via a race or
+    # a previous partial run.
+    enc_row = (
+        await db.execute(select(AppSetting).where(AppSetting.key == "gemini_api_key_enc"))
+    ).scalar_one_or_none()
+
+    if enc_row is None:
+        await set_gemini_api_key(db, plaintext_row.value)
+        logger.info("gemini_api_key_migrated_to_encrypted")
+
+    # Always remove the plaintext row after a successful migration.
+    await db.delete(plaintext_row)
+    await db.flush()
 
 
 async def seed_defaults(db: AsyncSession) -> int:

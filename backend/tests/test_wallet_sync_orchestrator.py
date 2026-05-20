@@ -384,6 +384,40 @@ class TestSafeErrorText:
         safe = _safe_error_text(MyCustomError())
         assert safe == "MyCustomError"
 
+    async def test_log_emission_uses_safe_text_not_repr(
+        self, db, monkeypatch, caplog
+    ):
+        """Regression for V5-P1-6: log lines must NOT include
+        repr(exc) — httpx exception repr leaks API keys / signatures."""
+        import logging
+        from app.models import ChainAddress
+
+        acc = await _make_wallet(db, "LogScrub")
+        db.add(ChainAddress(
+            account_id=acc.id, chain="ethereum",
+            address="0xLogScrubAddress", created_at=_utcnow(), updated_at=_utcnow(),
+        ))
+        await db.commit()
+
+        # Provider raises an exception whose repr embeds an Alchemy key.
+        def fake_dispatch(chain, alchemy_api_key):
+            return FakeChainProvider(
+                chain,
+                raises=RuntimeError(
+                    "https://eth-mainnet.g.alchemy.com/v2/SECRET99887766aabbcc rejected"
+                ),
+            )
+        monkeypatch.setattr(orchestrator, "_dispatch_chain", fake_dispatch)
+
+        with caplog.at_level(logging.WARNING):
+            await orchestrator.sync_account(db, acc.id, alchemy_api_key="dummy")
+            await db.commit()
+
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "SECRET99887766" not in joined, (
+            "Alchemy API key leaked into log output via raw exception repr"
+        )
+
 
 class TestEdges:
     async def test_unknown_account_raises(self, db: AsyncSession):
