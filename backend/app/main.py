@@ -230,6 +230,42 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 logger.warning("schema_index_create_failed", name=name, error=str(e))
 
+    # Alembic revision sanity check — warn if DB is out of sync with latest schema.
+    # Skip silently if alembic_version table doesn't exist (fresh DB, no migrations yet).
+    try:
+        from alembic.config import Config as _AlembicConfig
+        from alembic.script import ScriptDirectory
+        from sqlalchemy import text as _t
+        from pathlib import Path as _Path
+
+        # Resolve path to alembic.ini (sibling of app/)
+        _app_dir = _Path(__file__).resolve().parent
+        _backend_dir = _app_dir.parent
+        _alembic_ini_path = _backend_dir / "alembic.ini"
+
+        cfg = _AlembicConfig(str(_alembic_ini_path))
+        script = ScriptDirectory.from_config(cfg)
+        head = script.get_current_head()
+
+        async with engine.connect() as conn:
+            # Check if alembic_version table exists and has data
+            result = await conn.execute(_t(
+                "SELECT version_num FROM alembic_version LIMIT 1"
+            ))
+            current = result.scalar()
+
+        if current and current != head:
+            logger.warning(
+                "alembic_revision_drift",
+                current=current,
+                head=head,
+                msg="Database revision is behind latest. Run: cd backend && alembic upgrade head",
+            )
+    except Exception as exc:
+        # Silently skip if alembic_version table doesn't exist or other setup issues.
+        # This is expected on fresh databases that haven't been stamped yet.
+        pass
+
     # 2026-05-07 dedup (must run BEFORE seed_categories, because seed's
     # `_ensure_rule` calls scalar_one_or_none() and explodes on duplicates):
     # an earlier version of the 信用卡还款 → 跨行划转 merge redirected rules

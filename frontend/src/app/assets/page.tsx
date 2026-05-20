@@ -581,25 +581,25 @@ export default function AssetsPage() {
                             <td className="px-4 py-3 text-muted-foreground">{h.account_name || "—"}</td>
                             <td className="px-4 py-3 text-right tabular-nums">{formatNumber(h.quantity)}</td>
                             <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
-                              {h.avg_cost
+                              {h.avg_cost && h.cost_currency
                                 ? (() => {
-                                    const d = displayFrom(h.avg_cost, h.cost_currency || "EUR");
+                                    const d = displayFrom(h.avg_cost, h.cost_currency);
                                     return formatCurrency(d.value, d.currency);
                                   })()
                                 : "—"}
                             </td>
                             <td className="px-4 py-3 text-right tabular-nums">
-                              {h.current_price
+                              {h.current_price && h.price_currency
                                 ? (() => {
-                                    const d = displayFrom(h.current_price, h.cost_currency || "EUR");
+                                    const d = displayFrom(h.current_price, h.price_currency);
                                     return formatCurrency(d.value, d.currency);
                                   })()
                                 : "—"}
                             </td>
                             <td className="px-4 py-3 text-right font-medium tabular-nums">
-                              {h.market_value
+                              {h.market_value && h.market_value_currency
                                 ? (() => {
-                                    const d = displayFrom(h.market_value, h.cost_currency || "EUR");
+                                    const d = displayFrom(h.market_value, h.market_value_currency);
                                     return formatCurrency(d.value, d.currency);
                                   })()
                                 : "—"}
@@ -925,7 +925,7 @@ interface DistPanelProps {
   breakdown:
     | {
         by_class: Record<string, { value: string; count: number; assets: Array<{ symbol: string; name: string; value: string }> }>;
-        by_currency: Record<string, { value: string; count: number }>;
+        by_currency: Record<string, { original_value: string; base_value: string; count: number }>;
       }
     | undefined;
   baseCurrency: string;
@@ -934,10 +934,28 @@ interface DistPanelProps {
 }
 
 function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxMap }: DistPanelProps) {
-  const source = mode === "class" ? breakdown?.by_class : breakdown?.by_currency;
-  const entries = source ? Object.entries(source) : [];
+  // Normalise both shapes into a uniform list: { key, baseValue, originalValue, count }.
+  // by_class entries carry `value` (already in base currency).
+  // by_currency entries carry `base_value` (base currency) + `original_value` (quote currency).
+  const normalised: Array<{ key: string; baseValue: string; originalValue: string | null; count: number }> = (() => {
+    if (!breakdown) return [];
+    if (mode === "class") {
+      return Object.entries(breakdown.by_class).map(([k, v]) => ({
+        key: k,
+        baseValue: v.value,
+        originalValue: null,
+        count: v.count,
+      }));
+    }
+    return Object.entries(breakdown.by_currency).map(([k, v]) => ({
+      key: k,
+      baseValue: v.base_value,
+      originalValue: v.original_value,
+      count: v.count,
+    }));
+  })();
 
-  if (entries.length === 0) {
+  if (normalised.length === 0) {
     return (
       <div className="rounded-xl border border-border bg-card p-12 text-center">
         <p className="text-sm text-muted-foreground">暂无持仓数据</p>
@@ -955,21 +973,24 @@ function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxM
       : { value: converted, currency: displayCurrency };
   };
 
-  const totalRaw = entries.reduce((s, [, v]) => s + parseFloat(v.value || "0"), 0);
+  const totalRaw = normalised.reduce((s, e) => s + parseFloat(e.baseValue || "0"), 0);
   const total = convertVal(String(totalRaw));
 
-  const pieData = entries.map(([key, val], i) => {
-    const d = convertVal(val.value);
+  const pieData = normalised.map((entry, i) => {
+    const d = convertVal(entry.baseValue);
     return {
-      name: mode === "class" ? (ASSET_CLASS_LABELS[key] || key) : key,
+      name: mode === "class" ? (ASSET_CLASS_LABELS[entry.key] || entry.key) : entry.key,
       value: d.value,
       currency: d.currency,
-      count: val.count,
+      count: entry.count,
+      // For currency mode, show original (quote-currency) value in tooltip
+      originalValue: entry.originalValue,
+      originalCurrency: mode === "currency" ? entry.key : null,
       fill:
         mode === "class"
-          ? ASSET_CLASS_COLORS[key] || CHART_COLORS[i % CHART_COLORS.length]
+          ? ASSET_CLASS_COLORS[entry.key] || CHART_COLORS[i % CHART_COLORS.length]
           : CHART_COLORS[i % CHART_COLORS.length],
-      percent: totalRaw > 0 ? (parseFloat(val.value || "0") / totalRaw) * 100 : 0,
+      percent: totalRaw > 0 ? (parseFloat(entry.baseValue || "0") / totalRaw) * 100 : 0,
     };
   });
 
@@ -999,7 +1020,17 @@ function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxM
               content={({ active, payload }) => {
                 if (!active || !payload?.length) return null;
                 const d = payload[0];
-                const p = d.payload as { fill: string; percent: number };
+                const p = d.payload as {
+                  fill: string;
+                  percent: number;
+                  currency: string;
+                  originalValue: string | null;
+                  originalCurrency: string | null;
+                };
+                const origStr =
+                  p.originalValue != null && p.originalCurrency != null
+                    ? ` ≈ ${p.originalCurrency} ${parseFloat(p.originalValue).toLocaleString(undefined, { maximumFractionDigits: 4 })}`
+                    : null;
                 return (
                   <div className="rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-sm">
                     <div className="flex items-center gap-2 mb-1">
@@ -1007,8 +1038,11 @@ function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxM
                       <span className="font-medium text-foreground">{d.name}</span>
                     </div>
                     <p className="text-muted-foreground">
-                      {formatCurrency(Number(d.value ?? 0), (d.payload as { currency: string }).currency || baseCurrency)} ({(p.percent ?? 0).toFixed(1)}%)
+                      {formatCurrency(Number(d.value ?? 0), p.currency || baseCurrency)} ({(p.percent ?? 0).toFixed(1)}%)
                     </p>
+                    {origStr && (
+                      <p className="text-xs text-muted-foreground mt-0.5">{origStr}</p>
+                    )}
                   </div>
                 );
               }}

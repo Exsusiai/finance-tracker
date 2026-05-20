@@ -16,6 +16,8 @@
 # 后端
 python3 -m venv .venv && .venv/bin/pip install -e backend
 cp .env.example .env  # 编辑 token / 端口；本地默认开 AUTH_DISABLED=true
+cd backend && ../.venv/bin/alembic upgrade head    # 应用 schema 迁移
+cd ..
 .venv/bin/uvicorn app.main:app --app-dir backend --port 8010
 
 # 前端
@@ -24,6 +26,8 @@ cd frontend && npm install && npm run dev -- -p 3010
 # MCP server (面向 AI 客户端)
 ./mcp-server/run.sh
 ```
+
+> **⚠️ 新数据库自动建表** — 首次启动新数据库时，lifespan 会自动执行 `Base.metadata.create_all()` 建表。但如果你从**旧版本升级**，必须先跑 `alembic upgrade head` 补齐 V4+ 新增的字段（`accounts.include_in_total`、`transactions.llm_*`、`categorization_notes`、`chain_addresses`、`exchange_connections` 等），否则新代码访问缺失列会 500。
 
 打开 http://localhost:3010
 

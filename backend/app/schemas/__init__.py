@@ -381,7 +381,13 @@ class HoldingOut(BaseModel):
     avg_cost: str | None
     cost_currency: str | None
     current_price: str | None = None
+    # price_currency: the currency of the latest market price quote (e.g. "USDT").
+    # Distinct from cost_currency — crypto holdings frequently have price_currency
+    # but no cost_currency (unknown purchase basis).
+    price_currency: str | None = None
     market_value: str | None = None
+    # market_value_currency matches price_currency when market_value is set.
+    market_value_currency: str | None = None
     unrealized_pnl: str | None = None
     last_synced_at: str | None
     created_at: str

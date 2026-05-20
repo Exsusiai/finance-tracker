@@ -1,7 +1,7 @@
 # 架构概览 (ARCHITECTURE)
 
 > Finance Tracker — 个人资金管理与记账系统
-> 最后修订: 2026-05-06
+> 最后修订: 2026-05-18 (V5-P2-5)
 
 ## 高层架构
 
@@ -51,22 +51,27 @@
 | `schemas/` | Pydantic v2 请求/响应模型 (与 `docs/API.md` 对齐) |
 | `api/v1/` | FastAPI route handlers (薄,只做参数校验和调用 service) |
 | `services/` | 业务逻辑层（见下表） |
-| `db/migrations/` | Alembic 目录（暂未启用，由 `_column_migrations` idempotent ALTER 顶住） |
+| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `b5f0a2f546ed`；新增字段走 `alembic revision --autogenerate`） |
 
-#### `services/` 详细结构（2026-05-06）
+#### `services/` 详细结构（2026-05-18）
 
 | 子目录 | 职责 |
 |---|---|
 | `ingestion/` | **统一交易写入管道**（Sprint 1 FIX-4）：amount 归一 → FX 折算（`fx.py:resolve_fx_to_base`）→ categorize（含 kind 守卫）→ transfer match → cashflow recompute。upload / reparse / batch / bank_sync / mcp 全部接入 |
 | `pdf_parser/` | 5 家银行 parser + column-aware Revolut + 子账户 / 跨行关键词预标 |
-| `categorizer/` | 关键词规则匹配（含 `_safe_regex_search` ReDoS 防御）+ `learn_from_user_assignment` + `apply_to_similar_pending` 级联 + seed 种子 |
+| `categorizer/` | 关键词规则匹配（含 `_safe_regex_search` ReDoS 防御）+ `learn_from_user_assignment` + `apply_to_similar_pending` 级联 + seed 种子；`engine.py::record_note_to_kb` 在用户改分类时同步更新 `requires_llm` 标志 |
 | `transfer_matcher/` | 跨账户配对（评分制 + IBAN +40）+ 同账户 amount-match L3（subaccount 标记）+ `pair_transactions` 写 `metadata.transfer_direction` |
 | `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot；多币种用 `COALESCE(base_amount, amount * fx_rate_to_base, amount)` |
-| `market_data/` | 取价（yfinance / CoinGecko / FX）+ `scheduler.py` AsyncIOScheduler 三 job |
+| `market_data/` | 取价（yfinance / CoinGecko / FX）+ `scheduler.py` AsyncIOScheduler 三 job；`coingecko.py` 含 token 价格与原生代币 native price 两种 fetcher |
 | `asset_search/` | CoinGecko + yfinance 联合查询自动识别资产 |
 | `valuation/` | 占位（旧 helper 已删，估值逻辑在 `api/v1/holdings.py`）|
-| `bank_sync/` | GoCardless 银行直连（scaffold，未启用） |
+| `bank_sync/` | GoCardless 银行直连（scaffold，未启用）；`crypto.py` 提供 AES-256-GCM `encrypt_str` / `decrypt_str`，被 wallet_sync 和 llm 路由复用 |
 | `notion_sync/` | Notion 三模块同步（scaffold，未联调） |
+| `wallet_sync/` | **P1-4 链上/CEX 同步编排**：`orchestrator.py` 按账户类型分发；`upsert.py` 写 `asset_holdings` (is_active + quantity)；`spam_filter.py` 过滤粉尘代币；`holdings_value.py` 原生 SQL 聚合最新市价 |
+| `crypto_sync/` | **链上余额 provider**：`evm_alchemy.py`（Alchemy Token API，EVM 系全链通用）、`btc_blockstream.py`（Blockstream API）、`sol_rpc.py`（Solana JSON-RPC）、`tron_grid.py`（TronGrid REST） |
+| `exchange_sync/` | **CEX 余额 provider**：`binance.py`（Binance Spot）、`bitget.py`（Bitget Spot + 签名）、`sign.py`（HMAC 签名辅助） |
+| `llm/` | **P1-1 三层分类管道**：`provider.py` 定义 `LLMProvider` Protocol；`gemini.py` 是唯一实现（google-genai SDK）；`classifier.py` 检索知识库 → 构造 prompt → Provider → 解析 JSON → 写审计列；`cost_tracker.py` 按月累计 USD 消耗 |
+| `app_settings.py` | `app_settings` KV 表的类型化读写访问器，用于 LLM 配置持久化 |
 
 ### Frontend (`frontend/src/`)
 
@@ -193,6 +198,25 @@ docker-compose.yml
 - Token 强制 32 字节随机,启动检查
 - PDF 原文保留,因为银行流水号在重新解析时需要
 - 备份: 每日凌晨 cron 触发 `sqlite3 .backup` → 保留最近 30 天
+
+### AES-256-GCM 凭证加密
+
+以下三类凭证在写入数据库前均通过 `services/bank_sync/crypto.py::encrypt_str` 加密，密钥来自环境变量 `FINANCE_BANK_ENCRYPTION_KEY`：
+
+| 凭证类型 | 存储表 | 列名 |
+|---|---|---|
+| GoCardless secret_id / secret_key | `bank_connections` | `credentials_enc` |
+| CEX API Key / Secret / Passphrase | `exchange_connections` | `api_key_enc`, `api_secret_enc`, `api_passphrase_enc` |
+| Gemini API Key (LLM) | `app_settings` | key=`gemini_api_key_enc` |
+
+所有响应均只返回布尔标志（`has_credentials`, `api_key_present`），密文和明文从不出现在 HTTP 响应中。
+
+### `include_in_total` 语义
+
+`accounts.include_in_total = 0` 时账户仍显示在账户列表中，但被以下聚合端点排除：
+
+- REST: `/holdings/portfolio/summary`, `/holdings/portfolio/breakdown`, `/holdings/portfolio/net-worth`, `/accounts/balances`（总计行）
+- MCP tools: `get_total_assets`, `get_asset_allocation`, `get_cashflow`（现金侧汇总）
 
 ## 演进路径
 

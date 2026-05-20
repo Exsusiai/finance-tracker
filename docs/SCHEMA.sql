@@ -11,7 +11,8 @@
 --   7. 外键: 强制启用 (PRAGMA foreign_keys=ON)
 --
 -- 此文件用于参考与文档化。实际表创建通过 Alembic 迁移脚本完成
--- (alembic/versions/0001_initial.py),保持 ORM 模型与迁移单源真相。
+-- (backend/alembic/versions/)，当前 head: b5f0a2f546ed (2026-05-19)。
+-- 最后同步: 2026-05-18 (V5-P2-5)。ORM 真相源: backend/app/models/__init__.py。
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
@@ -27,6 +28,9 @@ CREATE TABLE accounts (
     currency        TEXT NOT NULL,                     -- 主币种 ISO-4217: CNY / EUR / USD / BTC ...
     initial_balance NUMERIC(20, 8) NOT NULL DEFAULT 0,
     is_active       INTEGER NOT NULL DEFAULT 1,        -- 0/1 boolean
+    -- 设为 0 时账户仍显示在列表中，但从 net_worth / portfolio 汇总中排除
+    -- (由 holdings.py portfolio_summary/breakdown/net-worth + MCP get_total_assets/get_asset_allocation 强制执行)
+    include_in_total INTEGER NOT NULL DEFAULT 1,       -- 0/1 boolean
     notes           TEXT,
     metadata_json   TEXT,                              -- JSON 任意扩展字段，约定字段：
                                                        --   subaccount_names: [str]  per-account 用户子账户名清单
@@ -34,7 +38,7 @@ CREATE TABLE accounts (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at      TEXT,
-    CHECK (type IN ('bank','credit_card','brokerage','crypto_wallet','cash','other'))
+    CHECK (type IN ('bank','credit_card','brokerage','crypto_wallet','exchange','cash','other'))
 );
 CREATE INDEX idx_accounts_active ON accounts(is_active) WHERE deleted_at IS NULL;
 
@@ -115,7 +119,11 @@ CREATE TABLE transactions (
                                                        --   cross_bank_hint: bool    PDF parser 预标的跨行 cue
                                                        --   matched / source         配对来源（keyword/user_list/amount_match）
                                                        --   paired_with_tx_id: int   配对的对方 tx
-    user_note           TEXT,                          -- 用户在 inbox 确认时写的备注（供 LLM few-shot 上下文）
+    user_note               TEXT,                      -- 用户在 inbox 确认时写的备注（供 LLM few-shot 上下文）
+    -- L1/L2 分类管道审计列 (P1-1)
+    categorization_method   TEXT,                      -- 'rule' | 'llm' | 'manual'
+    categorization_confidence REAL,                    -- 0..1 仅当 method='llm' 时有值
+    llm_reason              TEXT,                      -- LLM 分类理由 (调试用)
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at          TEXT,
@@ -165,16 +173,21 @@ CREATE TABLE asset_holdings (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id      INTEGER NOT NULL,
     asset_id        INTEGER NOT NULL,
+    -- P1-4: 链标识，非加密资产留空字符串以保证 UNIQUE 正常工作
+    -- "ethereum" / "arbitrum" / "bitcoin" / "solana" / "tron" 等
+    chain           TEXT NOT NULL DEFAULT '',
     quantity        NUMERIC(20, 8) NOT NULL DEFAULT 0,
     avg_cost        NUMERIC(20, 8),                    -- 平均买入成本
     cost_currency   TEXT,
     last_synced_at  TEXT,                              -- 最近一次链上/券商同步时间
+    -- P1-4: 本轮同步是否仍持有该资产 (False 时 quantity 归 0，行保留以记录历史)
+    is_active       INTEGER NOT NULL DEFAULT 1,
     notes           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
     FOREIGN KEY (asset_id)   REFERENCES assets(id)   ON DELETE RESTRICT,
-    UNIQUE (account_id, asset_id)
+    UNIQUE (account_id, asset_id, chain)               -- 原 UNIQUE(account_id, asset_id) 已扩展为含 chain
 );
 CREATE INDEX idx_holdings_account ON asset_holdings(account_id);
 CREATE INDEX idx_holdings_asset   ON asset_holdings(asset_id);
@@ -195,6 +208,8 @@ CREATE TABLE market_prices (
 );
 CREATE INDEX idx_prices_asset_time ON market_prices(asset_id, quoted_at DESC);
 CREATE UNIQUE INDEX idx_prices_dedup ON market_prices(asset_id, source, quoted_at);
+-- P1-4 热路径：holdings_value SQL / portfolio_summary 按 (asset_id, currency) 找最新价
+CREATE INDEX ix_market_prices_asset_currency_quoted ON market_prices(asset_id, currency, quoted_at);
 
 -- ---------------------------------------------------------------------
 -- fx_rates: 汇率时间序列 (基础币种 = CNY)
@@ -243,12 +258,16 @@ CREATE TABLE categorization_rules (
     priority        INTEGER NOT NULL DEFAULT 0,
     enabled         INTEGER NOT NULL DEFAULT 1,
     hit_count       INTEGER NOT NULL DEFAULT 0,
+    -- P1-1: True 时命中该规则不短路，仍路由到 LLM (L2) 二次分类
+    -- (用户为 PayPal 等复合条件规则附加 user_note 时自动置位)
+    requires_llm    INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
     CHECK (pattern_type IN ('contains','regex','exact','starts_with')),
     CHECK (field IN ('description','counterparty','raw_description'))
 );
+CREATE INDEX ix_rules_requires_llm ON categorization_rules(requires_llm);
 CREATE INDEX idx_rules_priority ON categorization_rules(priority DESC, enabled);
 
 -- ---------------------------------------------------------------------
@@ -286,6 +305,84 @@ LEFT JOIN transactions t
     AND t.deleted_at IS NULL
 WHERE a.deleted_at IS NULL
 GROUP BY a.id;
+
+-- ---------------------------------------------------------------------
+-- categorization_notes: LLM 知识库 (P1-1)
+-- 用户在 inbox 确认时附的 user_note 会自动写入此表，作为 LLM 分类的 few-shot 上下文
+-- ---------------------------------------------------------------------
+CREATE TABLE categorization_notes (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id             INTEGER NOT NULL,
+    trigger_text            TEXT NOT NULL,          -- 触发条件关键词或描述文本
+    note_text               TEXT NOT NULL,          -- 自然语言说明 ("PayPal 每月2.99 EUR 是订阅 X")
+    source_transaction_id   INTEGER,                -- 来源交易 (NULL = 手动创建)
+    usage_count             INTEGER NOT NULL DEFAULT 0,
+    enabled                 INTEGER NOT NULL DEFAULT 1,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_transaction_id) REFERENCES transactions(id) ON DELETE SET NULL
+);
+CREATE INDEX ix_notes_category ON categorization_notes(category_id);
+CREATE INDEX ix_notes_enabled  ON categorization_notes(enabled);
+
+-- ---------------------------------------------------------------------
+-- app_settings: 运行时 KV 配置 (P1-1)
+-- LLM 可调参数 (llm_enabled / llm_model / llm_monthly_usd_budget /
+-- llm_confidence_threshold / llm_use_grounding / llm_max_notes_in_prompt)
+-- 通过 Settings UI 改写，不需要重启进程
+-- ---------------------------------------------------------------------
+CREATE TABLE app_settings (
+    key         TEXT PRIMARY KEY,               -- "llm_enabled", "llm_model", ...
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ---------------------------------------------------------------------
+-- chain_addresses: 链上地址 (P1-4 crypto_wallet 类型账户)
+-- 见 backend/app/models/__init__.py::ChainAddress
+-- ---------------------------------------------------------------------
+CREATE TABLE chain_addresses (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id          INTEGER NOT NULL,
+    chain               TEXT NOT NULL,              -- "ethereum" | "arbitrum" | "bitcoin" | "solana" | "tron" | ...
+    address             TEXT NOT NULL,              -- 链上地址; 通过 ChainAddressIn 正则校验
+    label               TEXT,
+    last_synced_at      TEXT,                       -- UTC ISO-8601，NULL = 从未同步
+    last_sync_status    TEXT,
+    last_sync_error     TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    UNIQUE (account_id, chain, address)
+);
+CREATE INDEX ix_chain_addresses_account_id ON chain_addresses(account_id);
+
+-- ---------------------------------------------------------------------
+-- exchange_connections: CEX 只读 API 凭证 (P1-4 exchange 类型账户)
+-- 见 backend/app/models/__init__.py::ExchangeConnection
+-- 凭证以 AES-256-GCM 加密存储 (FINANCE_BANK_ENCRYPTION_KEY)，响应只返回布尔标志
+-- ---------------------------------------------------------------------
+CREATE TABLE exchange_connections (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id          INTEGER NOT NULL,
+    exchange            TEXT NOT NULL,              -- "binance" | "bitget"
+    api_key_enc         TEXT NOT NULL,              -- AES-256-GCM 密文 (base64)
+    api_secret_enc      TEXT NOT NULL,              -- AES-256-GCM 密文 (base64)
+    api_passphrase_enc  TEXT,                       -- Bitget 需要；Binance 留 NULL
+    last_synced_at      TEXT,
+    last_sync_status    TEXT,
+    last_sync_error     TEXT,
+    metadata_json       TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    CHECK (exchange IN ('binance','bitget')),
+    CHECK (length(api_key_enc) > 0),               -- 防止空字符串绕过 NOT NULL
+    CHECK (length(api_secret_enc) > 0),
+    UNIQUE (account_id, exchange)
+);
+CREATE INDEX ix_exchange_conn_account_id ON exchange_connections(account_id);
 
 -- =====================================================================
 -- End of schema

@@ -37,11 +37,18 @@ def _holding_to_out(
     latest_price: Decimal | None = None,
     price_currency: str | None = None,
 ) -> HoldingOut:
+    # market_value is computed whenever we have a price, regardless of cost_currency.
+    # Wallet/CEX-synced crypto holdings often have cost_currency=None (unknown cost
+    # basis), but we still know the current market value from the latest price.
     market_value = None
+    market_value_currency = None
     unrealized_pnl = None
-    if latest_price is not None and price_currency == h.cost_currency:
+    if latest_price is not None:
         market_value = h.quantity * latest_price
-        if h.avg_cost is not None:
+        market_value_currency = price_currency
+        # unrealized_pnl requires cost_currency to match price_currency so the
+        # subtraction is in the same unit. Skip when cost is unknown or mismatched.
+        if h.avg_cost is not None and price_currency == h.cost_currency:
             unrealized_pnl = market_value - (h.quantity * h.avg_cost)
 
     return HoldingOut(
@@ -56,8 +63,10 @@ def _holding_to_out(
         avg_cost=str(h.avg_cost) if h.avg_cost else None,
         cost_currency=h.cost_currency,
         current_price=str(latest_price) if latest_price else None,
-        market_value=str(market_value) if market_value else None,
-        unrealized_pnl=str(unrealized_pnl) if unrealized_pnl else None,
+        price_currency=price_currency,
+        market_value=str(market_value) if market_value is not None else None,
+        market_value_currency=market_value_currency,
+        unrealized_pnl=str(unrealized_pnl) if unrealized_pnl is not None else None,
         last_synced_at=h.last_synced_at,
         created_at=h.created_at,
         updated_at=h.updated_at,

@@ -97,7 +97,9 @@ export interface PortfolioSummary {
 
 export interface PortfolioBreakdown {
   by_class: Record<string, { value: string; count: number; assets: Array<{ symbol: string; name: string; value: string }> }>;
-  by_currency: Record<string, { value: string; count: number }>;
+  // by_currency: key = quote currency (e.g. "USDT"), values split into
+  // original_value (in that currency) and base_value (converted to base currency).
+  by_currency: Record<string, { original_value: string; base_value: string; count: number }>;
 }
 
 export interface HoldingOut {
@@ -112,7 +114,11 @@ export interface HoldingOut {
   avg_cost: string | null;
   cost_currency: string | null;
   current_price: string | null;
+  /** Currency of the latest market price quote (e.g. "USDT"). May differ from cost_currency. */
+  price_currency: string | null;
   market_value: string | null;
+  /** Same as price_currency when market_value is set; null otherwise. */
+  market_value_currency: string | null;
   unrealized_pnl: string | null;
   last_synced_at: string | null;
   created_at: string;

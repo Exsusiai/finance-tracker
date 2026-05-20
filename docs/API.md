@@ -5,7 +5,7 @@
 > 鉴权: `Authorization: Bearer <FINANCE_TRACKER_API_TOKEN>` (除 `/health` 外全部要求；本地默认 `AUTH_DISABLED=true` 跳过——Sprint 2 FIX-9 加了 invariant：仅当 `BACKEND_HOST` 是 loopback 时才允许跳过鉴权)
 > CORS: 允许列表由 `ALLOWED_ORIGINS` 控制（默认 `http://localhost:3000,http://localhost:3010,…`）
 > 前端 token 注入：用户在 Settings → API Token 输入框手动粘贴（FIX-18 后不再走 `NEXT_PUBLIC_API_TOKEN` bundle 注入）
-> 最后修订: 2026-05-06
+> 最后修订: 2026-05-18 (V5-P2-5)
 
 ## 通用约定
 
@@ -51,6 +51,11 @@
 | GET    | `/accounts/balances`              | 全账户余额一次返回                          |
 | POST   | `/accounts/{id}/adjust-balance`   | 余额校准（自动建一笔 `adjustment` 交易）    |
 
+**`AccountOut` 新增字段** (P1-4):
+- `include_in_total: bool` — 账户是否计入 net_worth / portfolio 汇总。`AccountCreate` 和 `AccountUpdate` 均接受此字段。
+
+**`/accounts/balances` 与 `/accounts/{id}/balance`**：对于 `type=crypto_wallet` 或 `type=exchange` 类型的账户，返回余额 = 初始余额 + holdings × 最新市价（折算到账户主币种）。
+
 **创建请求示例**
 ```json
 {
@@ -61,6 +66,7 @@
   "iban": "<IBAN>",
   "currency": "EUR",
   "initial_balance": "1500.00",
+  "include_in_total": true,
   "metadata_json": "{\"subaccount_names\": [\"Investing\", \"Dream List\"]}"
 }
 ```
@@ -257,6 +263,12 @@
 | GET    | `/holdings/portfolio/breakdown`   | 按类别 / 币种饼图数据                |
 | GET    | `/holdings/portfolio/net-worth`   | 净资产 = 现金 + 投资（按币种细分）   |
 
+**HoldingOut (单条持仓) 字段补充** — 2026-05-20 起：
+- `price_currency`：最新 `market_prices` 行的 currency（钱包/CEX 同步写入的 crypto 通常是 `USDT`）；与 `cost_currency` 解耦
+- `market_value_currency`：与 `price_currency` 同步；用于前端格式化「市值」列单位
+- `market_value`：只要 `current_price` 存在就计算（`quantity × current_price`），不再要求与 `cost_currency` 一致
+- `unrealized_pnl`：仍仅在 `cost_currency == price_currency` 时计算，否则 `null`
+
 **Portfolio Summary 响应**
 ```json
 {
@@ -274,6 +286,20 @@
     "CNY": "650000.00",
     "EUR": "300000.00",
     "USD": "284567.89"
+  }
+}
+```
+
+**Portfolio Breakdown `by_currency` 响应形状** — 区分原币种值和折算到 base 后的值：
+```json
+{
+  "by_currency": {
+    "USDT": {
+      "original_value": "1500.0",
+      "base_value": "1380.0",
+      "count": 5
+    },
+    "USD": { "original_value": "300", "base_value": "276", "count": 1 }
   }
 }
 ```
@@ -358,6 +384,7 @@
 **学习机制**：
 - 用户在 inbox confirm / 列表 PATCH 改分类时 → 自动从 `description` 提取关键词建/加强规则
 - `hit_count` 字段记录该规则命中次数
+- `requires_llm: bool` — 命中该规则时是否仍路由到 LLM (L2)（`RuleOut` 新增字段，P1-1）
 
 ---
 
@@ -393,7 +420,103 @@
 
 ---
 
-## 12. Notion 同步 Notion Sync (P2-3)
+## 12. 钱包同步 Wallet Sync (P1-4)
+
+链上地址与 CEX 连接管理。地址类路由仅接受 `type=crypto_wallet` 账户，交易所连接路由仅接受 `type=exchange` 账户。
+
+### 链上地址 Chain Addresses
+
+| Method | Path                                              | 说明                                              |
+|--------|---------------------------------------------------|---------------------------------------------------|
+| GET    | `/accounts/{id}/addresses`                        | 列出该 crypto_wallet 账户的全部链上地址           |
+| POST   | `/accounts/{id}/addresses`                        | 添加链上地址（链名 + 地址格式正则校验，409 防重） |
+| DELETE | `/accounts/{id}/addresses/{addr_id}`              | 删除链上地址                                      |
+
+**`POST /accounts/{id}/addresses` 请求**
+```json
+{ "chain": "ethereum", "address": "0xAbc...123", "label": "Cold Wallet" }
+```
+`chain` 必须是受支持的链之一 (`ethereum`, `arbitrum`, `optimism`, `base`, `polygon`, `polygon-zkevm`, `zksync`, `linea`, `scroll`, `mantle`, `blast`, `bitcoin`, `solana`, `tron`)；地址格式按链名正则校验（见 `backend/app/schemas/__init__.py::_ADDRESS_PATTERNS`）。
+
+**`ChainAddressOut` 字段**：`id`, `chain`, `address`, `label`, `last_synced_at`, `last_sync_status`, `last_sync_error`。
+
+### 交易所连接 Exchange Connection
+
+| Method | Path                                              | 说明                                                         |
+|--------|---------------------------------------------------|--------------------------------------------------------------|
+| GET    | `/accounts/{id}/exchange-connection`              | 获取连接（未设时 `data=null`）                               |
+| PUT    | `/accounts/{id}/exchange-connection`              | 创建或覆盖凭证（upsert）；secrets 加密入库，响应不回显      |
+| DELETE | `/accounts/{id}/exchange-connection`              | 删除连接                                                     |
+
+**`PUT /accounts/{id}/exchange-connection` 请求**
+```json
+{ "exchange": "binance", "api_key": "...", "api_secret": "...", "passphrase": null }
+```
+- `exchange`: `"binance"` 或 `"bitget"`（Bitget 必须提供 `passphrase`）
+- 凭证以 AES-256-GCM 加密（`FINANCE_BANK_ENCRYPTION_KEY`）后存入 `exchange_connections` 表
+- 未配置 `FINANCE_BANK_ENCRYPTION_KEY` 时返回 400
+
+**`ExchangeConnectionOut` 字段**：`id`, `exchange`, `has_credentials` (bool), `has_passphrase` (bool), `last_synced_at`, `last_sync_status`, `last_sync_error`。密钥本身从不出现在任何响应中。
+
+### 同步触发 Sync
+
+| Method | Path                              | 说明                                                            |
+|--------|-----------------------------------|-----------------------------------------------------------------|
+| POST   | `/accounts/{id}/sync`             | 阻塞式触发链上/CEX 余额同步，返回 `SyncSummaryOut`            |
+
+**`SyncSummaryOut` 字段**：`account_id`, `account_type`, `total_synced`, `total_errors`, `results: [SyncResultOut]`。`SyncResultOut` 含 `label`, `chain`, `exchange`, `synced`, `error`。
+
+> 同步在请求生命周期内完成（无后台队列）。个人钱包 1-3 个地址通常数秒内结束。
+
+---
+
+## 13. LLM 智能分类 LLM Classification (P1-1)
+
+运行时配置存于 `app_settings` KV 表，不需要重启进程即可调整。
+
+| Method | Path                          | 说明                                          |
+|--------|-------------------------------|-----------------------------------------------|
+| GET    | `/llm/settings`               | 获取当前 LLM 配置                             |
+| PUT    | `/llm/settings`               | 更新配置（含 `gemini_api_key` 写入加密存储）  |
+| GET    | `/llm/cost`                   | 本月累计消耗 (USD) vs 预算                    |
+
+**`GET /llm/settings` 响应 (`LLMSettingsOut`)**
+```json
+{
+  "enabled": true,
+  "provider": "gemini",
+  "model": "gemini-2.0-flash",
+  "monthly_usd_budget": 5.0,
+  "confidence_threshold": 0.7,
+  "use_grounding": false,
+  "max_notes_in_prompt": 10,
+  "api_key_present": true
+}
+```
+`api_key_present` 是布尔值，密钥本身从不出现在响应中。
+
+**`PUT /llm/settings` 可接受字段** (`LLMSettingsUpdate`)：`enabled`, `model`, `monthly_usd_budget`, `confidence_threshold`, `use_grounding`, `max_notes_in_prompt`, `gemini_api_key`（write-only；空字符串清除已存密钥）。
+
+**`GET /llm/cost` 响应 (`LLMCostOut`)**：`used_usd`, `budget_usd`, `remaining_usd`, `period` (`"YYYY-MM"`)。
+
+---
+
+## 14. 分类知识库 Categorization Notes (P1-1)
+
+供 LLM 管道使用的 few-shot 上下文条目。大多数条目由 inbox confirm + `user_note` 自动创建，也可在 Settings → 知识库 UI 直接编辑。
+
+| Method | Path                              | 说明                                    |
+|--------|-----------------------------------|-----------------------------------------|
+| GET    | `/categorization-notes`           | 列表 (?category_id=N&enabled=true/false)|
+| POST   | `/categorization-notes`           | 创建条目                                |
+| PATCH  | `/categorization-notes/{id}`      | 更新条目                                |
+| DELETE | `/categorization-notes/{id}`      | 硬删除                                  |
+
+**`NoteOut` 字段**：`id`, `category_id`, `category_name`, `trigger_text`, `note_text`, `source_transaction_id`, `usage_count`, `enabled`, `created_at`, `updated_at`。
+
+---
+
+## 15. Notion 同步 Notion Sync (P2-3)
 
 | Method | Path                              | 说明                                       |
 |--------|-----------------------------------|--------------------------------------------|
@@ -408,7 +531,7 @@
 
 ---
 
-## 13. MCP Tools (非 HTTP, stdio)
+## 16. MCP Tools (非 HTTP, stdio)
 
 由 `mcp-server/` 进程暴露，Agent 可调用以下 tool（共 7 个，已 6 轮回归测试 9 bug 全修）：
 
