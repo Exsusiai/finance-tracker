@@ -304,6 +304,31 @@ async def lifespan(app: FastAPI):
         await _migrate_legacy_gemini_key_to_encrypted(seed_db)
         await seed_db.commit()
 
+    # Credential health: if FINANCE_BANK_ENCRYPTION_KEY was rotated, every
+    # credential encrypted under the old key is now undecryptable. Surface
+    # it LOUDLY at startup instead of letting LLM classification silently
+    # abstain / CEX sync throw at sync time (ERR-20260607-001).
+    from app.services.security_health import verify_credentials_health
+    async with async_session_factory() as health_db:
+        health = await verify_credentials_health(health_db)
+    if health.stale:
+        logger.warning(
+            "encryption_key_rotated_stale_credentials",
+            stale=health.stale,
+            ok_count=health.ok_count,
+            hint="FINANCE_BANK_ENCRYPTION_KEY changed — re-enter these "
+            "credentials in Settings; they cannot be auto-recovered.",
+        )
+    else:
+        logger.info("credential_health_ok", ok_count=health.ok_count)
+
+    # Wire + start the single paced LLM classification worker. It drains
+    # the queue one item every llm_min_interval_sec so bulk dispatch never
+    # bursts past the free-tier rate limit (ERR-20260609-001).
+    from app.services.llm import queue as llm_queue
+    llm_queue.configure(async_session_factory)
+    llm_queue.start_worker()
+
     # 2026-05-06: backfill 内部储蓄 for orphan single-leg subaccount transfers.
     # The parser tags these with metadata.subaccount=true, but only the
     # matcher's `mark_subaccount_pair` writes the category — single-leg rows

@@ -33,6 +33,7 @@ async def parse_pdf_statement(
     content: bytes,
     *,
     subaccount_names: list[str] | None = None,
+    force_bank: str | None = None,
 ) -> dict[str, Any]:
     """Parse a PDF bank statement.
 
@@ -64,7 +65,21 @@ async def parse_pdf_statement(
     # Per-task context (async-safe — replaces the old module-level list)
     _names_token = _set_subaccount_names(list(subaccount_names or []))
     try:
-        detected_bank = _detect_bank(raw_text)
+        # `force_bank` lets the user override auto-detection from the upload
+        # UI (some statements share BICs / domains and mis-detect). Values:
+        #   - a known parser key (n26 / revolut / tfbank / advanzia / amex_de)
+        #     → skip detection, use that parser
+        #   - "other" / "generic" → force the generic parser
+        #   - None / "auto" / "" → fall back to text-feature auto-detection
+        forced = (force_bank or "").strip().lower()
+        if forced in ("other", "generic"):
+            detected_bank = None
+        elif forced and forced in _BANK_PARSERS:
+            # Includes "revolut" — the parse dispatch below special-cases it
+            # to the column-aware parser regardless of the _BANK_PARSERS map.
+            detected_bank = forced
+        else:
+            detected_bank = _detect_bank(raw_text)
 
         # Revolut: column-aware parser (uses word X-coordinates to distinguish
         # Money out / Money in columns — pure-text regex can't tell them apart).

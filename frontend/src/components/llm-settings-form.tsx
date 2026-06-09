@@ -12,8 +12,9 @@ import {
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 
 const _MODEL_CHOICES = [
-  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash（推荐，便宜快速）" },
-  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro（更准但贵 16 倍）" },
+  { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite（最省，免费额度最大，推荐）" },
+  { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash（更准，免费额度较小）" },
+  { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro（最准但最贵）" },
   { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
 ];
 
@@ -121,7 +122,9 @@ export function LLMSettingsForm() {
             <label className="text-sm font-medium">Gemini API Key</label>
             <p className="text-xs text-muted-foreground mt-0.5">
               当前状态:{" "}
-              {draft.api_key_present ? (
+              {draft.api_key_stale ? (
+                <span className="text-destructive">⚠ 加密 key 已变更，请重新输入</span>
+              ) : draft.api_key_present ? (
                 <span className="text-emerald-600 dark:text-emerald-400">已保存</span>
               ) : (
                 <span className="text-amber-600 dark:text-amber-400">未设置</span>

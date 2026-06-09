@@ -97,6 +97,12 @@ async def upload_pdf(
     db: AsyncSession = Depends(get_db),
     file: UploadFile = File(...),
     account_id: int | None = Query(None),
+    bank_format: str | None = Query(
+        None,
+        description="Override bank-format auto-detection. One of "
+        "n26 / revolut / tfbank / advanzia / amex_de / other(generic). "
+        "Omit or 'auto' to let the parser detect from text features.",
+    ),
 ):
     """Upload a PDF bank statement for parsing."""
     # Read file content
@@ -166,6 +172,7 @@ async def upload_pdf(
 
         result = await parse_pdf_statement(
             db, pdf_import, content, subaccount_names=subaccount_names,
+            force_bank=bank_format,
         )
         pdf_import.detected_bank = result.get("detected_bank")
         pdf_import.parser_version = result.get("parser_version")

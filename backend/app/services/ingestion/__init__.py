@@ -302,21 +302,17 @@ async def _classify_one_with_llm(tx_id: int) -> None:
 
 
 async def _dispatch_llm_classification(tx_ids: list[int]) -> None:
-    """Fire-and-forget async dispatch for L2 classification.
+    """Enqueue rows for paced, single-worker L2 classification.
 
-    Uses `asyncio.create_task`; tasks live on the running event loop and
-    are not awaited (so the caller's HTTP request isn't blocked). MVP —
-    if throughput becomes an issue, swap for a small in-process queue.
+    Replaces the old fire-and-forget create_task burst (which tripped the
+    free-tier rate limit on bulk dispatch). The queue worker drains one
+    item every `llm_min_interval_sec` so we stay under ~15 RPM and the UI
+    can show remaining-queue progress (ERR-20260609-001).
     """
-    import asyncio
+    from app.services.llm import queue as llm_queue
 
-    for tx_id in tx_ids:
-        try:
-            asyncio.create_task(_classify_one_with_llm(tx_id))
-        except RuntimeError:
-            # No running loop (e.g. CLI / test contexts). Skip silently —
-            # the row stays in inbox, the user can run /refresh-matching later.
-            logger.debug("llm_dispatch_skipped_no_loop", tx_id=tx_id)
+    added = llm_queue.enqueue(list(tx_ids))
+    logger.info("llm_enqueued", requested=len(tx_ids), added=added)
 
 
 async def _backfill_transfer_category(db: AsyncSession, tx: Transaction, resolver) -> None:

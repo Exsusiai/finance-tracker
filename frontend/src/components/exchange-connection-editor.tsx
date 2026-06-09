@@ -130,6 +130,11 @@ export function ExchangeConnectionEditor({ accountId }: ExchangeConnectionEditor
 
   return (
     <div className="space-y-3">
+      {existing && existing.credentials_stale && (
+        <div className="px-3 py-2 rounded-lg border border-destructive/40 bg-destructive/10 text-xs text-destructive">
+          ⚠ 已保存的 API 凭据无法解密（加密 key 已变更），请重新输入下方凭据并保存。
+        </div>
+      )}
       {existing && existing.has_credentials && (
         <div className="px-3 py-2 rounded-lg border border-border bg-muted/30 text-xs flex items-center justify-between">
           <span>

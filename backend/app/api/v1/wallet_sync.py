@@ -139,11 +139,21 @@ async def delete_address(account_id: int, addr_id: int, db: _db_dep):
 
 
 def _conn_to_out(row: ExchangeConnection) -> ExchangeConnectionOut:
+    from app.services.bank_sync.crypto import can_decrypt
+
+    has_creds = bool(row.api_key_enc and row.api_secret_enc)
+    # Stale = rows present but undecryptable under the current encryption
+    # key (rotated). Surfaced so the UI prompts re-entry instead of letting
+    # sync fail at decrypt time (ERR-20260607-001).
+    stale = has_creds and not (
+        can_decrypt(row.api_key_enc) and can_decrypt(row.api_secret_enc)
+    )
     return ExchangeConnectionOut(
         id=row.id,
         exchange=row.exchange,
-        has_credentials=bool(row.api_key_enc and row.api_secret_enc),
+        has_credentials=has_creds,
         has_passphrase=bool(row.api_passphrase_enc),
+        credentials_stale=stale,
         last_synced_at=row.last_synced_at,
         last_sync_status=row.last_sync_status,
         last_sync_error=row.last_sync_error,

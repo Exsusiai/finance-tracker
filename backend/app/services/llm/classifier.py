@@ -236,11 +236,18 @@ async def classify_with_llm(
         touch_updated_at(tx)
 
     if result.category_path is None:
-        # Don't cache transient failures (timeout / network error) — those
-        # should retry on the next refresh. Only persistent "model can't
-        # classify this" abstains get stamped, so we stop wasting calls.
+        # Don't cache transient failures (timeout / network error / rate
+        # limit / quota) — those should retry on the next refresh once the
+        # condition clears. Only persistent "model can't classify this"
+        # abstains get stamped, so we stop wasting calls on hopeless rows.
+        # NOTE: "llm_rate_limited" MUST be here — otherwise a quota-exhausted
+        # batch gets permanently stamped and refresh-matching skips it
+        # forever even after quota resets (ERR-20260607-002).
         reason = result.reason or ""
-        is_transient = reason == "llm_timeout" or reason.startswith("llm_error:")
+        is_transient = (
+            reason in ("llm_timeout", "llm_rate_limited", "llm_no_response")
+            or reason.startswith("llm_error:")
+        )
         if not is_transient:
             _stamp_attempt({"outcome": "abstain", "reason": reason})
             await db.flush()

@@ -24,8 +24,15 @@ _auth = Annotated[str, Depends(require_auth)]
 
 
 async def _build_settings_out(db: AsyncSession) -> LLMSettingsOut:
+    from app.services.bank_sync.crypto import can_decrypt
+
     runtime = await app_settings_svc.get_llm_settings(db)
     api_key = await app_settings_svc.get_gemini_api_key(db)
+    # Distinguish "no key" from "encrypted key present but undecryptable
+    # because the encryption key rotated" (ERR-20260607-001). The latter
+    # is the silent-abstain trap — flag it so the UI says "re-enter".
+    enc = await app_settings_svc.get_setting(db, "gemini_api_key_enc", default=None)
+    api_key_stale = bool(enc) and not can_decrypt(enc)
     return LLMSettingsOut(
         enabled=runtime.enabled,
         provider=runtime.provider,
@@ -35,6 +42,7 @@ async def _build_settings_out(db: AsyncSession) -> LLMSettingsOut:
         use_grounding=runtime.use_grounding,
         max_notes_in_prompt=runtime.max_notes_in_prompt,
         api_key_present=bool(api_key),
+        api_key_stale=api_key_stale,
     )
 
 
@@ -73,6 +81,13 @@ async def update_llm_settings(
         await app_settings_svc.set_setting(db, mapping[k], v)
 
     return ApiSuccess(data=await _build_settings_out(db))
+
+
+@router.get("/queue", response_model=ApiSuccess[dict])
+async def get_llm_queue(_token: _auth):
+    """Live classification-queue depth so the UI can show "AI 处理中 · 剩 N 笔"."""
+    from app.services.llm import queue as llm_queue
+    return ApiSuccess(data=llm_queue.status())
 
 
 @router.get("/cost", response_model=ApiSuccess[LLMCostOut])

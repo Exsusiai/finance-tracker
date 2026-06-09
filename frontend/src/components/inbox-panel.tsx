@@ -13,6 +13,7 @@ import { CategoryScopeDialog } from "@/components/category-scope-dialog";
 import { MarkTransferDialog } from "@/components/mark-transfer-dialog";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
 import { LoadingSpinner } from "@/components/ui-common";
+import { LlmQueueIndicator } from "@/components/llm-queue-indicator";
 
 /**
  * Pending-transaction inbox.
@@ -42,7 +43,9 @@ export function InboxPanel() {
   if (isLoading && !items) return <LoadingSpinner />;
   if (!items || items.length === 0) {
     return (
-      <div className="rounded-xl border border-border bg-card p-12 text-center">
+      <div>
+        <LlmQueueIndicator />
+        <div className="rounded-xl border border-border bg-card p-12 text-center">
         <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/10">
           <svg className="h-6 w-6 text-emerald-600 dark:text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -52,6 +55,7 @@ export function InboxPanel() {
         <p className="text-sm text-muted-foreground">
           暂无待确认的交易。新导入的 PDF 会自动出现在这里。
         </p>
+        </div>
       </div>
     );
   }
@@ -62,6 +66,7 @@ export function InboxPanel() {
 
   return (
     <div className="space-y-3">
+      <LlmQueueIndicator />
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           <span className="font-medium text-foreground">{items.length}</span> 笔待确认交易

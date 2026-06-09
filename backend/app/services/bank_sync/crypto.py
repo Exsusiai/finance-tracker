@@ -90,3 +90,22 @@ def decrypt_str(encrypted: str) -> str:
     ciphertext = raw[12:]
     aesgcm = AESGCM(key)
     return aesgcm.decrypt(nonce, ciphertext, None).decode("utf-8")
+
+
+def can_decrypt(encrypted: str | None) -> bool:
+    """Return True iff *encrypted* can be decrypted with the CURRENT key.
+
+    Used by the startup health-check and the settings endpoints to tell
+    "no credential set" apart from "credential set but the encryption key
+    changed, so it's now undecryptable" — the latter is the silent-failure
+    mode that made LLM classification / CEX sync stop working without any
+    visible error (see .learnings ERR-20260607-001). Empty / None input
+    returns False (nothing to decrypt). Never raises.
+    """
+    if not encrypted:
+        return False
+    try:
+        decrypt_str(encrypted)
+        return True
+    except Exception:
+        return False

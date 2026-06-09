@@ -27,11 +27,15 @@ logger = structlog.get_logger(__name__)
 _DEFAULTS: dict[str, str] = {
     "llm_enabled": "false",
     "llm_provider": "gemini",
-    "llm_model": "gemini-2.5-flash",
+    # flash-lite has the widest free-tier quota; flash/2.0-flash exhaust fast.
+    "llm_model": "gemini-2.5-flash-lite",
     "llm_monthly_usd_budget": "5.0",
     "llm_confidence_threshold": "0.7",
     "llm_use_grounding": "true",
     "llm_max_notes_in_prompt": "20",
+    # Min seconds between LLM calls (single-worker queue pacing). ~5s ≈
+    # 12 RPM, safely under the free-tier ~15 RPM cap so we never trip 429.
+    "llm_min_interval_sec": "5",
 }
 
 
@@ -44,6 +48,7 @@ class LLMSettings:
     confidence_threshold: float
     use_grounding: bool
     max_notes_in_prompt: int
+    min_interval_sec: float
 
 
 def _to_bool(value: str) -> bool:
@@ -65,6 +70,7 @@ async def get_llm_settings(db: AsyncSession) -> LLMSettings:
     threshold = float(await _read_raw(db, "llm_confidence_threshold", _DEFAULTS["llm_confidence_threshold"]))
     grounding = _to_bool(await _read_raw(db, "llm_use_grounding", _DEFAULTS["llm_use_grounding"]))
     max_notes = int(await _read_raw(db, "llm_max_notes_in_prompt", _DEFAULTS["llm_max_notes_in_prompt"]))
+    interval = float(await _read_raw(db, "llm_min_interval_sec", _DEFAULTS["llm_min_interval_sec"]))
     return LLMSettings(
         enabled=enabled,
         provider=provider,
@@ -73,6 +79,7 @@ async def get_llm_settings(db: AsyncSession) -> LLMSettings:
         confidence_threshold=threshold,
         use_grounding=grounding,
         max_notes_in_prompt=max_notes,
+        min_interval_sec=interval,
     )
 
 

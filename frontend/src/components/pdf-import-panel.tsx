@@ -12,6 +12,24 @@ import {
 import { formatFileSize, formatDate, cn } from "@/lib/utils";
 import { LoadingSpinner, ErrorDisplay } from "@/components/ui-common";
 
+// Bank formats the backend can parse (mirrors _BANK_PARSERS in
+// services/pdf_parser/engine.py) + a generic fallback. "auto" lets the
+// backend detect from text features (BIC / domain / legal name).
+const BANK_FORMAT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "auto", label: "自动识别（推荐）" },
+  { value: "n26", label: "N26" },
+  { value: "revolut", label: "Revolut" },
+  { value: "tfbank", label: "TFBank" },
+  { value: "advanzia", label: "Advanzia" },
+  { value: "amex_de", label: "American Express" },
+  { value: "other", label: "其他（通用规则）" },
+];
+
+// Only these account types can have PDF statements. Crypto wallets /
+// exchanges / cash don't, so they must not appear in the destination
+// dropdown.
+const PDF_ACCOUNT_TYPES = new Set(["bank", "credit_card"]);
+
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
   pending: { label: "等待中", color: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" },
   parsing: { label: "解析中", color: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400" },
@@ -24,6 +42,7 @@ export function PdfImportPanel() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadResult, setUploadResult] = useState<PdfImportOut | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<number | undefined>();
+  const [bankFormat, setBankFormat] = useState<string>("auto");
   const [dragOver, setDragOver] = useState(false);
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -48,7 +67,7 @@ export function PdfImportPanel() {
       setUploadResult(null);
 
       try {
-        const result = await uploadPdf(file, selectedAccountId);
+        const result = await uploadPdf(file, selectedAccountId, bankFormat);
         setUploadResult(result);
         refreshStatements();
         // Cross-page invalidation: transactions list / inbox / cashflow /
@@ -65,7 +84,7 @@ export function PdfImportPanel() {
         setUploading(false);
       }
     },
-    [selectedAccountId, refreshStatements]
+    [selectedAccountId, bankFormat, refreshStatements]
   );
 
   const handleDrop = useCallback(
@@ -128,36 +147,65 @@ export function PdfImportPanel() {
   // entry point removes the ambiguity entirely.
   const accountRequired = !selectedAccountId;
 
+  // Only bank / credit_card accounts can be PDF-statement destinations.
+  const pdfAccounts = (accounts ?? []).filter((a) => PDF_ACCOUNT_TYPES.has(a.type));
+
   return (
     <div className="space-y-6">
       {/* ─── Upload area ─────────────────────────────────────────── */}
       <div className="rounded-xl border border-border bg-card p-6">
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-2">
-            关联账户 <span className="text-destructive">*</span>
-          </label>
-          <select
-            value={selectedAccountId || ""}
-            onChange={(e) =>
-              setSelectedAccountId(e.target.value ? Number(e.target.value) : undefined)
-            }
-            className={cn(
-              "w-full sm:w-auto px-3 py-2 text-sm rounded-lg border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring",
-              accountRequired ? "border-destructive/40" : "border-border",
-            )}
-          >
-            <option value="">请先选择账户…</option>
-            {accounts?.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name} ({a.currency})
-              </option>
-            ))}
-          </select>
-          {accountRequired && (
+        <div className="mb-4 flex flex-col sm:flex-row gap-4">
+          <div className="flex-1">
+            <label className="block text-sm font-medium mb-2">
+              银行格式
+            </label>
+            <select
+              value={bankFormat}
+              onChange={(e) => setBankFormat(e.target.value)}
+              className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              {BANK_FORMAT_OPTIONS.map((b) => (
+                <option key={b.value} value={b.value}>
+                  {b.label}
+                </option>
+              ))}
+            </select>
             <p className="mt-1.5 text-xs text-muted-foreground">
-              请先选择该 PDF 对应的账户，再上传文件。
+              默认自动识别；识别错误时可手动指定，「其他」用通用规则解析。
             </p>
-          )}
+          </div>
+
+          <div className="flex-1">
+            <label className="block text-sm font-medium mb-2">
+              关联账户 <span className="text-destructive">*</span>
+            </label>
+            <select
+              value={selectedAccountId || ""}
+              onChange={(e) =>
+                setSelectedAccountId(e.target.value ? Number(e.target.value) : undefined)
+              }
+              className={cn(
+                "w-full px-3 py-2 text-sm rounded-lg border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring",
+                accountRequired ? "border-destructive/40" : "border-border",
+              )}
+            >
+              <option value="">请先选择账户…</option>
+              {pdfAccounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name} ({a.currency})
+                </option>
+              ))}
+            </select>
+            {accountRequired ? (
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                请先选择该 PDF 对应的账户，再上传文件。
+              </p>
+            ) : (
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                仅列出银行 / 信用卡账户（PDF 账单只可能来自这些）。
+              </p>
+            )}
+          </div>
         </div>
 
         <div

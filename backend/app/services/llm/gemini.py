@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 from dataclasses import dataclass
 
@@ -26,12 +27,24 @@ logger = structlog.get_logger(__name__)
 _PRICING: dict[str, tuple[float, float]] = {
     # (input, output)
     "gemini-2.5-flash": (0.075, 0.30),
+    "gemini-2.5-flash-lite": (0.0375, 0.15),  # cheapest; widest free quota
     "gemini-2.5-pro": (1.25, 5.0),
     "gemini-2.0-flash": (0.075, 0.30),
 }
 
 
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
+
+# Transient upstream errors worth retrying with backoff. 429 =
+# rate-limit / quota-per-minute, 503 = model temporarily overloaded.
+# A genuinely-exhausted daily quota will keep returning 429 and we'll
+# give up after the retries (correct — backoff can't conjure quota).
+_TRANSIENT_MARKERS = ("429", "resource_exhausted", "503", "unavailable", "overloaded")
+
+
+def _is_transient(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT_MARKERS)
 
 
 def _strip_code_fences(text: str) -> str:
@@ -124,37 +137,56 @@ class GeminiProvider:
             except AttributeError:
                 logger.warning("gemini_grounding_unavailable_in_sdk")
 
-        try:
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    client.models.generate_content,
-                    model=self.model,
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(**config_kwargs),
-                ),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("gemini_timeout", model=self.model, timeout_s=timeout_s)
+        # Retry transient 429 (rate-limit) / 503 (overload) with exponential
+        # backoff + jitter. Free-tier Gemini is bursty; a single retry pass
+        # recovers most spikes. Non-transient errors abstain immediately.
+        _MAX_ATTEMPTS = 3
+        _BASE_DELAY = 2.0
+        response = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        client.models.generate_content,
+                        model=self.model,
+                        contents=prompt,
+                        config=genai_types.GenerateContentConfig(**config_kwargs),
+                    ),
+                    timeout=timeout_s,
+                )
+                break
+            except asyncio.TimeoutError:
+                logger.warning("gemini_timeout", model=self.model, timeout_s=timeout_s)
+                return ClassificationResult(
+                    category_path=None, confidence=0.0, reason="llm_timeout",
+                    used_search=False, input_tokens=0, output_tokens=0, cost_usd=0.0,
+                )
+            except Exception as exc:  # noqa: BLE001 — broad fallback by design
+                transient = _is_transient(exc)
+                if transient and attempt < _MAX_ATTEMPTS:
+                    delay = _BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    logger.warning(
+                        "gemini_call_retry",
+                        attempt=attempt, delay_s=round(delay, 1),
+                        error=str(exc)[:160],
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning(
+                    "gemini_call_failed",
+                    error=str(exc)[:200],
+                    transient=transient,
+                    attempts=attempt,
+                )
+                reason = "llm_rate_limited" if transient else f"llm_error:{type(exc).__name__}"
+                return ClassificationResult(
+                    category_path=None, confidence=0.0, reason=reason,
+                    used_search=False, input_tokens=0, output_tokens=0, cost_usd=0.0,
+                )
+        if response is None:  # defensive — loop should always return or break
             return ClassificationResult(
-                category_path=None,
-                confidence=0.0,
-                reason="llm_timeout",
-                used_search=False,
-                input_tokens=0,
-                output_tokens=0,
-                cost_usd=0.0,
-            )
-        except Exception as exc:  # noqa: BLE001 — broad fallback by design
-            logger.warning("gemini_call_failed", error=str(exc)[:200])
-            return ClassificationResult(
-                category_path=None,
-                confidence=0.0,
-                reason=f"llm_error:{type(exc).__name__}",
-                used_search=False,
-                input_tokens=0,
-                output_tokens=0,
-                cost_usd=0.0,
+                category_path=None, confidence=0.0, reason="llm_no_response",
+                used_search=False, input_tokens=0, output_tokens=0, cost_usd=0.0,
             )
 
         text = getattr(response, "text", "") or ""

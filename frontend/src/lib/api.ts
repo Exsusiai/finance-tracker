@@ -849,12 +849,18 @@ export interface PdfImportOut {
 
 export async function uploadPdf(
   file: File,
-  accountId?: number
+  accountId?: number,
+  bankFormat?: string,
 ): Promise<PdfImportOut> {
   const formData = new FormData();
   formData.append("file", file);
 
-  const params = accountId ? `?account_id=${accountId}` : "";
+  const qs = new URLSearchParams();
+  if (accountId) qs.set("account_id", String(accountId));
+  // Only send bank_format when the user picked a specific format; omit
+  // (or "auto") lets the backend auto-detect from text features.
+  if (bankFormat && bankFormat !== "auto") qs.set("bank_format", bankFormat);
+  const params = qs.toString() ? `?${qs.toString()}` : "";
   const token = getToken();
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -969,6 +975,9 @@ export interface LLMSettingsOut {
   use_grounding: boolean;
   max_notes_in_prompt: number;
   api_key_present: boolean;
+  /** Encrypted key exists but won't decrypt (FINANCE_BANK_ENCRYPTION_KEY
+   *  rotated) — UI should prompt re-entry rather than show "not set". */
+  api_key_stale?: boolean;
 }
 
 export interface LLMSettingsUpdateInput {
@@ -1004,6 +1013,17 @@ export async function updateLLMSettings(
 
 export async function fetchLLMCost(): Promise<LLMCostOut> {
   return request(`/api/v1/llm/cost`);
+}
+
+export interface LLMQueueStatus {
+  depth: number;        // waiting in queue
+  in_flight: number;    // currently being classified
+  processed: number;    // done since process start
+  outstanding: number;  // depth + in_flight — what the UI waits on
+}
+
+export async function fetchLLMQueue(): Promise<LLMQueueStatus> {
+  return request(`/api/v1/llm/queue`);
 }
 
 // ─── Wallet sync (P1-4) ─────────────────────────────────────────────────────
@@ -1057,6 +1077,9 @@ export interface ExchangeConnectionOut {
   exchange: "binance" | "bitget";
   has_credentials: boolean;
   has_passphrase: boolean;
+  /** Stored creds exist but won't decrypt (encryption key rotated) — UI
+   *  must prompt re-entry rather than imply they're usable. */
+  credentials_stale?: boolean;
   last_synced_at: string | null;
   last_sync_status: string | null;
   last_sync_error: string | null;

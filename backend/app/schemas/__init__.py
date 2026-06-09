@@ -607,6 +607,10 @@ class LLMSettingsOut(BaseModel):
     use_grounding: bool
     max_notes_in_prompt: int
     api_key_present: bool  # never echoes the secret itself
+    # True when an encrypted key row EXISTS but won't decrypt with the
+    # current FINANCE_BANK_ENCRYPTION_KEY (key was rotated). Lets the UI
+    # show "key changed, re-enter" instead of "not set". (ERR-20260607-001)
+    api_key_stale: bool = False
 
 
 class LLMSettingsUpdate(BaseModel):
@@ -740,6 +744,9 @@ class ExchangeConnectionOut(BaseModel):
     exchange: str
     has_credentials: bool
     has_passphrase: bool
+    # True when api_key/secret rows exist but no longer decrypt with the
+    # current encryption key (rotated). UI prompts re-entry. (ERR-20260607-001)
+    credentials_stale: bool = False
     last_synced_at: str | None = None
     last_sync_status: str | None = None
     last_sync_error: str | None = None
