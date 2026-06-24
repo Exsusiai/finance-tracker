@@ -109,6 +109,10 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 
 银行账单格式碎片化，**没有通用解析器**。`services/pdf_parser/engine.py` 内通过文本特征检测银行（icbc/cmb/n26/revolut/...），分发到对应解析器。新增银行 = 加一个 parser 文件 + 在 detector 注册关键词。`pdfplumber` 是主力库，`pypdf` 兜底。
 
+- **银行检测按最早出现位置**（2026-06）：`_detect_bank` 取 `_BANK_MARKERS` 中**在文中出现位置最靠前**的银行。发行行标识在头部、对方银行 BIC 只在正文转账行——earliest-position 天然选发行行。修复了 N26↔Revolut 互转账单的交叉误判（N26 账单含 Revolut 的 `revodeb2`，反之含 `ntsbdeb1`）。
+- **导入暂存流程（2026-06，preview-before-commit）**：upload **只解析不入库**，落 `status='awaiting_review'` 并返回**全部** `parsed_preview`（解析输出，非 DB 行）。`POST /statements/{id}/commit?account_id=` 才真正插入 + 跑 ingestion；`DELETE`（取消）连带删除暂存记录 + 存储的 PDF 文件（无痕，可重传）。`account_id` 可选（用 upload 时解析的候选账户）。旧 `awaiting_account`/`assign-account`/`confirm`(翻 is_pending) 保留向后兼容。`GET /statements/{id}` 对 awaiting_* 状态**重解析**出预览（DB 里还没有行）。
+- **银行识别覆盖的两道防线**（不做「改银行重新解析」——冗余）：(1) 上传时 `bank_format` 下拉手动指定；(2) 暂存预览里看到识别结果不对就取消重传。已入库的:撤销 + 重传。`list` 加 `offset` + `meta.total` 支持「加载更多」。`PdfImportStatus` 新增 `awaiting_review`（lifespan 幂等重建 CHECK）。
+
 ### 市场数据 / 估值
 
 - `services/market_data/` 通过 APScheduler 定时拉取 yfinance / CoinGecko / exchangerate.host / metals，写入 `market_prices` 与 `fx_rates` 表。

@@ -830,6 +830,14 @@ export async function triggerMarketRefresh(): Promise<{
   return request(`/api/v1/market/refresh`, { method: "POST" });
 }
 
+export interface ParsedPreviewTx {
+  occurred_at: string | null;
+  amount: string;
+  currency: string | null;
+  type: string | null;
+  description: string | null;
+}
+
 export interface PdfImportOut {
   id: number;
   filename: string;
@@ -843,6 +851,8 @@ export interface PdfImportOut {
   status: string;
   error_message: string | null;
   preview: TransactionOut[];
+  /** Pre-commit (awaiting_review): all parsed rows, not yet inserted. */
+  parsed_preview: ParsedPreviewTx[];
   created_at: string;
   updated_at: string;
 }
@@ -880,15 +890,42 @@ export async function uploadPdf(
   return json.data;
 }
 
-export async function fetchStatements(limit?: number, status?: string): Promise<PdfImportOut[]> {
+export interface StatementsPage {
+  items: PdfImportOut[];
+  total: number;
+}
+
+export async function fetchStatements(
+  limit?: number,
+  status?: string,
+  offset?: number,
+): Promise<StatementsPage> {
   const params = new URLSearchParams();
   if (limit) params.set("limit", String(limit));
+  if (offset) params.set("offset", String(offset));
   if (status) params.set("status", status);
-  return request(`/api/v1/statements?${params}`);
+  const res = await fetch(`${API_BASE}/api/v1/statements?${params}`, {
+    headers: { ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body?.error?.message || res.statusText, body?.error?.code);
+  }
+  const json = await res.json();
+  return { items: json.data ?? [], total: json.meta?.total ?? (json.data?.length ?? 0) };
 }
 
 export async function fetchStatement(id: number): Promise<PdfImportOut> {
   return request(`/api/v1/statements/${id}`);
+}
+
+/** Commit a staged import — inserts its transactions into the ledger. */
+export async function commitStatement(
+  id: number,
+  accountId?: number,
+): Promise<PdfImportOut> {
+  const qs = accountId ? `?account_id=${accountId}` : "";
+  return request(`/api/v1/statements/${id}/commit${qs}`, { method: "POST" });
 }
 
 export async function confirmStatement(id: number): Promise<{ import_id: number; confirmed: number }> {

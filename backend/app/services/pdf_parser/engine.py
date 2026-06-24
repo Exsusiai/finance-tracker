@@ -186,11 +186,25 @@ _BANK_MARKERS: list[tuple[str, str]] = [
 
 
 def _detect_bank(text: str) -> str | None:
+    """Detect the issuing bank by EARLIEST marker position.
+
+    The issuing bank identifies itself in the statement header (top of the
+    document); a *counterparty* bank only appears inside transaction lines
+    (further down the body). Picking the bank whose marker appears earliest
+    therefore selects the issuer, not a counterparty — fixing the case where
+    e.g. an N26 statement with a transfer to Revolut contains Revolut's BIC
+    `revodeb2` in a body line and used to mis-detect as Revolut (and vice
+    versa). Ties / no-match → None.
+    """
     text_lower = text.lower()
+    best_bank: str | None = None
+    best_pos = len(text_lower) + 1
     for bank, marker in _BANK_MARKERS:
-        if marker in text_lower:
-            return bank
-    return None
+        pos = text_lower.find(marker)
+        if pos != -1 and pos < best_pos:
+            best_pos = pos
+            best_bank = bank
+    return best_bank
 
 
 def _detect_period(text: str) -> str | None:

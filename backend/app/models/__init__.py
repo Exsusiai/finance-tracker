@@ -141,6 +141,13 @@ class PdfImportStatus(StrEnum):
                                             # needs to choose which account
                                             # this PDF belongs to before
                                             # transactions are inserted.
+    awaiting_review = "awaiting_review"     # parsed + previewed, NOT yet
+                                            # inserted. The default landing
+                                            # state for every upload: the user
+                                            # reviews the preview then commits
+                                            # (insert) or cancels (delete). No
+                                            # transactions exist in the DB
+                                            # until commit.
 
 
 class PdfImport(Base):
@@ -167,7 +174,8 @@ class PdfImport(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','parsing','success','failed','awaiting_account')",
+            "status IN ('pending','parsing','success','failed',"
+            "'awaiting_account','awaiting_review')",
             name="ck_pdf_import_status",
         ),
     )

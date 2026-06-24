@@ -23,6 +23,7 @@ from app.models import Transaction, PdfImport
 from app.services.cashflow import parse_period, recompute_for_periods
 from app.schemas import (
     ApiSuccess,
+    ParsedPreviewTx,
     PdfImportOut,
     TransactionOut,
 )
@@ -34,7 +35,11 @@ settings = get_settings()
 MAX_PDF_SIZE_MB = 10
 
 
-def _pdf_to_out(p: PdfImport, preview_txs: list[TransactionOut] | None = None) -> PdfImportOut:
+def _pdf_to_out(
+    p: PdfImport,
+    preview_txs: list[TransactionOut] | None = None,
+    parsed_preview: list[ParsedPreviewTx] | None = None,
+) -> PdfImportOut:
     return PdfImportOut(
         id=p.id,
         filename=p.filename,
@@ -48,9 +53,138 @@ def _pdf_to_out(p: PdfImport, preview_txs: list[TransactionOut] | None = None) -
         status=p.status,
         error_message=p.error_message,
         preview=preview_txs or [],
+        parsed_preview=parsed_preview or [],
         created_at=p.created_at,
         updated_at=p.updated_at,
     )
+
+
+def _read_file(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+async def _mark_failed(db: AsyncSession, import_id: int, msg: str) -> None:
+    """Record a parse/commit failure on the import WITHOUT crashing the
+    handler.
+
+    A mid-pipeline exception (e.g. an IntegrityError on flush) leaves the
+    session needing a rollback; calling ``db.flush()`` on it again raises
+    PendingRollbackError, which used to mask the real error as an opaque 500.
+    So: roll back first, then re-fetch and persist the failed status on the
+    now-clean session.
+    """
+    try:
+        await db.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        p = (await db.execute(
+            select(PdfImport).where(PdfImport.id == import_id)
+        )).scalar_one_or_none()
+        if p is not None:
+            p.status = "failed"
+            p.error_message = (msg or "")[:500]
+            await db.flush()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _parsed_preview_from_result(result: dict) -> list[ParsedPreviewTx]:
+    """Build the pre-commit preview (ALL parsed rows) from parser output."""
+    return [
+        ParsedPreviewTx(
+            occurred_at=t.get("occurred_at"),
+            amount=str(t.get("amount", "0")),
+            currency=t.get("currency"),
+            type=t.get("type"),
+            description=t.get("description"),
+        )
+        for t in result.get("transactions", [])
+    ]
+
+
+async def _load_subaccount_names(db: AsyncSession, account_id: int | None) -> list[str]:
+    if not account_id:
+        return []
+    from app.models import Account
+
+    acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
+    if not (acct and acct.metadata_json):
+        return []
+    try:
+        meta = json.loads(acct.metadata_json)
+        raw = meta.get("subaccount_names") if isinstance(meta, dict) else None
+        return [str(n) for n in raw if str(n).strip()] if isinstance(raw, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+async def _resolve_candidate_account(
+    db: AsyncSession, detected_bank: str | None, has_transactions: bool
+) -> int | None:
+    """Best-effort pick of the account a statement belongs to.
+
+    1) exactly one active account → that one
+    2) detected_bank uniquely matches an account's institution / name
+    Returns None when ambiguous (the user then picks in the preview UI).
+    """
+    if not has_transactions:
+        return None
+    from app.models import Account
+
+    active = (await db.execute(
+        select(Account).where(
+            Account.deleted_at.is_(None), Account.is_active == True  # noqa: E712
+        )
+    )).scalars().all()
+    if len(active) == 1:
+        return active[0].id
+    if active and detected_bank:
+        bank = detected_bank.lower()
+        matches = [
+            a for a in active
+            if (a.institution or "").lower().replace(" ", "").startswith(
+                bank.replace("_", "").replace("-", "")
+            )
+            or bank in (a.institution or "").lower()
+            or bank in (a.name or "").lower()
+        ]
+        if len(matches) == 1:
+            return matches[0].id
+    return None
+
+
+async def _insert_and_ingest(
+    db: AsyncSession, pdf_import: PdfImport, result: dict, account_id: int
+) -> None:
+    """Create Transaction rows from parser output + run the ingestion pipeline.
+
+    Shared by commit / assign-account / reparse so the insert path stays
+    identical (amount normalize → categorize → transfer-match → recompute)."""
+    new_txs: list[Transaction] = []
+    for tx_data in result.get("transactions", []):
+        tx = Transaction(
+            account_id=account_id,
+            occurred_at=tx_data.get("occurred_at", ""),
+            amount=Decimal(str(tx_data.get("amount", 0))),
+            currency=tx_data.get("currency", "CNY"),
+            type=tx_data.get("type", "expense"),
+            description=tx_data.get("description"),
+            raw_description=tx_data.get("raw_description"),
+            counterparty=tx_data.get("counterparty"),
+            source="pdf_import",
+            pdf_import_id=pdf_import.id,
+            external_id=tx_data.get("external_id"),
+            metadata_json=tx_data.get("metadata_json"),
+            is_pending=True,
+        )
+        db.add(tx)
+        new_txs.append(tx)
+    if new_txs:
+        from app.services.ingestion import ingest_transactions
+
+        await ingest_transactions(db, new_txs, auto_pair=True)
 
 
 def _tx_to_out(t: Transaction) -> TransactionOut:
@@ -148,28 +282,16 @@ async def upload_pdf(
     db.add(pdf_import)
     await db.flush()
 
-    # Attempt parsing
+    # Parse + STAGE — never insert transactions here. The user reviews the
+    # preview then commits (POST /statements/{id}/commit) or cancels
+    # (DELETE /statements/{id}). Nothing touches the ledger until commit.
     try:
         from app.services.pdf_parser.engine import parse_pdf_statement
 
         pdf_import.status = "parsing"
         await db.flush()
 
-        # Look up the account's sub-account names so the parser can identify
-        # internal moves (e.g. N26 main → "Investing" Space).
-        subaccount_names: list[str] = []
-        if account_id:
-            from app.models import Account
-            acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
-            if acct and acct.metadata_json:
-                try:
-                    meta = json.loads(acct.metadata_json)
-                    raw_names = meta.get("subaccount_names") if isinstance(meta, dict) else None
-                    if isinstance(raw_names, list):
-                        subaccount_names = [str(n) for n in raw_names if str(n).strip()]
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
+        subaccount_names = await _load_subaccount_names(db, account_id)
         result = await parse_pdf_statement(
             db, pdf_import, content, subaccount_names=subaccount_names,
             force_bank=bank_format,
@@ -178,144 +300,35 @@ async def upload_pdf(
         pdf_import.parser_version = result.get("parser_version")
         pdf_import.statement_period = result.get("statement_period")
         pdf_import.raw_text = result.get("raw_text")
-        pdf_import.error_message = result.get("error")
-        pdf_import.status = "success" if not result.get("error") else "failed"
-
-        # 2026-05-06: previously `account_id or tx_data.get("account_id", 0)`
-        # silently wrote 0 → FK violation. Resolve a sensible account
-        # *before* inserting any tx:
-        #   1) caller-supplied wins
-        #   2) if exactly one active account exists → auto-pick
-        #   3) detected_bank matches Account.institution / Account.name
-        #      uniquely (case-insensitive contains) → auto-pick
-        #   4) otherwise: don't fail, don't write transactions — leave the
-        #      pdf_import in `awaiting_account` status with a warning. The
-        #      front-end shows the user a chooser; once they pick, they call
-        #      POST /statements/{id}/assign-account?account_id=X to commit.
-        active_accounts: list = []
-        awaiting_account = False
-        if account_id is None and result.get("transactions"):
-            from app.models import Account
-
-            active_accounts = (await db.execute(
-                select(Account).where(
-                    Account.deleted_at.is_(None), Account.is_active == True  # noqa: E712
-                )
-            )).scalars().all()
-            if len(active_accounts) == 1:
-                account_id = active_accounts[0].id
-            elif active_accounts and pdf_import.detected_bank:
-                bank = pdf_import.detected_bank.lower()
-                matches = [
-                    a for a in active_accounts
-                    if (a.institution or "").lower().replace(" ", "").startswith(
-                        bank.replace("_", "").replace("-", "")
-                    )
-                    or bank in (a.institution or "").lower()
-                    or bank in (a.name or "").lower()
-                ]
-                if len(matches) == 1:
-                    account_id = matches[0].id
-
-            if account_id is None:
-                # Don't insert transactions yet; let the user confirm which
-                # account this statement belongs to. Persist the parser
-                # output on `pdf_import.raw_text` so the assign-account
-                # endpoint can reconstruct + insert later.
-                awaiting_account = True
-                pdf_import.status = "awaiting_account"
-                pdf_import.error_message = (
-                    f"⚠ 检测到这是 {pdf_import.detected_bank or '未知'} 银行的账单 "
-                    f"(共 {len(result['transactions'])} 笔交易)。请确认对应的本地账户。"
-                )
-                pdf_import.transactions_count = len(result["transactions"])
-                await db.flush()
-                preview_txs_data = [
-                    {
-                        "occurred_at": t.get("occurred_at"),
-                        "amount": str(t.get("amount", "0")),
-                        "currency": t.get("currency"),
-                        "type": t.get("type"),
-                        "description": t.get("description"),
-                    }
-                    for t in result["transactions"][:5]
-                ]
-                meta = {
-                    "awaiting_account": True,
-                    "detected_bank": pdf_import.detected_bank,
-                    "warning": pdf_import.error_message,
-                    "available_accounts": [
-                        {"id": a.id, "name": a.name, "institution": a.institution,
-                         "currency": a.currency, "type": a.type}
-                        for a in active_accounts
-                    ],
-                    "preview_transactions": preview_txs_data,
-                    "assign_endpoint": (
-                        f"/api/v1/statements/{pdf_import.id}/assign-account"
-                        f"?account_id=<your-account-id>"
-                    ),
-                }
-                return ApiSuccess(
-                    data=_pdf_to_out(pdf_import, []),
-                    meta=meta,
-                )
-
-            # Persist the resolved account on the import record.
-            pdf_import.account_id = account_id
-
-        if not awaiting_account and result.get("transactions"):
-            new_txs: list[Transaction] = []
-            for tx_data in result["transactions"]:
-                tx = Transaction(
-                    # 2026-05-06: account_id is now guaranteed non-None by the
-                    # block above; the old `or 0` fallback silently violated FK.
-                    account_id=account_id,
-                    occurred_at=tx_data.get("occurred_at", ""),
-                    amount=Decimal(str(tx_data.get("amount", 0))),
-                    currency=tx_data.get("currency", "CNY"),
-                    type=tx_data.get("type", "expense"),
-                    description=tx_data.get("description"),
-                    raw_description=tx_data.get("raw_description"),
-                    counterparty=tx_data.get("counterparty"),
-                    source="pdf_import",
-                    pdf_import_id=pdf_import.id,
-                    external_id=tx_data.get("external_id"),
-                    metadata_json=tx_data.get("metadata_json"),
-                    is_pending=True,  # ingestion will auto-confirm matched rows
-                )
-                db.add(tx)
-                new_txs.append(tx)
-
-            # Sprint 1 FIX-4: route through unified ingestion (normalize amount,
-            # categorize, transfer-match, recompute affected snapshots).
-            from app.services.ingestion import ingest_transactions
-
-            await ingest_transactions(db, new_txs, auto_pair=True)
-
         pdf_import.transactions_count = len(result.get("transactions", []))
 
-        # Get preview (first 5) with eager-loaded relationships
-        preview_stmt = (
-            select(Transaction)
-            .options(selectinload(Transaction.account), selectinload(Transaction.category))
-            .where(Transaction.pdf_import_id == pdf_import.id)
-            .order_by(Transaction.occurred_at)
-            .limit(5)
-        )
-        preview_result = await db.execute(preview_stmt)
-        preview_txs = [_tx_to_out(t) for t in preview_result.scalars().all()]
+        if result.get("error"):
+            pdf_import.status = "failed"
+            pdf_import.error_message = result.get("error")
+            await db.flush()
+            return ApiSuccess(data=_pdf_to_out(pdf_import))
 
-        return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
+        # Resolve a candidate account (caller-supplied wins; else best-effort).
+        if account_id is None:
+            account_id = await _resolve_candidate_account(
+                db, pdf_import.detected_bank, bool(result.get("transactions"))
+            )
+        pdf_import.account_id = account_id  # may be None → user picks in UI
+
+        # Land in awaiting_review with the FULL parsed preview. No inserts.
+        pdf_import.status = "awaiting_review"
+        pdf_import.error_message = None
+        await db.flush()
+        return ApiSuccess(
+            data=_pdf_to_out(
+                pdf_import, parsed_preview=_parsed_preview_from_result(result)
+            )
+        )
 
     except (InvalidInputError, ConflictError, NotFoundError, ParserError):
-        # Don't double-wrap our own structured AppErrors — they already carry
-        # status_code + details (e.g. account-resolution 422 with the list of
-        # available accounts).
         raise
     except Exception as e:
-        pdf_import.status = "failed"
-        pdf_import.error_message = str(e)
-        await db.flush()
+        await _mark_failed(db, pdf_import.id, str(e))
         raise ParserError(f"Failed to parse PDF: {e}")
 
 
@@ -323,16 +336,23 @@ async def upload_pdf(
 async def list_statements(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     status: str | None = Query(None),
 ):
-    stmt = select(PdfImport).order_by(PdfImport.created_at.desc())
+    # `meta.total` lets the UI show "showing N of M" + a load-more affordance.
+    count_stmt = select(func.count(PdfImport.id))
+    base = select(PdfImport).order_by(PdfImport.created_at.desc())
     if status:
-        stmt = stmt.where(PdfImport.status == status)
-    stmt = stmt.limit(limit)
-    result = await db.execute(stmt)
+        count_stmt = count_stmt.where(PdfImport.status == status)
+        base = base.where(PdfImport.status == status)
+    total = (await db.execute(count_stmt)).scalar() or 0
+    result = await db.execute(base.limit(limit).offset(offset))
     imports = result.scalars().all()
-    return ApiSuccess(data=[_pdf_to_out(p) for p in imports])
+    return ApiSuccess(
+        data=[_pdf_to_out(p) for p in imports],
+        meta={"total": int(total), "limit": limit, "offset": offset},
+    )
 
 
 @router.get("/{import_id}", response_model=ApiSuccess[PdfImportOut])
@@ -347,9 +367,28 @@ async def get_statement(
     if not pdf_import:
         raise NotFoundError("PdfImport", import_id)
 
-    # Get transactions for preview
+    # Pre-commit (awaiting_review/awaiting_account): re-parse the stored PDF to
+    # rebuild the full preview — nothing is in the ledger yet.
+    if pdf_import.status in ("awaiting_review", "awaiting_account"):
+        if os.path.exists(pdf_import.storage_path):
+            from app.services.pdf_parser.engine import parse_pdf_statement
+
+            content = await asyncio.to_thread(_read_file, pdf_import.storage_path)
+            subaccount_names = await _load_subaccount_names(db, pdf_import.account_id)
+            result = await parse_pdf_statement(
+                db, pdf_import, content, subaccount_names=subaccount_names,
+            )
+            return ApiSuccess(
+                data=_pdf_to_out(
+                    pdf_import, parsed_preview=_parsed_preview_from_result(result)
+                )
+            )
+        return ApiSuccess(data=_pdf_to_out(pdf_import))
+
+    # Committed: preview the real Transaction rows.
     tx_stmt = (
         select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
         .where(Transaction.pdf_import_id == import_id)
         .order_by(Transaction.occurred_at)
         .limit(5)
@@ -358,6 +397,94 @@ async def get_statement(
     preview_txs = [_tx_to_out(t) for t in tx_result.scalars().all()]
 
     return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
+
+
+@router.post("/{import_id}/commit", response_model=ApiSuccess[PdfImportOut])
+async def commit_statement(
+    import_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    account_id: int | None = Query(
+        None,
+        description="Target account. Optional — falls back to the candidate "
+        "resolved at upload time. Required if no candidate was found.",
+    ),
+):
+    """Commit a staged (awaiting_review) import: insert its transactions.
+
+    This is the only path that writes a PDF's transactions into the ledger.
+    Re-parses the stored PDF (authoritative) and runs the full ingestion
+    pipeline. Cancelling instead = DELETE /statements/{id}.
+    """
+    pdf_import = (await db.execute(
+        select(PdfImport).where(PdfImport.id == import_id)
+    )).scalar_one_or_none()
+    if not pdf_import:
+        raise NotFoundError("PdfImport", import_id)
+
+    if pdf_import.status not in ("awaiting_review", "awaiting_account"):
+        raise InvalidInputError(
+            f"This statement is in status '{pdf_import.status}'; commit only "
+            "applies to a staged (awaiting_review) import.",
+            details={"current_status": pdf_import.status},
+        )
+
+    target_account_id = account_id if account_id is not None else pdf_import.account_id
+    if target_account_id is None:
+        raise InvalidInputError(
+            "请选择要导入到的账户。",
+            details={"reason": "no_account"},
+        )
+
+    from app.models import Account
+
+    target = (await db.execute(
+        select(Account).where(
+            Account.id == target_account_id, Account.deleted_at.is_(None)
+        )
+    )).scalar_one_or_none()
+    if not target:
+        raise NotFoundError("Account", target_account_id)
+
+    if not os.path.exists(pdf_import.storage_path):
+        raise ParserError(f"PDF file not found at {pdf_import.storage_path}")
+    content = await asyncio.to_thread(_read_file, pdf_import.storage_path)
+    subaccount_names = await _load_subaccount_names(db, target_account_id)
+
+    from app.services.pdf_parser.engine import parse_pdf_statement
+
+    pdf_import.status = "parsing"
+    pdf_import.account_id = target_account_id
+    await db.flush()
+    try:
+        result = await parse_pdf_statement(
+            db, pdf_import, content, subaccount_names=subaccount_names,
+        )
+        pdf_import.detected_bank = result.get("detected_bank")
+        pdf_import.parser_version = result.get("parser_version")
+        pdf_import.statement_period = result.get("statement_period")
+        pdf_import.raw_text = result.get("raw_text")
+        pdf_import.error_message = result.get("error")
+        pdf_import.status = "success" if not result.get("error") else "failed"
+        pdf_import.transactions_count = len(result.get("transactions", []))
+
+        await _insert_and_ingest(db, pdf_import, result, target_account_id)
+
+        preview_stmt = (
+            select(Transaction)
+            .options(selectinload(Transaction.account), selectinload(Transaction.category))
+            .where(Transaction.pdf_import_id == pdf_import.id)
+            .order_by(Transaction.occurred_at)
+            .limit(5)
+        )
+        preview_result = await db.execute(preview_stmt)
+        preview_txs = [_tx_to_out(t) for t in preview_result.scalars().all()]
+        return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
+    except (InvalidInputError, ConflictError, NotFoundError, ParserError):
+        raise
+    except Exception as e:
+        await _mark_failed(db, pdf_import.id, str(e))
+        raise ParserError(f"Failed to commit import: {e}")
 
 
 @router.post("/{import_id}/assign-account", response_model=ApiSuccess[PdfImportOut])
@@ -474,9 +601,7 @@ async def assign_account_to_statement(
     except (InvalidInputError, ConflictError, NotFoundError, ParserError):
         raise
     except Exception as e:
-        pdf_import.status = "failed"
-        pdf_import.error_message = str(e)
-        await db.flush()
+        await _mark_failed(db, pdf_import.id, str(e))
         raise ParserError(f"Failed to assign account and import: {e}")
 
 
@@ -593,18 +718,7 @@ async def reparse_statement(
 
         # Look up sub-account names so the parser can flag in-bank moves the
         # same way upload does.
-        subaccount_names: list[str] = []
-        if pdf_import.account_id:
-            from app.models import Account
-            acct = (await db.execute(select(Account).where(Account.id == pdf_import.account_id))).scalar_one_or_none()
-            if acct and acct.metadata_json:
-                try:
-                    meta = json.loads(acct.metadata_json)
-                    raw_names = meta.get("subaccount_names") if isinstance(meta, dict) else None
-                    if isinstance(raw_names, list):
-                        subaccount_names = [str(n) for n in raw_names if str(n).strip()]
-                except (json.JSONDecodeError, TypeError):
-                    pass
+        subaccount_names = await _load_subaccount_names(db, pdf_import.account_id)
 
         result = await parse_pdf_statement(
             db, pdf_import, content, subaccount_names=subaccount_names,
@@ -665,9 +779,7 @@ async def reparse_statement(
         return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
 
     except Exception as e:
-        pdf_import.status = "failed"
-        pdf_import.error_message = str(e)
-        await db.flush()
+        await _mark_failed(db, pdf_import.id, str(e))
         raise ParserError(f"Re-parse failed: {e}")
 
 
@@ -677,7 +789,12 @@ async def delete_statement(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a PDF import and all its associated transactions."""
+    """Delete/cancel a PDF import and all its associated transactions.
+
+    Doubles as the cancel for a staged (awaiting_review) import: it removes
+    the import record AND the stored PDF file, so a cancelled upload leaves no
+    trace and can be re-uploaded fresh.
+    """
     stmt = select(PdfImport).where(PdfImport.id == import_id)
     result = await db.execute(stmt)
     pdf_import = result.scalar_one_or_none()
@@ -686,6 +803,7 @@ async def delete_statement(
 
     # Soft-delete associated transactions and collect their months so the
     # cashflow snapshots get refreshed (Sprint 1 FIX-4 — review V1 §P1-3).
+    # (Staged imports have none yet — this is a no-op for them.)
     tx_stmt = select(Transaction).where(Transaction.pdf_import_id == import_id)
     tx_result = await db.execute(tx_stmt)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -696,9 +814,17 @@ async def delete_statement(
         if period:
             affected_periods.add(period)
 
+    storage_path = pdf_import.storage_path
     await db.delete(pdf_import)
     await db.flush()
     if affected_periods:
         from app.services.ingestion import recompute_after_delete
         await recompute_after_delete(db, affected_periods)
+    # Remove the stored PDF so a cancelled import leaves no trace (and the
+    # SHA-256 dedup guard won't block re-uploading the same file later).
+    if storage_path and os.path.exists(storage_path):
+        try:
+            await asyncio.to_thread(os.remove, storage_path)
+        except OSError:
+            pass  # best-effort; orphan file is harmless
     return ApiSuccess(data={"id": import_id, "deleted": True})

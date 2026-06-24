@@ -163,7 +163,10 @@ async def lifespan(app: FastAPI):
             text("SELECT sql FROM sqlite_master WHERE type='table' AND name='pdf_imports'")
         )).first()
         existing_sql = (row[0] if row else "") or ""
-        if "awaiting_account" not in existing_sql and "pdf_imports" in existing_sql:
+        # Rebuild when the CHECK is missing the newest allowed status value.
+        # `awaiting_review` (2026-06) is the latest; its presence implies
+        # `awaiting_account` too, so this one condition covers both upgrades.
+        if "awaiting_review" not in existing_sql and "pdf_imports" in existing_sql:
             logger.info("schema_check_constraint_rebuild", table="pdf_imports")
             await conn.execute(text("""
                 CREATE TABLE pdf_imports_new (
@@ -184,7 +187,7 @@ async def lifespan(app: FastAPI):
                     created_at VARCHAR(30) NOT NULL,
                     updated_at VARCHAR(30) NOT NULL,
                     CONSTRAINT ck_pdf_import_status
-                        CHECK (status IN ('pending','parsing','success','failed','awaiting_account'))
+                        CHECK (status IN ('pending','parsing','success','failed','awaiting_account','awaiting_review'))
                 )
             """))
             await conn.execute(text("""

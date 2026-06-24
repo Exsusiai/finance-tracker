@@ -66,6 +66,29 @@ def test_bank_detector_returns_supported_keys() -> None:
         )
 
 
+def test_detector_ignores_counterparty_bank_in_body() -> None:
+    """Regression (2026-06): N26↔Revolut cross-labeling.
+
+    Each statement mentions the OTHER bank's BIC in a transfer line. The
+    issuer's marker appears earlier (header), so earliest-position detection
+    must pick the issuer, not the counterparty.
+    """
+    from app.services.pdf_parser.engine import _detect_bank
+
+    n26_stmt = (
+        "N26 Bank AG Berlin NTSBDEB1 Account statement\n"
+        + "x" * 200
+        + "\nOutgoing transfer to Revolut REVODEB2 -50,00€\n"
+    )
+    revolut_stmt = (
+        "Revolut Bank UAB statement REVODEB2\n"
+        + "x" * 200
+        + "\nIncoming transfer from N26 NTSBDEB1 +50.00\n"
+    )
+    assert _detect_bank(n26_stmt) == "n26"
+    assert _detect_bank(revolut_stmt) == "revolut"
+
+
 @pytest.mark.parametrize("bank,filename", list(EUROPEAN_BANK_FILES.items()))
 def test_real_pdf_round_trip(bank: str, filename: str) -> None:
     """If reference PDFs are available locally, parsing them should yield rows."""

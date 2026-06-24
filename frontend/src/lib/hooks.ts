@@ -224,3 +224,12 @@ export function useStatements(limit?: number, status?: string) {
     { revalidateOnFocus: false },
   );
 }
+
+/** Paginated variant returning {items,total} for the import-records list. */
+export function useStatementsPage(limit: number, status?: string) {
+  return useSWR(
+    `statements-page-${limit}-${status || "all"}`,
+    () => fetchStatements(limit, status, 0),
+    { revalidateOnFocus: false },
+  );
+}

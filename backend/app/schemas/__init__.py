@@ -298,6 +298,18 @@ class MarkTransferIn(BaseModel):
 
 # ─── PDF Import ─────────────────────────────────────────────────────────────
 
+class ParsedPreviewTx(BaseModel):
+    """One parsed-but-not-yet-inserted transaction, shown in the pre-commit
+    preview (status='awaiting_review'). These don't exist in the DB yet — they
+    come straight from the parser output, so they carry no id/account."""
+
+    occurred_at: str | None = None
+    amount: str
+    currency: str | None = None
+    type: str | None = None
+    description: str | None = None
+
+
 class PdfImportOut(BaseModel):
     id: int
     filename: str
@@ -305,12 +317,16 @@ class PdfImportOut(BaseModel):
     file_size: int
     detected_bank: str | None
     parser_version: str | None
-    account_id: int | None
+    account_id: int | None  # the resolved/candidate account (preselected in UI)
     statement_period: str | None
     transactions_count: int
     status: str
     error_message: str | None
+    # DB-backed preview (post-commit): real Transaction rows.
     preview: list[TransactionOut] = []
+    # Parser-output preview (pre-commit / awaiting_review): ALL parsed rows,
+    # nothing inserted yet.
+    parsed_preview: list[ParsedPreviewTx] = []
     created_at: str
     updated_at: str
 
