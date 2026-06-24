@@ -10,6 +10,7 @@ import {
 import { cn, CURRENCY_GROUPS } from "@/lib/utils";
 import { ChainAddressesEditor } from "@/components/chain-addresses-editor";
 import { ExchangeConnectionEditor } from "@/components/exchange-connection-editor";
+import { BrokerConnectionEditor } from "@/components/broker-connection-editor";
 
 export const ACCOUNT_TYPE_OPTIONS: Array<{
   value: string;
@@ -49,6 +50,11 @@ const HIDE_INITIAL_BALANCE_TYPES = new Set(["crypto_wallet", "exchange"]);
 // Types whose holdings live in USDT (per project decision 2026-05-18).
 const CRYPTO_TYPES = new Set(["crypto_wallet", "exchange"]);
 
+// Types that have a post-create connection editor (addresses / API creds /
+// Flex token). For these we keep the modal open after the initial create so
+// the user can finish setup inline instead of reopening the edit panel.
+const CONNECTION_SETUP_TYPES = new Set(["crypto_wallet", "exchange", "brokerage"]);
+
 // Types that legitimately hold ASSETS (positions you have a quantity of:
 // stocks, crypto, gold, …). Bank / credit_card / cash / other only hold
 // transactions, so "add holding" / "holdings management" UI is hidden
@@ -66,6 +72,16 @@ export const INVESTMENT_TYPES: ReadonlySet<string> = new Set([
 const EXCHANGE_INSTITUTIONS: Array<{ value: string; label: string }> = [
   { value: "Binance", label: "Binance" },
   { value: "Bitget", label: "Bitget" },
+];
+
+// Supported brokers — mirror the backend's `broker_connections.provider`
+// CHECK + BrokerProvider dispatcher. The stored `institution` is a display
+// label; the actual provider is chosen again in BrokerConnectionEditor
+// (same two-place pattern as exchange). Keep these in lockstep when adding
+// a broker.
+const BROKER_INSTITUTIONS: Array<{ value: string; label: string }> = [
+  { value: "Interactive Brokers", label: "Interactive Brokers (Flex)" },
+  { value: "Trade Republic", label: "Trade Republic" },
 ];
 
 
@@ -109,6 +125,10 @@ export function AccountForm({
     if (!isEdit && next === "exchange") {
       const valid = EXCHANGE_INSTITUTIONS.some((o) => o.value === institution);
       if (!valid) setInstitution(EXCHANGE_INSTITUTIONS[0].value);
+    }
+    if (!isEdit && next === "brokerage") {
+      const valid = BROKER_INSTITUTIONS.some((o) => o.value === institution);
+      if (!valid) setInstitution(BROKER_INSTITUTIONS[0].value);
     }
   }
   const [initialBalance, setInitialBalance] = useState(
@@ -200,7 +220,7 @@ export function AccountForm({
       if (
         !isEdit
         && !created
-        && CRYPTO_TYPES.has(type)
+        && CONNECTION_SETUP_TYPES.has(type)
       ) {
         setCreated(result);
         // Don't bubble up yet — the parent will get onSuccess when the
@@ -301,46 +321,58 @@ export function AccountForm({
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-2">
-              机构
-              {type === "exchange" && (
-                <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">
-                  （仅支持已对接 API 的交易所）
-                </span>
-              )}
-            </label>
-            {type === "exchange" ? (
-              <select
-                value={
-                  EXCHANGE_INSTITUTIONS.some((o) => o.value === institution)
-                    ? institution
-                    : EXCHANGE_INSTITUTIONS[0].value
-                }
-                onChange={(e) => setInstitution(e.target.value)}
-                disabled={isEdit || !!created}
-                className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {EXCHANGE_INSTITUTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={institution}
-                onChange={(e) => setInstitution(e.target.value)}
-                placeholder={
-                  type === "crypto_wallet"
-                    ? "如：MetaMask、Ledger 主钱包"
-                    : "如：N26 Bank、American Express"
-                }
-                className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-            )}
-          </div>
+          {(() => {
+            // exchange / brokerage pick from a fixed list of supported
+            // providers (dropdown); everything else is free text.
+            const institutionOptions =
+              type === "exchange"
+                ? EXCHANGE_INSTITUTIONS
+                : type === "brokerage"
+                  ? BROKER_INSTITUTIONS
+                  : null;
+            return (
+              <div>
+                <label className="block text-sm font-medium mb-2">
+                  机构
+                  {institutionOptions && (
+                    <span className="ml-1.5 text-[10px] font-normal text-muted-foreground">
+                      （仅支持已对接的{type === "exchange" ? "交易所" : "券商"}）
+                    </span>
+                  )}
+                </label>
+                {institutionOptions ? (
+                  <select
+                    value={
+                      institutionOptions.some((o) => o.value === institution)
+                        ? institution
+                        : institutionOptions[0].value
+                    }
+                    onChange={(e) => setInstitution(e.target.value)}
+                    disabled={isEdit || !!created}
+                    className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {institutionOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={institution}
+                    onChange={(e) => setInstitution(e.target.value)}
+                    placeholder={
+                      type === "crypto_wallet"
+                        ? "如：MetaMask、Ledger 主钱包"
+                        : "如：N26 Bank、American Express"
+                    }
+                    className="w-full px-3 py-2.5 text-sm rounded-lg border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                )}
+              </div>
+            );
+          })()}
 
           {IBAN_TYPES.has(type) && (
             <div>
@@ -460,7 +492,9 @@ export function AccountForm({
               ✓ 账户已创建。
               {CRYPTO_TYPES.has(type)
                 ? "现在添加链上地址或 API 凭据后点「完成」。"
-                : ""}
+                : type === "brokerage"
+                  ? `现在填入${institution === "Trade Republic" ? " Trade Republic" : " IBKR Flex"}凭据后点「完成」。`
+                  : ""}
             </div>
           )}
 
@@ -479,6 +513,23 @@ export function AccountForm({
               <ExchangeConnectionEditor accountId={(initial ?? created)!.id} />
             </div>
           )}
+
+          {(isEdit ? initial?.type === "brokerage"
+             : created?.type === "brokerage") && (() => {
+            const brokerInstitution = (initial ?? created)?.institution ?? institution;
+            const isTR = brokerInstitution === "Trade Republic";
+            return (
+              <div className="pt-3 border-t border-border">
+                <h3 className="text-sm font-semibold mb-2">
+                  {isTR ? "Trade Republic 凭据" : "IBKR Flex 凭据"}
+                </h3>
+                <BrokerConnectionEditor
+                  accountId={(initial ?? created)!.id}
+                  initialProvider={isTR ? "traderepublic" : "ibkr"}
+                />
+              </div>
+            );
+          })()}
 
           {error && (
             <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">

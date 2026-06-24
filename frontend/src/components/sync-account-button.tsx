@@ -51,7 +51,7 @@ export function SyncAccountButton({
         className={cn(
           "inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-border hover:bg-muted transition-colors disabled:opacity-60",
         )}
-        title="拉取链上 / 交易所最新余额"
+        title="拉取链上 / 交易所 / 券商最新持仓"
       >
         <span className={cn(busy && "animate-spin")}>↻</span>
         {busy ? "同步中…" : "立即同步"}
@@ -64,7 +64,8 @@ export function SyncAccountButton({
               lastSummary.total_errors > 0 ? "text-amber-600" : "text-muted-foreground",
             )}
           >
-            已同步 {lastSummary.total_synced} 个币种
+            已同步 {lastSummary.total_synced} 个
+            {lastSummary.account_type === "brokerage" ? "持仓" : "币种"}
             {lastSummary.total_errors > 0 && `，${lastSummary.total_errors} 处出错`}
           </span>
           {/* Show each failing source so the user knows WHICH chain /

@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from decimal import Decimal
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -77,4 +77,55 @@ async def compute_holdings_value_per_account(
         if value is None:
             continue
         out[int(account_id)] = Decimal(str(value))
+    return out
+
+
+async def compute_brokerage_value_per_account(
+    db: AsyncSession,
+    account_ids: Iterable[int],
+    base_currency: str,
+) -> dict[int, Decimal]:
+    """Return ``{account_id → base-currency value}`` for brokerage holdings.
+
+    Unlike the crypto/CEX path (everything quoted in USDT), brokerage
+    positions are priced in their native currency (USD / EUR / …), so each
+    holding's value is converted to ``base_currency`` via the shared FX
+    helper. Holdings whose currency has no FX path are skipped (omitted
+    from the sum) — the same lenient behaviour as net_worth.
+    """
+    from app.models import Asset, AssetHolding, MarketPrice
+    from app.services.valuation.fx import convert_to_base
+
+    ids = list(account_ids)
+    if not ids:
+        return {}
+
+    rows = (
+        await db.execute(
+            select(AssetHolding, Asset)
+            .join(Asset, Asset.id == AssetHolding.asset_id)
+            .where(
+                AssetHolding.account_id.in_(ids),
+                AssetHolding.is_active == True,  # noqa: E712
+            )
+        )
+    ).all()
+
+    out: dict[int, Decimal] = {}
+    for holding, asset in rows:
+        latest = (
+            await db.execute(
+                select(MarketPrice)
+                .where(MarketPrice.asset_id == asset.id)
+                .order_by(MarketPrice.quoted_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if latest is None:
+            continue
+        original = holding.quantity * latest.price
+        converted = await convert_to_base(db, original, latest.currency, base_currency)
+        if converted is None:
+            continue
+        out[holding.account_id] = out.get(holding.account_id, Decimal("0")) + converted
     return out

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="positions" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" fromDate="2026-06-09" toDate="2026-06-09" period="LastBusinessDay" whenGenerated="2026-06-10;120000">
+      <EquitySummaryInBase>
+        <EquitySummaryByReportDateInBase reportDate="2026-06-09" cash="1000.50" stock="28550.00" total="29550.50" />
+      </EquitySummaryInBase>
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" currency="USD" assetCategory="STK" symbol="AAPL" conid="265598" description="APPLE INC" position="100" markPrice="195.50" positionValue="19550.00" costBasisPrice="150.00" costBasisMoney="15000.00" fxRateToBase="7.1" />
+        <OpenPosition accountId="U1234567" currency="EUR" assetCategory="STK" symbol="SAP" conid="111111" description="SAP SE" position="50" markPrice="180.00" positionValue="9000.00" costBasisPrice="160.00" costBasisMoney="8000.00" fxRateToBase="7.7" />
+        <OpenPosition accountId="U1234567" currency="USD" assetCategory="FUND" symbol="VWRA" conid="222222" description="VANGUARD FTSE ALL-WORLD" position="10" markPrice="120.00" positionValue="1200.00" costBasisPrice="100.00" costBasisMoney="1000.00" fxRateToBase="7.1" />
+      </OpenPositions>
+      <CashReport>
+        <CashReportCurrency accountId="U1234567" currency="BASE_SUMMARY" endingCash="1500.75" />
+        <CashReportCurrency accountId="U1234567" currency="EUR" endingCash="1000.50" />
+        <CashReportCurrency accountId="U1234567" currency="USD" endingCash="500.25" />
+      </CashReport>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>

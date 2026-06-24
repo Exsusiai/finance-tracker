@@ -613,3 +613,60 @@ class ExchangeConnection(Base):
         ),
         Index("ix_exchange_conn_account_id", "account_id"),
     )
+
+
+# ─── Broker Connections (brokerage Flex / API read-only) ───────────────────
+
+
+class BrokerConnection(Base):
+    """Read-only reporting credentials for a `brokerage` account.
+
+    First provider is Interactive Brokers via the **Flex Web Service** — a
+    token-based reporting API (NOT a trading API), available on every IBKR
+    account type including Lite, with no Pro requirement. The token is
+    AES-256-GCM encrypted with `FINANCE_BANK_ENCRYPTION_KEY` (same path as
+    `exchange_connections` / `bank_connections`). The Flex *Query ID* is not
+    a secret, so it's stored in clear for display.
+
+    Mirrors `ExchangeConnection`: one connection per (account, provider),
+    secrets write-only, sync state tracked inline.
+    """
+
+    __tablename__ = "broker_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="ibkr")
+    # AES-256-GCM encrypted credential blob. Its shape depends on provider:
+    #   - ibkr: the Flex Web Service token (a single string)
+    #   - traderepublic: the serialized web-login session cookies (Netscape
+    #     cookie-jar text) obtained after the 2-step 4-digit-code login
+    token_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    # Flex Query ID (not a secret) — identifies which configured query to run.
+    # Only used by IBKR; nullable because Trade Republic has no query concept.
+    query_id: Mapped[str | None] = mapped_column(String(64))
+    last_synced_at: Mapped[str | None] = mapped_column(String(30))
+    last_sync_status: Mapped[str | None] = mapped_column(String(20))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+    updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
+
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('ibkr','traderepublic')",
+            name="ck_broker_conn_provider",
+        ),
+        # A 0-length encrypted blob is always a bug (decrypt would fail).
+        CheckConstraint(
+            "length(token_enc) > 0",
+            name="ck_broker_conn_token_nonempty",
+        ),
+        UniqueConstraint(
+            "account_id", "provider",
+            name="uq_broker_conn_account_provider",
+        ),
+        Index("ix_broker_conn_account_id", "account_id"),
+    )

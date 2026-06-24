@@ -1,0 +1,5 @@
+<FlexStatementResponse timestamp='10 June, 2026 12:00 PM EDT'>
+<Status>Fail</Status>
+<ErrorCode>1015</ErrorCode>
+<ErrorMessage>Token is invalid</ErrorMessage>
+</FlexStatementResponse>

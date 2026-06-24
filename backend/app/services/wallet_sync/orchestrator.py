@@ -35,12 +35,15 @@ from app.models import (
     Account,
     Asset,
     AssetHolding,
+    BrokerConnection,
     ChainAddress,
     ExchangeConnection,
     MarketPrice,
     _utcnow_str,
 )
 from app.services.bank_sync.crypto import decrypt_str
+from app.services.broker_sync import dispatch as _broker_dispatch
+from app.services.broker_sync.upsert import apply_broker_snapshot
 from app.services.crypto_sync import dispatch as _crypto_dispatch
 from app.services.exchange_sync import dispatch as _exchange_dispatch
 from app.services.market_data.coingecko import (
@@ -60,6 +63,8 @@ log = structlog.get_logger(__name__)
 # path segment of every URL.
 _ALCHEMY_KEY_RE = re.compile(r"/v2/[A-Za-z0-9_-]{20,}")
 _BINANCE_SIG_RE = re.compile(r"signature=[A-Za-z0-9]+")
+# IBKR Flex token rides as `t=<token>` in the SendRequest/GetStatement URL.
+_FLEX_TOKEN_RE = re.compile(r"([?&]t=)[A-Za-z0-9]+")
 
 
 def _safe_error_text(exc: Exception, *, max_len: int = 250) -> str:
@@ -79,6 +84,7 @@ def _safe_error_text(exc: Exception, *, max_len: int = 250) -> str:
     msg = str(exc) or exc.__class__.__name__
     msg = _ALCHEMY_KEY_RE.sub("/v2/<redacted>", msg)
     msg = _BINANCE_SIG_RE.sub("signature=<redacted>", msg)
+    msg = _FLEX_TOKEN_RE.sub(r"\1<redacted>", msg)
     return msg[:max_len]
 
 
@@ -89,6 +95,10 @@ def _dispatch_chain(chain: str, alchemy_api_key: str | None):
 
 def _dispatch_exchange(exchange: str):
     return _exchange_dispatch(exchange)
+
+
+def _dispatch_broker(provider: str, *, token: str, query_id: str):
+    return _broker_dispatch(provider, token=token, query_id=query_id)
 
 
 @dataclass
@@ -128,21 +138,27 @@ async def sync_account(
     ).scalar_one_or_none()
     if acc is None:
         raise ValueError(f"Account {account_id} not found or deleted")
-    if acc.type not in ("crypto_wallet", "exchange"):
+    if acc.type not in ("crypto_wallet", "exchange", "brokerage"):
         raise ValueError(
             f"Account {account_id} is of type {acc.type!r}; sync only supports "
-            "'crypto_wallet' and 'exchange'."
+            "'crypto_wallet', 'exchange' and 'brokerage'."
         )
 
     summary = SyncSummary(account_id=acc.id, account_type=acc.type)
 
     if acc.type == "crypto_wallet":
         await _sync_crypto_wallet(db, acc, alchemy_api_key, summary)
-    else:
+    elif acc.type == "exchange":
         await _sync_exchange(db, acc, summary)
+    else:
+        # brokerage — the Flex statement carries its own prices, so no
+        # CoinGecko refresh is needed (or wanted) afterwards.
+        await _sync_brokerage(db, acc, summary)
+        return summary
 
     # Price refresh runs last and best-effort — a CoinGecko outage must
-    # not roll back the holdings rows we just wrote.
+    # not roll back the holdings rows we just wrote. Crypto/CEX only:
+    # brokerage prices come straight from the statement.
     try:
         await _refresh_prices_for_account(db, acc.id)
     except Exception as exc:  # noqa: BLE001
@@ -250,6 +266,53 @@ async def _sync_exchange(
             row.last_sync_error = safe
             summary.results.append(SyncResult(
                 label=label, chain=None, exchange=row.exchange,
+                synced=0, error=safe,
+            ))
+
+
+# ─── brokerage ───────────────────────────────────────────────────────────────
+
+
+async def _sync_brokerage(
+    db: AsyncSession,
+    acc: Account,
+    summary: SyncSummary,
+) -> None:
+    rows: Iterable[BrokerConnection] = (
+        await db.execute(
+            select(BrokerConnection).where(BrokerConnection.account_id == acc.id)
+        )
+    ).scalars().all()
+
+    now = _utcnow_str()
+    for row in rows:
+        label = row.provider
+        try:
+            token = decrypt_str(row.token_enc)
+            provider = _dispatch_broker(row.provider, token=token, query_id=row.query_id)
+            positions = await provider.fetch_positions()
+            synced = await apply_broker_snapshot(db, acc.id, positions, source=row.provider)
+            row.last_synced_at = now
+            row.last_sync_status = "ok"
+            row.last_sync_error = None
+            summary.results.append(SyncResult(
+                label=label, chain=None, exchange=None,
+                synced=synced, error=None,
+            ))
+        except Exception as exc:  # noqa: BLE001 — capture & continue is intentional
+            log.warning(
+                "wallet_sync_broker_failed",
+                account_id=acc.id, provider=row.provider,
+                # Never log raw repr(exc) — an httpx URL would carry the
+                # Flex token in its query string. _safe_error_text scrubs it.
+                error_class=exc.__class__.__name__, error=_safe_error_text(exc),
+            )
+            safe = _safe_error_text(exc)
+            row.last_synced_at = now
+            row.last_sync_status = "error"
+            row.last_sync_error = safe
+            summary.results.append(SyncResult(
+                label=label, chain=None, exchange=None,
                 synced=0, error=safe,
             ))
 

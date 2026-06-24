@@ -407,18 +407,16 @@ async def portfolio_breakdown(
     ))
 
 
+# FX conversion now lives in services/valuation/fx.py so the holdings
+# endpoints and the account-balance aggregation share one implementation.
+# These thin wrappers preserve the original names/signatures used by tests
+# (test_usdt_alias.py) and the call sites above.
 async def _latest_fx_rate(
     db: AsyncSession, base: str, quote: str
 ) -> Decimal | None:
-    """Return the newest FxRate.rate for (base → quote), or None."""
-    stmt = (
-        select(FxRate)
-        .where(FxRate.base_currency == base, FxRate.quote_currency == quote)
-        .order_by(FxRate.quoted_at.desc())
-        .limit(1)
-    )
-    fx = (await db.execute(stmt)).scalar_one_or_none()
-    return fx.rate if fx else None
+    from app.services.valuation.fx import latest_fx_rate
+
+    return await latest_fx_rate(db, base, quote)
 
 
 async def _convert_to_base(
@@ -427,66 +425,9 @@ async def _convert_to_base(
     src_currency: str,
     base_currency: str,
 ) -> Decimal | None:
-    """Convert amount from src_currency → base_currency.
+    from app.services.valuation.fx import convert_to_base
 
-    Strategy:
-      1. Same currency → return amount
-      2. Direct rate (src → base) → amount * rate
-      3. Inverse rate (base → src) → amount / rate
-      4. Triangulate via USD pivot
-      Returns None when no path is available.
-    """
-    # USDT is a USD-pegged stablecoin; the fiat FX scheduler doesn't
-    # populate USDT rows, so without this alias every crypto holding
-    # (priced in USDT by the wallet_sync pipeline) would be silently
-    # dropped from net_worth aggregation. Same trick for USDC / DAI —
-    # all major USD-pegged stablecoins.
-    _USD_PEGGED = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FRAX"}
-    if src_currency in _USD_PEGGED:
-        src_currency = "USD"
-    if base_currency in _USD_PEGGED:
-        base_currency = "USD"
-
-    if src_currency == base_currency:
-        return amount
-
-    direct = await _latest_fx_rate(db, src_currency, base_currency)
-    if direct is not None and direct > 0:
-        return amount * direct
-
-    inverse = await _latest_fx_rate(db, base_currency, src_currency)
-    if inverse is not None and inverse > 0:
-        return amount / inverse
-
-    # Triangulate via a pivot currency. CNY is critical because the live
-    # FX scheduler emits everything keyed `base_currency='CNY'`, so for
-    # most (src, base) combos the only viable bridge is CNY. USD / EUR
-    # kept for legacy / cached-rate paths.
-    for pivot in ("CNY", "USD", "EUR"):
-        if pivot in (src_currency, base_currency):
-            continue
-        a_direct = await _latest_fx_rate(db, src_currency, pivot)
-        a_inverse = (
-            await _latest_fx_rate(db, pivot, src_currency)
-            if a_direct is None
-            else None
-        )
-        a = a_direct if a_direct is not None else (
-            (Decimal(1) / a_inverse) if (a_inverse is not None and a_inverse > 0) else None
-        )
-        b_direct = await _latest_fx_rate(db, pivot, base_currency)
-        b_inverse = (
-            await _latest_fx_rate(db, base_currency, pivot)
-            if b_direct is None
-            else None
-        )
-        b = b_direct if b_direct is not None else (
-            (Decimal(1) / b_inverse) if (b_inverse is not None and b_inverse > 0) else None
-        )
-        if a is not None and b is not None:
-            return amount * a * b
-
-    return None
+    return await convert_to_base(db, amount, src_currency, base_currency)
 
 
 @router.get("/portfolio/net-worth", response_model=ApiSuccess[NetWorthOut])

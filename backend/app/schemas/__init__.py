@@ -752,6 +752,52 @@ class ExchangeConnectionOut(BaseModel):
     last_sync_error: str | None = None
 
 
+class BrokerConnectionIn(BaseModel):
+    provider: str = Field(min_length=1, max_length=50)
+    # Flex Web Service token. Capped like exchange secrets; real tokens are
+    # ~40-char numeric strings.
+    token: str = Field(min_length=1, max_length=512)
+    # Flex Query ID — not a secret, identifies which configured query to run.
+    query_id: str = Field(min_length=1, max_length=64)
+
+
+class BrokerConnectionOut(BaseModel):
+    """Never echoes the Flex token back. ``has_token`` indicates the row
+    exists; rotation = PUT a fresh ``BrokerConnectionIn``."""
+
+    id: int
+    provider: str
+    # NULL for Trade Republic (no Flex-query concept); set for IBKR.
+    query_id: str | None = None
+    has_token: bool
+    # True when the token row exists but no longer decrypts with the current
+    # encryption key (rotated). UI prompts re-entry. (ERR-20260607-001)
+    credentials_stale: bool = False
+    last_synced_at: str | None = None
+    last_sync_status: str | None = None
+    last_sync_error: str | None = None
+
+
+class TRConnectIn(BaseModel):
+    """Step 1 of Trade Republic web login: phone + PIN."""
+
+    phone: str = Field(min_length=5, max_length=20)
+    pin: str = Field(min_length=4, max_length=8)
+
+
+class TRConnectOut(BaseModel):
+    """Result of step 1 — TR has sent a 4-digit code to the app/SMS."""
+
+    countdown_seconds: int
+    message: str = "验证码已发送，请在 App 或短信中查收并输入"
+
+
+class TRVerifyIn(BaseModel):
+    """Step 2: the 4-digit code from the TR app/SMS."""
+
+    code: str = Field(min_length=4, max_length=6)
+
+
 class SyncResultOut(BaseModel):
     label: str
     chain: str | None = None

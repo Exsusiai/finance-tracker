@@ -1,0 +1,5 @@
+<FlexStatementResponse timestamp='10 June, 2026 12:00 PM EDT'>
+<Status>Success</Status>
+<ReferenceCode>1234567890</ReferenceCode>
+<Url>https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement</Url>
+</FlexStatementResponse>

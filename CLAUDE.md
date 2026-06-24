@@ -143,6 +143,34 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - **环境变量**：`ALCHEMY_API_KEY`（必填，EVM 链同步）；`FINANCE_BANK_ENCRYPTION_KEY`（32 字节 hex，必须，否则 exchange 凭据写入 500）。BTC / Solana / Tron 不需要 key。
 - **前端**：`AccountForm` 加 `exchange` 枚举 + 类型条件渲染（IBAN 仅 bank/credit_card，初始余额隐藏 crypto/exchange）+ 创建后切「添加地址 / API 凭据」模式不关弹窗。`ChainAddressesEditor` / `ExchangeConnectionEditor` 内嵌时**必须用 `<div>`**（嵌套 form 会被浏览器折叠触发外层 submit）。`SyncAccountButton` ↻ 显示每个错误源详情。`INVESTMENT_TYPES = {brokerage, crypto_wallet, exchange}` 在 bank / credit_card 等账户上隐藏「添加持仓」入口。
 
+### 券商同步（IBKR Flex，2026-06-10 实装）
+
+- **目标**：把传统券商（首发 Interactive Brokers）的持仓与估值纳入资产视图。复用 crypto/CEX 的 `wallet_sync` orchestrator + `asset_holdings` 模型。
+- **为何选 Flex Web Service**：它是**报表 API（非交易 API）**，所有 IBKR 账户类型（含 **Lite**，无 Pro / 入金要求）都能用；token 机制不涉及 IB 登录密码。代价：**收盘后快照（EOD）**，无盘中实时（实时需 Pro + 常驻 Client Portal Gateway，不符 local-first）。
+- **复用现成库**：`ibflex2`（`ibflex` 的安全 fork，defusedxml + 容忍新字段）——**只用其 parser**。两步下载（SendRequest 拿 ReferenceCode → GetStatement 轮询）是我们自己的 **async httpx** 实现（稳定端点 `gdcdyn.../Universal/servlet/FlexStatementService.*`，必带 `user-agent` 头；**不用** fork client 里硬塞的实验性 v1 URL）。
+- **包结构**：`services/broker_sync/`：`__init__.py`（`BrokerPosition` + `BrokerProvider` Protocol + `dispatch` + `map_asset_class`）/ `ibkr.py`（`IBKRFlexProvider`，可注入 `client`+`sleep` 供 MockTransport 测试，错误码 1009/1019 重试、1018 限流、1012/1015 等致命）/ `upsert.py`（`apply_broker_snapshot`）。
+- **数据模型**：`broker_connections`（仿 `exchange_connections`：`provider='ibkr'`、`token_enc` AES-256-GCM 加密、`query_id` 明文非密、`last_sync_*`，唯一 `(account_id, provider)`）。`accounts.type='brokerage'` 在 baseline 就允许，无需改 CHECK。
+- **Asset 映射**：`map_asset_class(assetCategory, currency)` 把 IBKR `STK`+币种 → `us_stock`/`eu_stock`/`a_share`，`FUND/ETF`→`fund`，`BOND`→`bond`，未知→`other`（绝不抛错）。Asset 标识沿用非加密约定 `chain=''`/`contract=''`，**conid 存 `data_source_id`**（靠 `(asset_class, symbol)` 与用户手动建的同名 Asset 合并 + 回填 conid）。
+- **价格**：Flex 自带 `markPrice`/`currency`，upsert 直接写 `market_prices`（`source='ibkr'`，**原币**，非 USDT）——所以 brokerage 分支**跳过** CoinGecko 刷价。`market_prices` 唯一键 `(asset_id, source, quoted_at)` → 同秒重复同步用 **upsert 守卫**避免 IntegrityError。
+- **估值/折算**：`convert_to_base` 已抽到 `services/valuation/fx.py`（holdings.py 委托保留旧名）；`/holdings`、`/portfolio/summary`、`/net-worth` 走它，**天生支持多币种（USD/EUR→CNY）**，无需改动。`/accounts/balances` 用新 `compute_brokerage_value_per_account`（折 base 币种）给券商账户补值（区别于 crypto 的 USDT 路径）。
+- **API**：`/accounts/{id}/broker-connection`（GET/PUT/DELETE，token 加密入库绝不回显）+ 复用 `POST /accounts/{id}/sync`（orchestrator 加 brokerage 分支）。`security_health` 把 broker token 纳入凭据健康自检。`_safe_error_text` 加 Flex token（`t=` 查询参数）脱敏。
+- **环境变量**：无新增——Flex token 走 UI 加密入库，仅依赖既有 `FINANCE_BANK_ENCRYPTION_KEY`。用户一次性在 IBKR Client Portal 网页配置（Settings → Reporting → Flex Queries → 启用 Flex Web Service 生成 token + 建 Activity Flex Query **只需勾 Open Positions**（解析器只读这一 section，不用 Equity Summary）+ Format=XML + Date Format=yyyyMMdd，记 Query ID）。
+- **前端**：`AccountForm` 的 `CONNECTION_SETUP_TYPES` 含 brokerage（创建后不关弹窗，内嵌 `BrokerConnectionEditor` 填 Query ID + Token，必须 `<div>` 非嵌套 form）。`SyncAccountButton` ↻ 对 brokerage 也显示（settings 页）。
+- **未做（下一阶段）**：盘中实时；Flex `Trades` 流水导入（目前只做持仓快照）。
+
+### Trade Republic 同步（2026-06-23 实装，未 UAT）
+
+- **目标**：把 Trade Republic（德国 neobroker）持仓纳入资产视图，复用 `broker_sync` + `wallet_sync` orchestrator + `asset_holdings`，与 IBKR 同表 `broker_connections`。
+- **为何与 IBKR 本质不同**：TR **无官方 API**，用社区逆向库 `pytr`（仅只读 portfolio/cash，**绝不下单**，违反 ToS、可能随 TR 改版失效）。认证是交互式 **Web login**：手机号+PIN → 4 位码（App/SMS）→ **cookie session**（无静态 token）。选 Web login 而非 App login：不登出用户手机（TR 限单设备），代价是 session 过期需重新连接。
+- **AWS WAF**：TR 登录有 AWS WAF 保护。**实测（2026-06-23）：纯 Python `awswaf`（curl_cffi）路径生成的 token 被 TR 的 WAF 拒绝（HTTP 405，ALB 层无 `x-amzn-waf-action` 头）；只有 `playwright`（无头 Chromium）路径被接受**（同样的假手机号 playwright 路径返回 400 NUMBER_INVALID = WAF 已放行）。所以默认 `_WAF_TOKEN="playwright"`（env `FINANCE_TR_WAF_METHOD` 可切回 awswaf 备未来 pytr 修复）。**需先装浏览器**：`python -m playwright install chromium`（Ubuntu 无头：`--with-deps`）。**关键缓解**：playwright 只在**登录**（发验证码）时启动一次；日常余额同步走 cookie `resume_websession`，**不启动浏览器**，所以服务器平时不重。排查过程：UA / JA3(curl_cffi impersonate) / 浏览器头 全试过都 405，唯独 playwright token 通过 → 确认是 awswaf token 本身无效。
+- **包**：`services/broker_sync/traderepublic.py`：`TradeRepublicProvider`（cookies→`resume_websession`→websocket 读）+ `initiate_login`/`complete_login`/`cleanup_login`（两步登录助手，同步调用在 API 层用 `asyncio.to_thread` 包）+ `normalize_phone`（去空格/连字符、`00→+`——TR 对带空格号码返 `NUMBER_INVALID`）+ `map_instrument_type_to_asset_class`。`pytr.run_blocking` 用 `asyncio.run` 会与 FastAPI loop 冲突——provider 里直接 `await` 底层 `subscribe`+`_recv_subscription`。
+- **持仓读取（关键：topic 会变）**：pytr 0.4.9 的 `portfolio`/`compactPortfolio` topic **已被 TR 废弃**（返回 `BAD_SUBSCRIPTION_TYPE`）。当前用 **`compactPortfolioByType`**（返回 `{categories:[{categoryType, positions:[{isin, netSize, averageBuyIn, instrumentType, name}]}]}`，**无现价**）→ 再对每个 ISIN 拉 **`ticker`**（`{isin}.LSX`，Lang & Schwarz）取 `last.price`（EUR）。`cash`/`portfolioStatus`/`availableCashForPayout` 也可用。`instrumentType`（stock/fund/bond/crypto/derivative）→ asset_class（stock 按 ISIN 前缀分 us/eu）。
+- **数据模型**：复用 `broker_connections`（迁移 `b2c3d4e5f6a7`：provider CHECK 加 `'traderepublic'`、`query_id` 改可空 + 去掉非空 check）。TR 行：`token_enc` 存**加密的 cookie jar 文本**、`query_id=NULL`、`metadata_json` 存脱敏手机号。`BrokerPosition` 加可选 `asset_class`（TR 预填；IBKR 留 None 走 `map_asset_class`）；标的 `data_source='traderepublic'`、`data_source_id=ISIN`、currency=EUR、price 来自 ticker `last`。ticker 失败时持仓仍入库（price=None，只缺市值）。
+- **两步连接 API**（TR 专属，IBKR 仍用 PUT）：`POST /accounts/{id}/broker-connection/tr/connect`（手机+PIN→initiate→**进程内 `_TR_PENDING` 暂存 live pytr 实例**，带 TTL=countdown+120s）→ `POST .../tr/verify`（4 位码→complete→加密 cookies 入库）。单进程 local-first 才安全；重启则重新发起。orchestrator brokerage 分支按 `row.provider` dispatch，TR 走 cookies 路径无需改动。
+- **估值**：复用 `convert_to_base`（EUR→CNY）+ `compute_brokerage_value_per_account`，与 IBKR 同路径。
+- **测试**：`test_broker_sync.py` 用 `_FakeTR` monkeypatch `traderepublic._new_api`，覆盖 ISIN 映射 / 持仓映射 / fetch / 过期 session / 登录 round-trip / orchestrator——不连真网。真实登录需用户用真凭据 UAT。
+- **未做**：会话自动续期（过期就提示重连）；instrument_details 富化 asset_class（当前 ISIN 启发式）；交易流水导入。
+
 ### MCP Server 与后端的关系
 
 - `mcp-server/run.sh` 把 `backend/` 加入 `PYTHONPATH`，所以 MCP server 直接 `from app.models import ...` 复用同一份 ORM 模型与服务。

@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Finance Tracker · 项目状态总览</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #141925;
+    --panel2: #1b2230;
+    --border: #28303f;
+    --text: #e6edf3;
+    --muted: #8b97a8;
+    --accent: #5b9dff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --pause: #6e7681;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 32px 20px 80px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 30px; font-weight: 700; letter-spacing: -0.5px; }
+  .sub { color: var(--muted); margin-top: 6px; font-size: 14px; }
+  .badge {
+    display: inline-block; font-size: 12px; padding: 2px 9px; border-radius: 20px;
+    border: 1px solid var(--border); color: var(--muted); margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  /* KPI row */
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 24px 0 8px; }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 16px;
+  }
+  .kpi .n { font-size: 28px; font-weight: 700; }
+  .kpi .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .kpi.green .n { color: var(--green); }
+  .kpi.accent .n { color: var(--accent); }
+  .kpi.purple .n { color: var(--purple); }
+
+  /* progress bar */
+  .progress-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 20px; margin: 18px 0 30px;
+  }
+  .bar { height: 26px; border-radius: 8px; background: var(--panel2); overflow: hidden; display: flex; }
+  .bar > span { display: block; height: 100%; }
+  .seg-done { background: var(--green); }
+  .seg-pause { background: var(--pause); }
+  .seg-todo { background: var(--panel2); }
+  .legend { display: flex; gap: 18px; margin-top: 12px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+
+  h2 { font-size: 19px; margin: 34px 0 14px; font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  h2 .pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+  .pill.done { background: rgba(63,185,80,.15); color: var(--green); }
+  .pill.pause { background: rgba(110,118,129,.2); color: #adb6c2; }
+  .pill.todo { background: rgba(248,81,73,.13); color: var(--red); }
+
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .grid, .kpis { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 520px) { .grid, .kpis { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px 18px;
+  }
+  .card h3 { font-size: 15px; margin-bottom: 4px; display: flex; align-items: center; gap: 7px; }
+  .card .tag { font-size: 11px; color: var(--muted); }
+  .card ul { list-style: none; margin-top: 10px; }
+  .card li { font-size: 13.5px; padding: 3px 0 3px 20px; position: relative; color: #cdd6e0; }
+  .card li::before { content: "✓"; position: absolute; left: 0; color: var(--green); font-weight: 700; }
+  .card.todo li::before { content: "○"; color: var(--muted); font-weight: 400; }
+  .card.pause li::before { content: "⏸"; color: var(--amber); font-size: 11px; }
+
+  .ico { font-size: 17px; }
+  .note { font-size: 12.5px; color: var(--muted); margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+  td .st { font-weight: 600; }
+  .st.ok { color: var(--green); }
+  .st.warn { color: var(--amber); }
+  .st.pause { color: #adb6c2; }
+  .st.no { color: var(--red); }
+
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; text-align: center; border-top: 1px solid var(--border); padding-top: 18px; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 5px; font-size: 12.5px; color: var(--purple); }
+  .timeline { margin-top: 6px; }
+  .timeline .row { display: flex; gap: 12px; font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+  .timeline .d { color: var(--accent); min-width: 92px; font-variant-numeric: tabular-nums; }
+  .timeline .t { color: #cdd6e0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Finance Tracker · 项目状态总览 <span class="badge">本地·单用户</span></h1>
+    <div class="sub">个人资金管理与记账系统 — FastAPI + Next.js 15 + SQLite + MCP · 数据截至 2026-06-23（基于 PROGRESS.md + git 历史 + 当前代码核对）</div>
+  </header>
+
+  <!-- KPIs -->
+  <div class="kpis">
+    <div class="kpi green"><div class="n">329</div><div class="l">后端测试全过 (pytest)</div></div>
+    <div class="kpi accent"><div class="n">15</div><div class="l">API 路由模块</div></div>
+    <div class="kpi purple"><div class="n">19</div><div class="l">service 业务包</div></div>
+    <div class="kpi"><div class="n">5</div><div class="l">前端页面</div></div>
+  </div>
+
+  <!-- Overall progress -->
+  <div class="progress-card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px;">
+      <strong style="font-size:15px;">整体进度</strong>
+      <span style="color:var(--green);font-weight:700;font-size:15px;">核心闭环 ~85%</span>
+    </div>
+    <div class="bar">
+      <span class="seg-done" style="width:78%"></span>
+      <span class="seg-pause" style="width:8%"></span>
+      <span class="seg-todo" style="width:14%"></span>
+    </div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--green)"></span>已完成闭环 · 9 大子系统</span>
+      <span><span class="dot" style="background:var(--pause)"></span>已写好等启用 · 2 项（外部账号卡点）</span>
+      <span><span class="dot" style="background:var(--panel2);border:1px solid var(--border)"></span>未实现 · 工程化债务为主</span>
+    </div>
+    <div class="note">说明：核心功能（记账、分类、多币种估值、转账识别、加密/CEX/券商同步、MCP）全部闭环并有测试覆盖。剩余主要是工程化债务（CI / Docker / E2E / 生产鉴权）与两个等外部账号的集成（GoCardless / Notion）。</div>
+  </div>
+
+  <!-- DONE -->
+  <h2><span class="ico">✅</span> 已完成功能 <span class="pill done">闭环可用 · 已验证</span></h2>
+  <div class="grid">
+
+    <div class="card">
+      <h3><span class="ico">💰</span> 资产管理 + 多币种估值</h3>
+      <span class="tag">账户 / 持仓双 CRUD · 估值聚合</span>
+      <ul>
+        <li>账户 + 持仓双 CRUD，资产分布饼图 + 余额面板</li>
+        <li>多币种切换 CNY/USD/EUR/USDT/HKD/JPY/GBP</li>
+        <li>FX 折算：direct → inverse → 三角换算(CNY/USD/EUR pivot)</li>
+        <li>净资产 = 现金(账户余额) + 投资(持仓市值)，按 include_in_total 过滤</li>
+        <li>持仓表加列：数量 / 当前价 / 市值 / 成本价 / 浮盈</li>
+        <li>「调整余额」对话框（存入 / 取出 / 校准三模式）</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">📄</span> PDF 账单导入 + 银行解析</h3>
+      <span class="tag">5 家欧洲银行 · 真实样本回归</span>
+      <ul>
+        <li>AMEX-DE / N26 / Revolut / TFBank / Advanzia 解析器</li>
+        <li>SHA-256 去重 + %PDF magic bytes + 10MB 上限校验</li>
+        <li>Revolut 坐标感知列解析（Money in/out 按 x0 定位）</li>
+        <li>银行识别用 BIC / 域名 / 法定名（防描述误判）</li>
+        <li>导入时可手动选银行格式 + 「其他」走通用规则</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">🏷️</span> 智能分类系统（三层管道）</h3>
+      <span class="tag">L1 关键词 → L2 LLM → L3 收件箱</span>
+      <ul>
+        <li>54 类多级分类 + 70+ starter 关键词种子</li>
+        <li>L2 Gemini LLM 兜底 + 知识库 few-shot 注入</li>
+        <li>「污染」机制：写备注 → 同 keyword 规则转走 LLM</li>
+        <li>后台限速队列：逐笔处理避开免费额度限流</li>
+        <li>自动学习（改分类反向建规则）+ 同描述级联</li>
+        <li>「待确认」收件箱 + 高置信度自动通过</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">🔁</span> 跨账户转账识别（反双计）</h3>
+      <span class="tag">评分配对 · 三层子账户识别</span>
+      <ul>
+        <li>评分配对：金额 50 + 日期 + 描述 + IBAN 40，阈值 75</li>
+        <li>子账户三层识别（关键词 / 用户清单 / 金额匹配）</li>
+        <li>「这是转账」modal + 「未配对转账」手动绑定</li>
+        <li>v_account_balance 视图按方向取符号，subaccount 跳过</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">₿</span> 加密钱包 + CEX 同步</h3>
+      <span class="tag">14 链 + Binance/Bitget · 已实装</span>
+      <ul>
+        <li>11 条 EVM L1+L2(Alchemy) + BTC + Solana + Tron</li>
+        <li>Binance + Bitget(现货+3 合约端点)余额聚合</li>
+        <li>CoinGecko 价格自动发现（按合约 / ticker）</li>
+        <li>Asset 按 (chain, contract) 拆分，防跨链串价</li>
+        <li>垃圾空投 token 过滤 + 失败源隔离不阻断</li>
+        <li>API key AES-256-GCM 加密入库，绝不回显</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">📈</span> 券商同步（IBKR Flex）<span class="badge">最新</span></h3>
+      <span class="tag">2026-06 新增 · EOD 持仓快照</span>
+      <ul>
+        <li>IBKR Flex Web Service（Lite 账户也可用，非交易 API）</li>
+        <li>async httpx 两步下载 + ibflex 解析 XML</li>
+        <li>持仓落 asset_holdings，价从 Flex 原币直接写</li>
+        <li>多币种(USD/EUR→CNY)自动折算进总资产</li>
+        <li>Token 加密入库 + 凭据健康自检</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">📊</span> 现金流分析</h3>
+      <span class="tag">月度快照 · 层级化视图</span>
+      <ul>
+        <li>月度 income/expense/savings/transfer 快照</li>
+        <li>时间序列图表（Recharts）</li>
+        <li>记账 CRUD 后即时重算</li>
+        <li>层级化分类视图（一级→二级→明细 + 占比条）</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="ico">🤖</span> Agent 接口（MCP Server）</h3>
+      <span class="tag">7 tools · stdio · 共享后端</span>
+      <ul>
+        <li>7 个工具：总资产 / 交易 / 记账 / 解析账单 / 现金流 / 配置 / 搜索</li>
+        <li>复用 backend pdf_parser，消除逻辑漂移</li>
+        <li>端到端集成测试 6 轮回归（9 bug 全修）</li>
+        <li>与后端 SQLite WAL 安全共享同一份 DB</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <!-- PAUSED -->
+  <h2><span class="ico">⏸️</span> 已写好 · 等启用 <span class="pill pause">卡点在外部账号</span></h2>
+  <div class="grid">
+    <div class="card pause">
+      <h3><span class="ico">🏦</span> GoCardless 银行 API 同步</h3>
+      <span class="tag">N26 / Revolut 等自动拉流水</span>
+      <ul>
+        <li>代码 428 行 + 10+ endpoints 已完成</li>
+        <li>卡点：需你决定沙箱 vs 生产 + 提供 GoCardless 账号</li>
+      </ul>
+    </div>
+    <div class="card pause">
+      <h3><span class="ico">🗒️</span> Notion 同步</h3>
+      <span class="tag">交易 / 现金流 / 资产三模块</span>
+      <ul>
+        <li>代码完整 + 一键建库 POST /notion/setup</li>
+        <li>卡点：需你提供 integration token + 决定库结构</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- TODO -->
+  <h2><span class="ico">🛠️</span> 未实现 · 主要是工程化债务 <span class="pill todo">非功能阻塞</span></h2>
+  <table>
+    <thead><tr><th>项目</th><th>类别</th><th>状态</th><th>备注</th></tr></thead>
+    <tbody>
+      <tr><td>储蓄计算口径定义 + 单测</td><td>P1 功能</td><td class="st warn">待定义</td><td>等你给定义：自动 income−expense？还是手动标记？</td></tr>
+      <tr><td>Binance 合约钱包</td><td>P1 扩展</td><td class="st pause">可选</td><td>与 Bitget 同 pattern，约半天；你尚未明确要</td></tr>
+      <tr><td>Alembic 迁移版本化</td><td>P2 债务</td><td class="st ok">已大部接入</td><td>新 schema 走 alembic（head <code>a1b2c3d4e5f6</code>）；旧 inline DDL 兜底保留</td></tr>
+      <tr><td>Dockerfile 真实可构建 + 部署文档</td><td>P2 债务</td><td class="st no">未做</td><td>docker-compose 在但 Dockerfile 占位</td></tr>
+      <tr><td>后端 CI（ruff + mypy + pytest）</td><td>P2 债务</td><td class="st no">未做</td><td>本地能跑，GitHub Actions 未配</td></tr>
+      <tr><td>E2E Playwright 测试</td><td>P2 债务</td><td class="st no">未做</td><td>当前靠手测 + agent E2E</td></tr>
+      <tr><td>生产模式 Bearer 鉴权 + 登录页</td><td>P2 债务</td><td class="st warn">本地禁用中</td><td>当前 AUTH_DISABLED=true（local-first 单用户）</td></tr>
+      <tr><td>扫描件 OCR 兜底</td><td>P2 债务</td><td class="st no">未做</td><td>当前 5 家 PDF 都是文本型，暂不需</td></tr>
+      <tr><td>黄金 GoldAPI 接入</td><td>P2 债务</td><td class="st no">未做</td><td>需你申请 key</td></tr>
+      <tr><td>移动端 App / Notion 双向同步 / 投资顾问</td><td>P3</td><td class="st no">明示推迟</td><td>PRD 明确非当前目标</td></tr>
+    </tbody>
+  </table>
+
+  <!-- recent delivery timeline -->
+  <h2><span class="ico">🗓️</span> 近期交付时间线</h2>
+  <div class="timeline">
+    <div class="row"><span class="d">2026-06-23</span><span class="t">IBKR 券商同步全栈（Flex Web Service + ibflex + 14 测试）· <em>本地未提交</em></span></div>
+    <div class="row"><span class="d">2026-06 初</span><span class="t">LLM 可靠性：后台限速队列 + 凭据健康自检 + PDF 银行格式选择 <code>3cb295f</code></span></div>
+    <div class="row"><span class="d">2026-05 下旬</span><span class="t">review-v6 资金口径 + 安全修复 <code>5d29a9c</code>；asset-identity-v2 跨链拆分 <code>126d49a</code></span></div>
+    <div class="row"><span class="d">2026-05-18~19</span><span class="t">P1-4 加密钱包 + CEX 同步全栈（6300+ 行）<code>ca6d756</code></span></div>
+    <div class="row"><span class="d">2026-05-08</span><span class="t">P1-1 LLM 智能分类三层管道 + 知识库 <code>707dd3b</code></span></div>
+    <div class="row"><span class="d">2026-05-06</span><span class="t">Sprint 0-4 资金正确性 + 数据一致性 + 安全加固 + MCP 6 轮回归</span></div>
+  </div>
+
+  <footer>
+    Finance Tracker — local-first 个人财务系统 · 由 Claude Code 生成的项目状态产物 · 数据源：PROGRESS.md / git log / 当前代码核对<br/>
+    ⚠ 本文件含项目结构信息，不含任何密钥或财务数据，可安全本地查看。
+  </footer>
+
+</div>
+</body>
+</html>

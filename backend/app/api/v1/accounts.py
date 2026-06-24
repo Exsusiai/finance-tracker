@@ -11,12 +11,14 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
+from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Account, Transaction
 from app.models import touch_updated_at
 from app.services.cashflow import parse_period, recompute_period
 from app.services.wallet_sync.holdings_value import (
+    compute_brokerage_value_per_account,
     compute_holdings_value_per_account,
 )
 from app.schemas import (
@@ -128,12 +130,23 @@ async def list_all_balances(
     crypto_account_ids = [r[0] for r in rows if r[4] in ("crypto_wallet", "exchange")]
     crypto_value = await compute_holdings_value_per_account(db, crypto_account_ids)
 
+    # Brokerage accounts hold equities priced in native currency (USD/EUR/…),
+    # so their value is converted to base currency rather than read as USDT.
+    broker_account_ids = [r[0] for r in rows if r[4] == "brokerage"]
+    broker_value = await compute_brokerage_value_per_account(
+        db, broker_account_ids, get_settings().base_currency
+    )
+
     balances = [
         BalanceOut(
             account_id=r[0],
             account_name=r[1],
             currency=r[2],
-            balance=_normalize_amount(Decimal(str(r[3] or 0)) + crypto_value.get(r[0], Decimal("0"))),
+            balance=_normalize_amount(
+                Decimal(str(r[3] or 0))
+                + crypto_value.get(r[0], Decimal("0"))
+                + broker_value.get(r[0], Decimal("0"))
+            ),
         )
         for r in rows
     ]
@@ -173,6 +186,11 @@ async def get_account_balance(
     if row[4] in ("crypto_wallet", "exchange"):
         crypto = await compute_holdings_value_per_account(db, [account_id])
         balance += crypto.get(account_id, Decimal("0"))
+    elif row[4] == "brokerage":
+        broker = await compute_brokerage_value_per_account(
+            db, [account_id], get_settings().base_currency
+        )
+        balance += broker.get(account_id, Decimal("0"))
     return ApiSuccess(data=BalanceOut(
         account_id=row[0], account_name=row[1], currency=row[2],
         balance=_normalize_amount(balance),

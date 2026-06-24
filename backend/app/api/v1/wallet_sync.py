@@ -11,8 +11,12 @@ secret, or passphrase themselves. Rotation = PUT a fresh
 
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +27,7 @@ from app.core.config import get_settings
 from app.db import get_db
 from app.models import (
     Account,
+    BrokerConnection,
     ChainAddress,
     ExchangeConnection,
     _utcnow_str,
@@ -30,18 +35,24 @@ from app.models import (
 )
 from app.schemas import (
     ApiSuccess,
+    BrokerConnectionIn,
+    BrokerConnectionOut,
     ChainAddressIn,
     ChainAddressOut,
     ExchangeConnectionIn,
     ExchangeConnectionOut,
     SyncResultOut,
     SyncSummaryOut,
+    TRConnectIn,
+    TRConnectOut,
+    TRVerifyIn,
 )
 from app.services.bank_sync.crypto import encrypt_str
 from app.services.wallet_sync import sync_account
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 _db_dep = Annotated[AsyncSession, Depends(get_db)]
+log = structlog.get_logger(__name__)
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
@@ -256,6 +267,268 @@ async def delete_exchange_connection(account_id: int, db: _db_dep):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No connection to delete")
     await db.delete(row)
     return ApiSuccess(data={"deleted": row.id})
+
+
+# ─── Broker connection (brokerage) ─────────────────────────────────────────
+
+
+_SUPPORTED_BROKERS = ("ibkr",)
+
+
+def _broker_conn_to_out(row: BrokerConnection) -> BrokerConnectionOut:
+    from app.services.bank_sync.crypto import can_decrypt
+
+    has_token = bool(row.token_enc)
+    stale = has_token and not can_decrypt(row.token_enc)
+    return BrokerConnectionOut(
+        id=row.id,
+        provider=row.provider,
+        query_id=row.query_id,
+        has_token=has_token,
+        credentials_stale=stale,
+        last_synced_at=row.last_synced_at,
+        last_sync_status=row.last_sync_status,
+        last_sync_error=row.last_sync_error,
+    )
+
+
+@router.get(
+    "/accounts/{account_id}/broker-connection",
+    response_model=ApiSuccess[BrokerConnectionOut | None],
+)
+async def get_broker_connection(account_id: int, db: _db_dep):
+    await _get_account(db, account_id, "brokerage")
+    row = (
+        await db.execute(
+            select(BrokerConnection).where(BrokerConnection.account_id == account_id)
+        )
+    ).scalar_one_or_none()
+    return ApiSuccess(data=_broker_conn_to_out(row) if row else None)
+
+
+@router.put(
+    "/accounts/{account_id}/broker-connection",
+    response_model=ApiSuccess[BrokerConnectionOut],
+)
+async def upsert_broker_connection(
+    account_id: int, body: BrokerConnectionIn, db: _db_dep
+):
+    await _get_account(db, account_id, "brokerage")
+    provider = body.provider.strip().lower()
+    if provider not in _SUPPORTED_BROKERS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Unsupported broker {body.provider!r}"
+        )
+
+    existing = (
+        await db.execute(
+            select(BrokerConnection).where(BrokerConnection.account_id == account_id)
+        )
+    ).scalar_one_or_none()
+
+    now = _utcnow_str()
+    try:
+        token_enc = encrypt_str(body.token)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Backend not configured for encrypted credentials: "
+            "set FINANCE_BANK_ENCRYPTION_KEY in .env (see .env.example), then restart.",
+        ) from exc
+
+    if existing is None:
+        row = BrokerConnection(
+            account_id=account_id,
+            provider=provider,
+            token_enc=token_enc,
+            query_id=body.query_id.strip(),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+    else:
+        row = existing
+        row.provider = provider
+        row.token_enc = token_enc
+        row.query_id = body.query_id.strip()
+        # Reset sync state on rotation — a prior error refers to the old token.
+        row.last_sync_status = None
+        row.last_sync_error = None
+        touch_updated_at(row)
+    await db.flush()
+    return ApiSuccess(data=_broker_conn_to_out(row))
+
+
+@router.delete(
+    "/accounts/{account_id}/broker-connection",
+    response_model=ApiSuccess[dict],
+)
+async def delete_broker_connection(account_id: int, db: _db_dep):
+    await _get_account(db, account_id, "brokerage")
+    row = (
+        await db.execute(
+            select(BrokerConnection).where(BrokerConnection.account_id == account_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No connection to delete")
+    await db.delete(row)
+    return ApiSuccess(data={"deleted": row.id})
+
+
+# ─── Trade Republic: 2-step interactive login ──────────────────────────────
+#
+# TR has no static token — login is phone+PIN → 4-digit code → cookie
+# session. The live pytr object from step 1 must survive until step 2, so we
+# hold it in a process-local store keyed by account_id. This is safe for the
+# local-first single-process backend; a restart mid-login just means the user
+# re-initiates (cheap). Entries auto-expire.
+
+_TR_PENDING: dict[int, dict] = {}
+_TR_PENDING_GRACE_SEC = 120  # extra time past the TR countdown to enter the code
+
+
+def _tr_prune_expired() -> None:
+    now = time.monotonic()
+    for aid in [a for a, v in _TR_PENDING.items() if v["expires_at"] < now]:
+        from app.services.broker_sync.traderepublic import cleanup_login
+
+        try:
+            cleanup_login(_TR_PENDING[aid]["tr"])
+        except Exception:  # noqa: BLE001
+            pass
+        _TR_PENDING.pop(aid, None)
+
+
+def _mask_phone(phone: str) -> str:
+    p = phone.strip()
+    if len(p) <= 5:
+        return p
+    return f"{p[:3]}•••{p[-2:]}"
+
+
+@router.post(
+    "/accounts/{account_id}/broker-connection/tr/connect",
+    response_model=ApiSuccess[TRConnectOut],
+)
+async def tr_connect(account_id: int, body: TRConnectIn, db: _db_dep):
+    """Trade Republic login step 1: phone + PIN → TR sends a 4-digit code."""
+    await _get_account(db, account_id, "brokerage")
+    _tr_prune_expired()
+
+    from app.services.broker_sync import BrokerSyncError
+    from app.services.broker_sync.traderepublic import cleanup_login, initiate_login
+
+    # Drop any previous half-finished attempt for this account.
+    prev = _TR_PENDING.pop(account_id, None)
+    if prev:
+        try:
+            cleanup_login(prev["tr"])
+        except Exception:  # noqa: BLE001
+            pass
+
+    try:
+        # initiate_weblogin is blocking (playwright/curl_cffi WAF + HTTP) — off the loop.
+        tr, countdown = await asyncio.to_thread(
+            initiate_login, body.phone.strip(), body.pin.strip()
+        )
+    except BrokerSyncError as exc:
+        msg = str(exc)
+        # Full reason to the server log (so we can debug login failures);
+        # the message is already user-safe (no secrets).
+        log.warning("tr_connect_failed", account_id=account_id, reason=msg)
+        # Credential / validation problems are the caller's fault → 400;
+        # WAF / upstream issues → 502.
+        is_user_error = any(
+            k in msg for k in ("手机号", "PIN", "频繁", "验证码")
+        )
+        code = status.HTTP_400_BAD_REQUEST if is_user_error else status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(code, msg) from exc
+    except Exception as exc:  # noqa: BLE001 — surface unexpected errors, don't 500 silently
+        log.warning(
+            "tr_connect_unexpected",
+            account_id=account_id,
+            error_class=exc.__class__.__name__,
+            error=str(exc)[:300],
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Trade Republic 连接异常：{exc.__class__.__name__}: {str(exc)[:200]}",
+        ) from exc
+
+    _TR_PENDING[account_id] = {
+        "tr": tr,
+        "phone": body.phone.strip(),
+        "expires_at": time.monotonic() + countdown + _TR_PENDING_GRACE_SEC,
+    }
+    return ApiSuccess(data=TRConnectOut(countdown_seconds=countdown))
+
+
+@router.post(
+    "/accounts/{account_id}/broker-connection/tr/verify",
+    response_model=ApiSuccess[BrokerConnectionOut],
+)
+async def tr_verify(account_id: int, body: TRVerifyIn, db: _db_dep):
+    """Trade Republic login step 2: submit the 4-digit code → store session."""
+    await _get_account(db, account_id, "brokerage")
+    _tr_prune_expired()
+
+    from app.services.broker_sync import BrokerSyncError
+    from app.services.broker_sync.traderepublic import cleanup_login, complete_login
+
+    pending = _TR_PENDING.get(account_id)
+    if pending is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "登录会话已过期或未发起，请重新点击连接。",
+        )
+
+    try:
+        cookies_blob = await asyncio.to_thread(complete_login, pending["tr"], body.code)
+    except BrokerSyncError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    finally:
+        cleanup_login(pending["tr"])
+        _TR_PENDING.pop(account_id, None)
+
+    try:
+        token_enc = encrypt_str(cookies_blob)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Backend not configured for encrypted credentials: "
+            "set FINANCE_BANK_ENCRYPTION_KEY in .env (see .env.example), then restart.",
+        ) from exc
+
+    now = _utcnow_str()
+    meta = json.dumps({"phone_masked": _mask_phone(pending["phone"])})
+    existing = (
+        await db.execute(
+            select(BrokerConnection).where(BrokerConnection.account_id == account_id)
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        row = BrokerConnection(
+            account_id=account_id,
+            provider="traderepublic",
+            token_enc=token_enc,
+            query_id=None,
+            metadata_json=meta,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+    else:
+        row = existing
+        row.provider = "traderepublic"
+        row.token_enc = token_enc
+        row.query_id = None
+        row.metadata_json = meta
+        row.last_sync_status = None
+        row.last_sync_error = None
+        touch_updated_at(row)
+    await db.flush()
+    return ApiSuccess(data=_broker_conn_to_out(row))
 
 
 # ─── Sync (blocking) ───────────────────────────────────────────────────────

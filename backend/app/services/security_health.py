@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import ExchangeConnection
+from app.models import BrokerConnection, ExchangeConnection
 from app.services.app_settings import get_setting
 from app.services.bank_sync.crypto import can_decrypt
 
@@ -66,6 +66,18 @@ async def verify_credentials_health(db: AsyncSession) -> CredentialHealth:
         if row.api_passphrase_enc:
             blobs.append(row.api_passphrase_enc)
         if all(can_decrypt(b) for b in blobs):
+            ok += 1
+        else:
+            stale.append(label)
+
+    # 3. Broker connections (Flex token)
+    try:
+        broker_rows = (await db.execute(select(BrokerConnection))).scalars().all()
+    except Exception:
+        broker_rows = []
+    for row in broker_rows:
+        label = f"{row.provider} 券商凭据 (account #{row.account_id})"
+        if can_decrypt(row.token_enc):
             ok += 1
         else:
             stale.append(label)

@@ -29,6 +29,15 @@ dependencies = [
     "pycoingecko>=3.1",
     "cryptography>=43.0",
     "google-genai>=0.3",
+    # Trade Republic unofficial API (read-only portfolio). Used by
+    # services/broker_sync/traderepublic.py. TR's login is protected by AWS
+    # WAF; as of 2026-06 only the playwright (headless Chromium) solver is
+    # accepted — the pure-Python awswaf token is rejected (HTTP 405). So a
+    # browser binary IS required for the LOGIN step:
+    #   python -m playwright install chromium          (Ubuntu: add --with-deps)
+    # Routine balance syncs resume from stored cookies and need no browser.
+    "pytr>=0.4.9",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

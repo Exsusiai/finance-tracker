@@ -193,7 +193,7 @@ export default function SettingsPage() {
                         已停用
                       </p>
                     )}
-                    {(a.type === "crypto_wallet" || a.type === "exchange") && (
+                    {(a.type === "crypto_wallet" || a.type === "exchange" || a.type === "brokerage") && (
                       <div className="mt-2 pt-2 border-t border-border/60 flex justify-end">
                         <SyncAccountButton accountId={a.id} />
                       </div>

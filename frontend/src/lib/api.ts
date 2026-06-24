@@ -1116,6 +1116,89 @@ export async function deleteExchangeConnection(
   });
 }
 
+export type BrokerProvider = "ibkr" | "traderepublic";
+
+export interface BrokerConnectionOut {
+  id: number;
+  provider: BrokerProvider;
+  /** NULL for Trade Republic (no Flex-query concept); set for IBKR. */
+  query_id: string | null;
+  has_token: boolean;
+  /** Token/session exists but won't decrypt (encryption key rotated) — prompt re-entry. */
+  credentials_stale?: boolean;
+  last_synced_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+}
+
+export interface BrokerConnectionInput {
+  provider: "ibkr";
+  token: string;
+  query_id: string;
+}
+
+// ─── Trade Republic 2-step web login ───────────────────────────────────────
+
+export interface TRConnectInput {
+  phone: string;
+  pin: string;
+}
+
+export interface TRConnectResult {
+  countdown_seconds: number;
+  message: string;
+}
+
+export interface TRVerifyInput {
+  code: string;
+}
+
+/** Step 1: phone + PIN → TR sends a 4-digit code to the app/SMS. */
+export async function trConnect(
+  accountId: number,
+  data: TRConnectInput,
+): Promise<TRConnectResult> {
+  return request(`/api/v1/accounts/${accountId}/broker-connection/tr/connect`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+/** Step 2: submit the 4-digit code → session stored, returns the connection. */
+export async function trVerify(
+  accountId: number,
+  data: TRVerifyInput,
+): Promise<BrokerConnectionOut> {
+  return request(`/api/v1/accounts/${accountId}/broker-connection/tr/verify`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function fetchBrokerConnection(
+  accountId: number,
+): Promise<BrokerConnectionOut | null> {
+  return request(`/api/v1/accounts/${accountId}/broker-connection`);
+}
+
+export async function upsertBrokerConnection(
+  accountId: number,
+  data: BrokerConnectionInput,
+): Promise<BrokerConnectionOut> {
+  return request(`/api/v1/accounts/${accountId}/broker-connection`, {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteBrokerConnection(
+  accountId: number,
+): Promise<{ deleted: number }> {
+  return request(`/api/v1/accounts/${accountId}/broker-connection`, {
+    method: "DELETE",
+  });
+}
+
 export interface SyncResultOut {
   label: string;
   chain: string | null;
