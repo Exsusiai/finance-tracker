@@ -31,6 +31,15 @@ from app.services.cashflow import parse_period, recompute_for_periods, recompute
 router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
 
+# Account types whose balance is derived from auto-synced holdings *snapshots*
+# (asset_holdings × latest price), NOT from transactions. For these, incoming
+# money is already reflected by the next sync's snapshot, so synthesising a
+# mirror transfer-in leg would double-count it — the /accounts/balances and
+# net-worth math is `v_account_balance(transactions) + holdings_value`, and the
+# synthetic row lands in the first term while the snapshot already carries it in
+# the second. A bank→broker/crypto/exchange transfer therefore stays single-leg.
+_SNAPSHOT_ACCOUNT_TYPES = frozenset({"brokerage", "crypto_wallet", "exchange"})
+
 
 def _normalize_amount(val) -> str:
     """Normalize Decimal to clean string (no trailing zeros, no scientific notation)."""
@@ -337,6 +346,7 @@ async def update_transaction(
 
     old_period = parse_period(tx.occurred_at)
     old_category_id = tx.category_id
+    old_type = tx.type
 
     update_data = body.model_dump(exclude_unset=True)
     if "tags" in update_data:
@@ -375,6 +385,24 @@ async def update_transaction(
 
     for key, value in update_data.items():
         setattr(tx, key, value)
+
+    # When an edit flips a row into a transfer, it must carry a direction:
+    # the balance view and the 未配对 panel both default a direction-less
+    # transfer to 'out', silently reversing the sign of income-origin moves
+    # (e.g. a repayment coming back IN shown as -). Infer from the type we're
+    # replacing (income → in, else out) unless one is already present.
+    if tx.type == "transfer" and old_type != "transfer":
+        existing_meta: dict = {}
+        if tx.metadata_json:
+            try:
+                parsed = json.loads(tx.metadata_json)
+                if isinstance(parsed, dict):
+                    existing_meta = parsed
+            except (json.JSONDecodeError, TypeError):
+                existing_meta = {}
+        if not existing_meta.get("transfer_direction"):
+            existing_meta["transfer_direction"] = "in" if old_type == "income" else "out"
+            tx.metadata_json = json.dumps(existing_meta, ensure_ascii=False)
 
     touch_updated_at(tx)
     await db.flush()
@@ -726,6 +754,26 @@ async def mark_as_transfer(
         )).scalar_one_or_none()
         if ctr_account is None:
             raise NotFoundError("Counter Account", body.counter_account_id)
+
+        # Snapshot-balance accounts reflect the arrived money via their next
+        # auto-sync, so we must NOT synthesise a mirror leg (it would
+        # double-count — see _SNAPSHOT_ACCOUNT_TYPES). Degrade to a single-leg
+        # transfer on the source: the destination needs no row. We stash the
+        # intended counter account as a hint (for display + to keep the row out
+        # of the 未配对 panel) without setting counter_account_id (which would
+        # otherwise be cleared as an orphan by refresh-matching).
+        if ctr_account.type in _SNAPSHOT_ACCOUNT_TYPES:
+            tx.type = "transfer"
+            if body.category_id is not None:
+                tx.category_id = body.category_id
+            tx.is_pending = False
+            tx.metadata_json = _merge_meta(tx.metadata_json, {
+                "transfer_direction": body.transfer_direction,
+                "counter_account_hint": body.counter_account_id,
+            })
+            await db.flush()
+            await recompute_for_periods(db, [old_period])
+            return ApiSuccess(data=_tx_to_out(tx))
 
         # V4-P1-2: synthetic mirror copies the source's amount + currency
         # verbatim into the counter account. If the counter account has a
@@ -1102,6 +1150,8 @@ async def list_unpaired_transfers(
     """
     from sqlalchemy import text as _text
 
+    from app.services.transfer_matcher.engine import _resolve_transfer_category
+
     not_subaccount = _text(
         "(metadata_json IS NULL OR NOT json_valid(metadata_json) "
         "OR COALESCE(json_extract(metadata_json, '$.subaccount'), 0) != 1)"
@@ -1109,6 +1159,13 @@ async def list_unpaired_transfers(
     not_paired_meta = _text(
         "(metadata_json IS NULL OR NOT json_valid(metadata_json) "
         "OR json_extract(metadata_json, '$.paired_with_tx_id') IS NULL)"
+    )
+    # Single-leg transfers intentionally directed at a snapshot account
+    # (brokerage / crypto / exchange) are already resolved — the destination's
+    # next sync reflects the money — so they must not nag in this panel.
+    not_broker_hinted = _text(
+        "(metadata_json IS NULL OR NOT json_valid(metadata_json) "
+        "OR json_extract(metadata_json, '$.counter_account_hint') IS NULL)"
     )
     stmt = (
         select(Transaction)
@@ -1119,10 +1176,23 @@ async def list_unpaired_transfers(
             Transaction.counter_account_id.is_(None),
             not_subaccount,
             not_paired_meta,
+            not_broker_hinted,
         )
         .order_by(Transaction.occurred_at.desc())
         .limit(limit)
     )
+    # In-bank savings moves are categorised 内部储蓄 (the subaccount category).
+    # They never need a counter-leg, regardless of whether the subaccount
+    # metadata flag was set (user-assigned categories may lack it). Exclude by
+    # category as the authoritative signal.
+    subaccount_cat_id = await _resolve_transfer_category(db, kind="subaccount")
+    if subaccount_cat_id is not None:
+        stmt = stmt.where(
+            or_(
+                Transaction.category_id.is_(None),
+                Transaction.category_id != subaccount_cat_id,
+            )
+        )
     rows = (await db.execute(stmt)).scalars().all()
     out: list[dict] = []
     for r in rows:

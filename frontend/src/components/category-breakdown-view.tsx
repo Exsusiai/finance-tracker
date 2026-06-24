@@ -472,6 +472,19 @@ function buildTreeFromTx(
   for (const t of txs) {
     if (t.category_id == null) continue;
     if (t.type !== kind) continue;
+    // Dedup paired transfer legs: a transfer is ONE event recorded as TWO
+    // legs (real + paired/synthetic mirror), both carrying the same category.
+    // Summing both double-counts it. Keep only the lower-id leg. Mirrors the
+    // backend dedup in cashflow_by_category / _RECOMPUTE_SQL.
+    if (t.type === "transfer" && t.metadata_json) {
+      try {
+        const paired = (JSON.parse(t.metadata_json) as { paired_with_tx_id?: unknown })
+          .paired_with_tx_id;
+        if (typeof paired === "number" && paired < t.id) continue;
+      } catch {
+        // malformed metadata → fall through and count it
+      }
+    }
     const baseAmt = (t as { base_amount?: string | null }).base_amount;
     const fxRate = (t as { fx_rate_to_base?: string | null }).fx_rate_to_base;
     let raw: number | null = null;

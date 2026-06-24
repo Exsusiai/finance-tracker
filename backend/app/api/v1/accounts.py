@@ -249,6 +249,7 @@ async def _reclassify_pending_for_subaccounts(
         return 0
 
     from app.services.cashflow import parse_period, recompute_for_periods
+    from app.services.pdf_parser.engine import _is_subaccount_excluded
     from app.services.transfer_matcher.engine import _merge_meta, _resolve_transfer_category
 
     # Resolve once — the lookup is constant across the loop.
@@ -263,6 +264,12 @@ async def _reclassify_pending_for_subaccounts(
             (tx.counterparty or "").lower(),
         ]))
         if not haystack:
+            continue
+        # Interest/fee on a savings space mentions the sub-account name but is
+        # income/expense, not an internal move — don't sweep it into subaccount
+        # (mirrors _classify_transfer's guard). e.g. Revolut
+        # 'Net interest paid to "Instant Access Savings"'.
+        if _is_subaccount_excluded(haystack):
             continue
         hit = next((n for n in new_subaccount_names if n in haystack), None)
         if not hit:

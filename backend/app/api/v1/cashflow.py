@@ -139,6 +139,20 @@ async def cashflow_by_category(
         WHERE t.deleted_at IS NULL
           AND t.is_pending = 0
           AND substr(t.occurred_at, 1, 7) = :period
+          -- A transfer is ONE economic event recorded as TWO legs (the real
+          -- leg + its paired/synthetic mirror), and both carry the same
+          -- category — so summing both double-counts it in the breakdown.
+          -- Keep only one leg per pair: drop a leg when its paired partner is
+          -- still live AND has a smaller id. Non-transfers / single-leg
+          -- transfers have no live smaller-id partner, so they're untouched.
+          AND NOT EXISTS (
+              SELECT 1 FROM transactions p
+              WHERE p.deleted_at IS NULL
+                AND p.id < t.id
+                AND t.metadata_json IS NOT NULL
+                AND json_valid(t.metadata_json)
+                AND p.id = json_extract(t.metadata_json, '$.paired_with_tx_id')
+          )
         GROUP BY t.category_id
         ORDER BY total DESC
     """)

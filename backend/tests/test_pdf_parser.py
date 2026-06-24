@@ -41,6 +41,46 @@ def test_engine_module_imports() -> None:
     assert hasattr(engine, "_detect_bank")
 
 
+def test_classify_transfer_infers_direction_from_default_type(monkeypatch) -> None:
+    """A cross-bank hint with no directional verb (e.g. an owner-name extra
+    like "from Rui Zeng") must still get a transfer_direction — derived from
+    the debit/credit the statement already gave us (default_type). Otherwise
+    the row becomes a direction-less transfer that the balance view + 未配对
+    panel default to 'out', reversing income-origin transfers.
+    """
+    from app.services.pdf_parser import engine
+
+    # A keyword present in neither _DIRECTION_IN_HINTS nor _DIRECTION_OUT_HINTS.
+    monkeypatch.setattr(engine, "_cross_bank_transfer_hints", lambda: ("from rui zeng",))
+
+    t_in, meta_in = engine._classify_transfer("from rui zeng", "income")
+    assert t_in == "transfer"
+    assert meta_in is not None and meta_in["transfer_direction"] == "in"
+
+    t_out, meta_out = engine._classify_transfer("from rui zeng", "expense")
+    assert t_out == "transfer"
+    assert meta_out is not None and meta_out["transfer_direction"] == "out"
+
+
+def test_classify_transfer_interest_not_subaccount() -> None:
+    """Revolut 'Net interest paid to "Instant Access Savings"' mentions a
+    sub-account but is deposit INTEREST (income), not an internal move — it
+    must NOT be tagged subaccount, while a real 'To/From <space>' move still is.
+    """
+    from app.services.pdf_parser import engine
+
+    # Interest row — contains the subaccount keyword "to instant access savings"
+    # but the interest guard must keep it out of subaccount.
+    t, meta = engine._classify_transfer(
+        'Net interest paid to "Instant Access Savings" for Jan 1,', "income"
+    )
+    assert not (meta and meta.get("subaccount")), f"interest wrongly subaccount: {meta}"
+
+    # A genuine internal move still classifies as a subaccount transfer.
+    t2, meta2 = engine._classify_transfer("To Instant Access Savings", "expense")
+    assert t2 == "transfer" and meta2 is not None and meta2.get("subaccount") is True
+
+
 def test_bank_detector_returns_supported_keys() -> None:
     """`_detect_bank` should map known signatures to one of the supported banks.
 

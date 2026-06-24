@@ -23,7 +23,7 @@ os.environ.setdefault("BASE_CURRENCY", "CNY")
 
 from app.db import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402 - app creation happens here
-from app.models import Account, Transaction  # noqa: E402
+from app.models import Account, Category, Transaction  # noqa: E402
 
 # ─── Test database setup ────────────────────────────────────────────────────
 
@@ -97,9 +97,9 @@ def _utcnow() -> str:
 
 
 async def _make_account(db: AsyncSession, name: str = "Test", currency: str = "CNY",
-                        initial: str = "1000") -> Account:
+                        initial: str = "1000", acct_type: str = "bank") -> Account:
     acc = Account(
-        name=name, type="bank", currency=currency,
+        name=name, type=acct_type, currency=currency,
         initial_balance=Decimal(initial), is_active=True,
         created_at=_utcnow(), updated_at=_utcnow(),
     )
@@ -370,3 +370,124 @@ class TestPairInvariants:
         )
         assert resp.status_code == 422
         assert "Cross-currency" in resp.text
+
+
+class TestSnapshotCounterAccount:
+    """Binding a counter-leg to a snapshot account (brokerage / crypto /
+    exchange) must NOT synthesise a mirror — the destination's next sync
+    already reflects the money, so a mirror would double-count it."""
+
+    @pytest.mark.parametrize("acct_type", ["brokerage", "crypto_wallet", "exchange"])
+    async def test_snapshot_account_stays_single_leg(
+        self, client: AsyncClient, db: AsyncSession, acct_type: str
+    ):
+        from sqlalchemy import func, select
+
+        src = await _make_account(db, f"BankSrc-{acct_type}", currency="EUR", initial="1000")
+        dst = await _make_account(
+            db, f"Snap-{acct_type}", currency="EUR", initial="0", acct_type=acct_type
+        )
+        tx_src = await _make_tx(db, src, "500", tx_type="expense")
+        await db.commit()
+
+        resp = await client.post(
+            f"/api/v1/transactions/{tx_src.id}/mark-transfer",
+            json={"counter_account_id": dst.id, "transfer_direction": "out"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Source flipped to a single-leg transfer, hinting the destination.
+        src_fresh = await _refetch_tx(db, tx_src.id)
+        meta = json.loads(src_fresh.metadata_json or "{}")
+        assert src_fresh.type == "transfer"
+        assert meta.get("transfer_direction") == "out"
+        assert meta.get("counter_account_hint") == dst.id
+        assert src_fresh.counter_account_id is None  # NOT bound
+
+        # NO mirror leg created on the snapshot account.
+        mirror_count = (await db.execute(
+            select(func.count(Transaction.id)).where(Transaction.account_id == dst.id)
+        )).scalar()
+        assert mirror_count == 0
+
+        # Destination balance unaffected by any synthetic transaction.
+        dst_bal = await _balance(db, dst.id)
+        assert dst_bal == Decimal("0")
+
+
+class TestEditToTransferSetsDirection:
+    """PATCH that flips a row into a transfer must record transfer_direction,
+    inferred from the type being replaced — otherwise the balance view + panel
+    default it to 'out' and reverse the sign of income-origin transfers."""
+
+    async def test_income_to_transfer_becomes_in(self, client: AsyncClient, db: AsyncSession):
+        acc = await _make_account(db, "EditIn", currency="EUR", initial="0")
+        tx = await _make_tx(db, acc, "224", tx_type="income")
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/transactions/{tx.id}",
+            json={"type": "transfer"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+        fresh = await _refetch_tx(db, tx.id)
+        meta = json.loads(fresh.metadata_json or "{}")
+        assert fresh.type == "transfer"
+        assert meta.get("transfer_direction") == "in"
+        # +ABS on an 'in' transfer → balance reflects the inflow, not -224.
+        assert await _balance(db, acc.id) == Decimal("224")
+
+    async def test_expense_to_transfer_becomes_out(self, client: AsyncClient, db: AsyncSession):
+        acc = await _make_account(db, "EditOut", currency="EUR", initial="1000")
+        tx = await _make_tx(db, acc, "300", tx_type="expense")
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/transactions/{tx.id}",
+            json={"type": "transfer"},
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+        fresh = await _refetch_tx(db, tx.id)
+        meta = json.loads(fresh.metadata_json or "{}")
+        assert meta.get("transfer_direction") == "out"
+
+
+class TestUnpairedPanelExclusions:
+    """GET /transfers/unpaired must not surface rows that need no counter-leg:
+    in-bank 内部储蓄 moves (by category, even without the subaccount flag) and
+    single-leg transfers already directed at a snapshot account (hinted)."""
+
+    async def test_panel_excludes_subaccount_category_and_hinted(
+        self, client: AsyncClient, db: AsyncSession
+    ):
+        acc = await _make_account(db, "PanelBank", currency="EUR", initial="1000")
+        sub_cat = Category(name="内部储蓄", kind="transfer",
+                           created_at=_utcnow(), updated_at=_utcnow())
+        db.add(sub_cat)
+        await db.flush()
+
+        # (a) 内部储蓄 move, NO subaccount flag → must be excluded by category.
+        savings = await _make_tx(db, acc, "300", tx_type="transfer")
+        savings.category_id = sub_cat.id
+        savings.metadata_json = json.dumps({"transfer_direction": "in"})
+        # (b) single-leg directed at a snapshot account → excluded by hint.
+        hinted = await _make_tx(db, acc, "500", tx_type="transfer")
+        hinted.metadata_json = json.dumps(
+            {"transfer_direction": "out", "counter_account_hint": 999}
+        )
+        # (c) genuine unpaired cross-bank transfer → must remain visible.
+        genuine = await _make_tx(db, acc, "120", tx_type="transfer")
+        genuine.metadata_json = json.dumps({"transfer_direction": "out"})
+        await db.commit()
+
+        resp = await client.get(
+            "/api/v1/transactions/transfers/unpaired", headers=AUTH_HEADERS
+        )
+        assert resp.status_code == 200, resp.text
+        ids = {row["transaction_id"] for row in resp.json()["data"]}
+        assert savings.id not in ids
+        assert hinted.id not in ids
+        assert genuine.id in ids

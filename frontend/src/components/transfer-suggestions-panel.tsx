@@ -119,9 +119,15 @@ export function TransferSuggestionsPanel() {
 
 // ─── Unpaired single-leg card ─────────────────────────────────────────
 
+// Account types whose balance comes from auto-synced holdings snapshots.
+// Binding a counter-leg to one of these is recorded single-leg (no mirror) —
+// the destination's next sync already reflects the money. Mirrors the backend
+// _SNAPSHOT_ACCOUNT_TYPES guard in app/api/v1/transactions.py.
+const SNAPSHOT_ACCOUNT_TYPES = new Set(["brokerage", "crypto_wallet", "exchange"]);
+
 interface UnpairedCardProps {
   tx: UnpairedTransfer;
-  accounts: Array<{ id: number; name: string; currency: string }>;
+  accounts: Array<{ id: number; name: string; currency: string; type: string }>;
   onDone: () => void;
 }
 
@@ -134,6 +140,14 @@ function UnpairedCard({ tx, accounts, onDone }: UnpairedCardProps) {
   // Default direction from metadata; fall back: if amount > 0 logically we
   // can't tell, so default 'out' (most common single-leg case).
   const direction: "in" | "out" = tx.transfer_direction === "in" ? "in" : "out";
+
+  // When the chosen counter account is a snapshot account, the backend records
+  // this single-leg (no mirror) — surface that so the button doesn't promise a
+  // counter-leg it won't create.
+  const counterAccount = accounts.find((a) => a.id === counterAccountId);
+  const counterIsSnapshot = counterAccount
+    ? SNAPSHOT_ACCOUNT_TYPES.has(counterAccount.type)
+    : false;
 
   const handleConfirm = async () => {
     if (counterAccountId == null) {
@@ -219,7 +233,11 @@ function UnpairedCard({ tx, accounts, onDone }: UnpairedCardProps) {
           disabled={submitting || counterAccountId == null}
           className="text-xs px-3 py-1 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
         >
-          {submitting ? "绑定中…" : "✓ 绑定并生成对手腿"}
+          {submitting
+            ? "绑定中…"
+            : counterIsSnapshot
+              ? "✓ 标记为单边转账"
+              : "✓ 绑定并生成对手腿"}
         </button>
         <button
           type="button"
@@ -232,6 +250,12 @@ function UnpairedCard({ tx, accounts, onDone }: UnpairedCardProps) {
         </button>
       </div>
       {error && <p className="mt-1 text-[11px] text-destructive">{error}</p>}
+      {counterIsSnapshot && (
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          「{counterAccount?.name}」是自动同步账户，到账金额由同步快照反映，
+          这里只记为单边转账、不再生成对手腿（避免重复计算）。
+        </p>
+      )}
 
       {pickerOpen && (
         <CounterLegPickerDialog

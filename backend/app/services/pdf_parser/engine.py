@@ -281,6 +281,22 @@ _SUBACCOUNT_KEYWORDS = (
 # A↔B internal transfer. It must flow through column-based income/expense
 # detection so it actually credits the bank's overall balance.
 
+# A row can MENTION a sub-account (by name or "to/from <space>" keyword) yet be
+# interest credited / a fee charged on that space — NOT an internal move.
+# Substring-matching the name would otherwise sweep e.g. Revolut
+# 'Net interest paid to "Instant Access Savings"' into a subaccount transfer
+# (which the balance view then ignores). These must stay income/expense.
+# Guard is applied ONLY to sub-account detection, so cross-bank classification
+# is unaffected (and a stray "fee" inside e.g. "coffee" can't suppress it).
+_SUBACCOUNT_EXCLUDE_KEYWORDS = ("interest", "fee")
+
+
+def _is_subaccount_excluded(desc: str) -> bool:
+    """True when `desc` is interest/fee on a savings space, so it must NOT be
+    classified as a sub-account move (it's income/expense)."""
+    d = desc.lower()
+    return any(k in d for k in _SUBACCOUNT_EXCLUDE_KEYWORDS)
+
 # Per-task subaccount-name context. Was a module-level mutable list, which
 # raced under concurrent ingestion (worker A's account names polluting
 # worker B's classification). ContextVar gives every asyncio task a fresh
@@ -379,16 +395,21 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
     # which would otherwise prevent `"to instant access savings"` from matching).
     d = re.sub(r"[\"'`'']", "", desc.lower())
     d = re.sub(r"\s+", " ", d)
+    # Interest/fee on a savings space mentions the sub-account but isn't a move
+    # — skip sub-account detection so it stays income/expense. Cross-bank
+    # detection (step 3) still runs.
+    subaccount_ok = not _is_subaccount_excluded(d)
     # 1) User-maintained per-account sub-account names (highest precedence,
     # read from a per-task ContextVar set by `parse_pdf_statement` /
     # callers — async-safe).
-    for name in _SUBACCOUNT_NAMES_VAR.get():
-        if name in d:
-            return "transfer", {"subaccount": True, "matched": name, "source": "user_list"}
-    # 2) Hard-coded common sub-account keywords
-    for kw in _SUBACCOUNT_KEYWORDS:
-        if kw in d:
-            return "transfer", {"subaccount": True, "matched": kw, "source": "keyword"}
+    if subaccount_ok:
+        for name in _SUBACCOUNT_NAMES_VAR.get():
+            if name in d:
+                return "transfer", {"subaccount": True, "matched": name, "source": "user_list"}
+        # 2) Hard-coded common sub-account keywords
+        for kw in _SUBACCOUNT_KEYWORDS:
+            if kw in d:
+                return "transfer", {"subaccount": True, "matched": kw, "source": "keyword"}
     # 3) Cross-bank cues. Also infer direction so the matcher's outflow /
     # inflow bucketing puts the row on the right side. Without direction,
     # an "ZAHLUNG ERHALTEN" row tagged transfer would land in BOTH buckets
@@ -402,6 +423,13 @@ def _classify_transfer(desc: str, default_type: str) -> tuple[str, dict | None]:
                 meta["transfer_direction"] = "in"
             elif any(h in d for h in _DIRECTION_OUT_HINTS):
                 meta["transfer_direction"] = "out"
+            else:
+                # No directional verb in the text — fall back to the debit/credit
+                # the statement already told us (encoded in `default_type`). A
+                # transfer must ALWAYS carry a direction, else the balance view
+                # and the 未配对 panel both default it to 'out' and silently
+                # reverse the sign of income-origin transfers.
+                meta["transfer_direction"] = "in" if default_type == "income" else "out"
             return "transfer", meta
     return default_type, None
 

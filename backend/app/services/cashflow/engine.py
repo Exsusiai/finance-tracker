@@ -84,11 +84,24 @@ _RECOMPUTE_SQL = text(f"""
         NULL,
         NULL,
         :now
-    FROM transactions
-    WHERE deleted_at IS NULL
-      AND is_pending = 0
-      AND CAST(substr(occurred_at, 1, 4) AS INTEGER) = :year
-      AND CAST(substr(occurred_at, 6, 2) AS INTEGER) = :month
+    FROM transactions t
+    WHERE t.deleted_at IS NULL
+      AND t.is_pending = 0
+      AND CAST(substr(t.occurred_at, 1, 4) AS INTEGER) = :year
+      AND CAST(substr(t.occurred_at, 6, 2) AS INTEGER) = :month
+      -- A transfer is ONE event recorded as TWO legs; both are type='transfer'
+      -- so summing both double-counts transfer_total. Drop a leg when its
+      -- paired partner is live AND has a smaller id (keeps one leg per pair).
+      -- Only paired transfers match, so income/expense/adjustment/savings are
+      -- untouched. Mirrors the dedup in api/v1/cashflow.py::cashflow_by_category.
+      AND NOT EXISTS (
+          SELECT 1 FROM transactions p
+          WHERE p.deleted_at IS NULL
+            AND p.id < t.id
+            AND t.metadata_json IS NOT NULL
+            AND json_valid(t.metadata_json)
+            AND p.id = json_extract(t.metadata_json, '$.paired_with_tx_id')
+      )
 """)
 
 

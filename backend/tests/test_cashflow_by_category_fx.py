@@ -125,4 +125,53 @@ async def test_by_category_excludes_fx_missing_rows(
         )
 
 
+async def test_by_category_counts_transfer_pair_once(
+    client: AsyncClient, db: AsyncSession,
+):
+    """A transfer is ONE event recorded as TWO legs (real + paired mirror),
+    both carrying the same transfer-kind category. by-category must count it
+    ONCE, not double it (regression: 借还钱 breakdown showed 2× every loan)."""
+    import json
+
+    from app.core.config import get_settings
+    # Use the runtime base currency (other test files may have set BASE_CURRENCY
+    # before our setdefault) so the FX fold yields the raw amount, not NULL.
+    cur = get_settings().base_currency
+
+    a = Account(name="Real-A", type="bank", currency=cur, initial_balance=Decimal("0"),
+                is_active=True, created_at=_utcnow(), updated_at=_utcnow())
+    b = Account(name="Ledger-B", type="other", currency=cur, initial_balance=Decimal("0"),
+                is_active=True, created_at=_utcnow(), updated_at=_utcnow())
+    cat = Category(name="借出", kind="transfer", parent_id=None, is_system=False)
+    db.add_all([a, b, cat])
+    await db.flush()
+
+    leg1 = Transaction(
+        account_id=a.id, category_id=cat.id, occurred_at="2026-07-10T00:00:00Z",
+        amount=Decimal("500"), currency=cur, type="transfer", source="manual",
+        is_pending=False, created_at=_utcnow(), updated_at=_utcnow(),
+    )
+    leg2 = Transaction(
+        account_id=b.id, category_id=cat.id, occurred_at="2026-07-10T00:00:00Z",
+        amount=Decimal("500"), currency=cur, type="transfer", source="manual",
+        is_pending=False, created_at=_utcnow(), updated_at=_utcnow(),
+    )
+    db.add_all([leg1, leg2])
+    await db.flush()
+    # Symmetric pairing pointers (as pair_transactions / synthetic-mirror write).
+    leg1.metadata_json = json.dumps({"transfer_direction": "out", "paired_with_tx_id": leg2.id})
+    leg2.metadata_json = json.dumps({"transfer_direction": "in", "paired_with_tx_id": leg1.id})
+    await db.commit()
+
+    resp = await client.get(
+        "/api/v1/cashflow/by-category",
+        params={"period": "2026-07"}, headers=AUTH_HEADERS,
+    )
+    assert resp.status_code == 200, resp.text
+    rows = [r for r in resp.json()["data"] if r["category_name"] == "借出"]
+    assert len(rows) == 1
+    assert Decimal(rows[0]["total"]) == Decimal("500"), f"double-counted: {rows[0]}"
+    assert rows[0]["count"] == 1
+
+
 pytestmark = pytest.mark.asyncio
