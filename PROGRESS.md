@@ -1,13 +1,42 @@
 # Finance Tracker — 项目进度
 
-> 修订日期: 2026-05-19
+> 修订日期: 2026-06-25
 > 根据"是否真正闭环并验证过"打分；详细分析见 `docx/REQUIREMENT_GAP.md`，剩余优先级见 `docx/ROADMAP.md`。
 
 ## 项目信息
 - **Repo**: https://github.com/Exsusiai/finance-tracker
 - **Git**: `master` 分支（feat/llm-classification 已合并；P1-4 + Phase 1/2 已 commit，本地领先 origin 2-4 个 commit）
 - **本地端口**: Backend `8010`, Frontend `3002`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT + **P1-1 LLM 智能分类** + **P1-4 加密钱包 / CEX 同步 + 总资产计入 + include_in_total** 全部已实装。下一步：稳定化（doc + code review）→ 等用户拍板 P1-2 GoCardless / P1-3 Notion / P1-5 储蓄口径
+- **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT + **P1-1 LLM 智能分类** + **P1-4 加密钱包 / CEX 同步** + **券商同步（IBKR Flex + Trade Republic）** + **PDF 预览后入库改造** 全部已实装。最近在做 UAT 资金口径修正（转账/现金流）。下一步：TR 真实凭据 UAT、IBKR Flex quota 复测 → 等用户拍板 P1-2 GoCardless / P1-3 Notion / P1-5 储蓄口径
+
+## 2026-06-24~25 新交付：UAT 资金口径修正（转账 / 现金流）
+本轮 UAT 围绕「转账与现金流统计」发现并修复一连串口径问题（commit `4db51e3`，详见 `.learnings/LEARNINGS.md` ERR-20260624-003~006 / ERR/LRN-20260625-*）：
+- **快照账户单边转账（防双算）**：bank→broker/crypto/exchange 的转账不再合成镜像腿（到账由同步快照反映，合成会叠加双算）；降级为单边 transfer。`/transfers/unpaired` 面板排除快照 hint + 内部储蓄分类。
+- **转账方向推断**：`update_transaction`（改成 transfer 时）与 `_classify_transfer`（无方向动词时）按原 income/expense 推断 `transfer_direction`，杜绝「无方向 transfer 被默认成 out 反转收入向转账」。
+- **转账双算去重**：一笔转账 = 两条腿（真实 + 镜像），`cashflow_by_category` / 快照 `transfer_total` / 前端 `category-breakdown-view` 全部按 pair 去重（保留 id 较小腿）。
+- **子账户/利息分类**：子账户名子串匹配会吞掉「Net interest paid to <space>」利息行；`_classify_transfer` + accounts 子账户重扫加 interest/fee 守卫（仅抑制子账户判定，不碰跨行识别）。
+- **数据修复**：N26↔Revolut 账户对调、IBKR 合成腿污染、内部储蓄缺 flag、145 笔 Revolut 利息归入存款利息——均原地修正 + 重算 cashflow。
+- **测试**：全套 **351 passed**。
+
+## 2026-06-24 新交付：PDF 导入「预览后入库」改造（commit `cd1f788`）
+- **preview-before-commit**：upload **只解析不入库**（status=`awaiting_review`，返回全部 `parsed_preview`）；`POST /statements/{id}/commit?account_id=` 才真正插入 + ingestion；`DELETE`（取消）连带删存储 PDF（无痕可重传）。
+- **撤销已入库**：`DELETE` 撤销 + 删文件；列表加 `offset` + `meta.total`（加载更多）+ 显示检测银行 + 账单月份。
+- **银行检测加固**：`_detect_bank` 改 earliest-position（修 N26↔Revolut 互转账单交叉误判）；上传支持 `bank_format` 手动指定；`PdfImportStatus` 加 `awaiting_review`。
+- 移除冗余的「改银行重新解析」（解析器够鲁棒）。
+
+## 2026-06-10~23 新交付：券商同步（IBKR Flex + Trade Republic，commit `03de9a0`）
+把传统券商持仓纳入资产视图，复用 `wallet_sync` orchestrator + `asset_holdings`，同表 `broker_connections`。详见 `CLAUDE.md` 对应两节。
+- **IBKR Flex Web Service**（2026-06-10）：报表 API，所有账户类型（含 Lite）可用；两步下载（SendRequest→GetStatement）async httpx；EOD 快照（持仓 + 现金），markPrice 原币写 `market_prices`。
+- **Trade Republic**（2026-06-23，未 UAT）：无官方 API，社区 `pytr`（只读）；交互式 Web login（手机+PIN→4 位码→cookie session）；AWS WAF 用 playwright 过（仅登录时启动一次，日常 cookie resume 不启浏览器）；`compactPortfolioByType` + per-ISIN ticker。
+- **估值**：`services/valuation/fx.py::convert_to_base`（USD/EUR→CNY）+ `compute_brokerage_value_per_account`。
+- **API**：`/accounts/{id}/broker-connection`（GET/PUT/DELETE）+ TR 两步 `/tr/connect`、`/tr/verify`；复用 `POST /accounts/{id}/sync`。
+- **未做**：盘中实时行情、券商交易流水导入。
+
+## 2026-05-20 / 06-09 增量（commit `da23ee2`/`1a5700d`/`126d49a`/`5d29a9c`/`3cb295f`）
+- review-v5/v6：多入口资金一致性 + 凭据加密 + 旧 scheduler 隔离 + 6 项资金口径修复
+- asset-identity-v2：crypto Asset 按 `(chain, contract)` 拆分，防跨链串价
+- p2-round2：**持仓表加列（数量/现价/市值/成本价）** + `price_currency` + by_currency shape + alembic DX
+- llm-reliability：后台限速队列 + 凭据健康自检（`security_health`）+ PDF 银行格式选择
 
 ## 2026-05-18~19 新交付：P1-4 加密钱包 + CEX 同步全栈
 详见 [docx/CRYPTO_WALLET_PLAN.md](docx/CRYPTO_WALLET_PLAN.md)。核心交付：
@@ -210,8 +239,9 @@
 |---|------|------|------|
 | **P1-1a-d** | LLM 兜底分类 | — | ✅ 已实装（2026-05-08）|
 | **P1-4** | 链上加密钱包同步 + CEX | — | ✅ 已实装（2026-05-18~19，含 Phase 1 价格 + Phase 2 include_in_total / Bitget 合约） |
+| **P1-5（券商）** | 券商同步 IBKR Flex + Trade Republic | — | ✅ 已实装（2026-06-10 / 06-23；TR 未 UAT、IBKR 待 Flex quota 复测） |
+| **P1-4-ext** | 持仓表 UI 加列（数量 / 当前价 / 市值 / 成本价） | — | ✅ 已实装（2026-05-20 `1a5700d`） |
 | **P1-4-ext** | Binance 合约钱包（USDT-M + 币本位，同 Bitget pattern） | 0.5 天 | 可选扩展；用户尚未明确要 |
-| **P1-4-ext** | 持仓表 UI 加列（数量 / 当前价 / 市值 / 成本价；成本价手工录入） | 1 天 | 用户已提过想看每个币种的当前价/市值 |
 | **P1-5** | "储蓄"计算口径定义 + 单测 | 0.5 天 | 等用户给定义（自动 income−expense？还是手动标记？） |
 
 ### 🟢 P2（工程化债务）
@@ -236,6 +266,14 @@
 
 | 日期 | Commit | 动作 |
 |------|--------|------|
+| 2026-06-25 | `4db51e3` | fix(transfer-cashflow): UAT 资金口径修正（转账方向推断 / 转账双算去重 / 快照账户单边 / 内部储蓄·利息分类守卫） |
+| 2026-06-24 | `cd1f788` | feat(pdf-import): 预览后入库 + 撤销 + 月份/分页 + 银行检测加固 |
+| 2026-06-24 | `03de9a0` | feat(broker-sync): 券商同步 — IBKR Flex + Trade Republic（持仓 + 现金 + 估值） |
+| 2026-06-09 | `3cb295f` | feat(llm-reliability): 后台限速队列 + 凭据健康自检 + PDF 银行格式选择 |
+| 2026-05-20 | `5d29a9c` | fix(review-v6): 6 项资金口径 + 安全修复 |
+| 2026-05-20 | `126d49a` | feat(asset-identity-v2): crypto Asset 按 (chain, contract) 拆分（防跨链串价） |
+| 2026-05-20 | `1a5700d` | feat(p2-round2): 持仓表加列 + price_currency + by_currency shape + alembic DX + docs sync |
+| 2026-05-20 | `da23ee2` | fix(review-v5): 多入口资金一致性 + 凭据加密 + 旧 scheduler 隔离 |
 | 2026-05-19 | `cf9cfa4` | fix(ux): 嵌套 form / React 19 state-during-render / 持仓表单范围限制 |
 | 2026-05-18~19 | `ca6d756` | feat(crypto-sync): P1-4 加密钱包 + CEX 同步全栈 + 总资产计入 + include_in_total（6300+ 行）|
 | 2026-05-09 | `6b6ce32` | feat(transfer-matcher): 5 天窗口 + 手动绑定 + 自定义金额容差 + 信用卡还款方向 |
@@ -257,12 +295,13 @@
 
 ## 下一步
 
-P1-1 + P1-4 主体均闭环。**当前阶段（2026-05-19）**：稳定化（updated docs + 多 agent 代码审查）。
+P1-1 / P1-4 / 券商同步 / PDF 改造主体均闭环。**当前阶段（2026-06-25）**：UAT 收尾 + 文档对齐。
 
 之后按 `docx/ROADMAP.md` 推进，剩余排序：
 
-1. **P1-4-ext 持仓表 UI 加列**（数量 / 当前价 / 市值 / 成本价）— 用户已提出明确需求
-2. **P1-4-ext Binance 合约钱包**（与 Bitget 同 pattern，半天）— 用户可选
-3. **P1-5 储蓄口径** — 依赖你给定义
-4. **P1-2 GoCardless** / **P1-3 Notion** — 依赖外部账号 / token
-5. **P2 工程化债务**（CI / Dockerfile / E2E / 生产 Bearer）— 功能稳定后插入
+1. **券商 UAT 收尾** — Trade Republic 真实凭据走通；IBKR 待 Flex quota 复测（之前 1001 配额耗尽）
+2. **P1-5 储蓄口径** — 依赖你给定义
+3. **P1-4-ext Binance 合约钱包**（与 Bitget 同 pattern，半天）— 用户可选
+4. **券商进阶**（可选）：盘中实时行情、券商交易流水导入、账单期缺口检测
+5. **P1-2 GoCardless** / **P1-3 Notion** — 依赖外部账号 / token
+6. **P2 工程化债务**（CI / Dockerfile / E2E / 生产 Bearer）— 功能稳定后插入

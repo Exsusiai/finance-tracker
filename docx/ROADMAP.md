@@ -180,7 +180,53 @@ V1 21 项问题修复进度：
 
 ---
 
-## 修订后的执行序列（2026-05-19）
+---
+
+## ✅ Sprint 6 — PDF 预览后入库 + 转账口径修正（2026-06）
+
+| # | 任务 | 状态 |
+|---|---|---|
+| **FIX-26** | PDF 导入改为「预览后入库」：`POST /upload` 只解析不入库，落 `status='awaiting_review'`，返回全量 `parsed_preview`；新增 `POST /statements/{id}/commit?account_id=` 才真正插入 + ingestion；`DELETE` 取消连带删除 PDF 文件（无痕可重传）；`GET /statements/{id}` 对 `awaiting_*` 状态重解析出预览 | ✅ 2026-06 |
+| **FIX-27** | `GET /statements` 列表加 `offset` 参数 + 响应 `meta.total`（支持「加载更多」） | ✅ 2026-06 |
+| **FIX-28** | 上传支持 `bank_format` 查询参数手动指定银行；`PdfImportStatus` 新增 `awaiting_review`（lifespan 幂等重建 CHECK）；移除「改银行重新解析」功能（冗余） | ✅ 2026-06 |
+| **FIX-29** | 银行检测改为「按最早出现位置」：`_detect_bank` 取 `_BANK_MARKERS` 中在文中出现位置最靠前的银行，防止 N26↔Revolut 互转账单交叉误判（发行行标识在头部，对方 BIC 只在正文转账行） | ✅ 2026-06 |
+| **FIX-30** | 转账方向推断：PATCH/mark-transfer 翻 transfer 时若无 direction 自动从旧 type 推断（income→in，else→out） | ✅ 2026-06 |
+| **FIX-31** | 快照账户单边转账（brokerage/crypto_wallet/exchange 作对手）降级为单边不合成镜像腿，防持仓余额双算；`/transfers/unpaired` 排除 `counter_account_hint` 行 | ✅ 2026-06 |
+| **FIX-32** | 内部储蓄/利息分类守卫：`/transfers/unpaired` 按 category_id 排除内部储蓄类别（`kind=subaccount`）；利息/手续费不被子账户扫描误判 | ✅ 2026-06 |
+| **FIX-33** | 新增 `GET /transfers/{id}/counter-leg-candidates` 和 `POST /{id}/unbind-counter` 端点 | ✅ 2026-06 |
+
+---
+
+## ✅ Sprint 7 — IBKR Flex 券商同步（2026-06-10 实装）
+
+| # | 任务 | 状态 |
+|---|---|---|
+| **P1-5a** | 新建 `broker_connections` 表（provider/token_enc/query_id/last_sync_*，唯一 `(account_id, provider)`）+ alembic migration `a1b2c3d4e5f6` | ✅ |
+| **P1-5b** | `services/broker_sync/ibkr.py`：IBKRFlexProvider，两步下载（async httpx），错误码重试；`services/broker_sync/upsert.py`：apply_broker_snapshot；asset_class 映射（STK/FUND/ETF/BOND/other） | ✅ |
+| **P1-5c** | API：`GET/PUT/DELETE /accounts/{id}/broker-connection`（token 加密入库，不回显）；orchestrator brokerage 分支；复用 `POST /accounts/{id}/sync` | ✅ |
+| **P1-5d** | 估值：`services/valuation/fx.py::convert_to_base` 抽出公共函数（EUR/USD→CNY 三角换算）；`compute_brokerage_value_per_account` 供 `/accounts/balances` 调用 | ✅ |
+| **P1-5e** | `security_health` 把 broker token 纳入凭据健康自检；`_safe_error_text` 对 Flex token（`t=` 参数）脱敏 | ✅ |
+| **P1-5f** | 前端：`AccountForm` `CONNECTION_SETUP_TYPES` 含 brokerage；`BrokerConnectionEditor` 内嵌填 Query ID + Token；`SyncAccountButton` 对 brokerage 显示 | ✅ |
+
+**特性说明**：IBKR 为收盘快照（EOD）；Flex `markPrice` 原币写 `market_prices(source='ibkr')`；conid 存 `data_source_id`；按 `(asset_class, symbol)` 与手动建的同名 Asset 合并。
+
+---
+
+## ✅ Sprint 8 — Trade Republic 券商同步（2026-06-23 实装，未 UAT）
+
+| # | 任务 | 状态 |
+|---|---|---|
+| **P1-6a** | `services/broker_sync/traderepublic.py`：TradeRepublicProvider，两步登录（playwright WAF token）；`compactPortfolioByType` 获取持仓（旧 `portfolio` topic 已废弃）；per-ISIN ticker 取价 | ✅ |
+| **P1-6b** | broker_connections 迁移 `b2c3d4e5f6a7`：provider CHECK 加 `'traderepublic'`，`query_id` 改可空；TR 行存加密 cookie jar（`token_enc`）、`query_id=NULL`、`metadata_json` 存脱敏手机号 | ✅ |
+| **P1-6c** | API：两步登录专属端点 `POST /accounts/{id}/broker-connection/tr/connect`（手机+PIN→进程内暂存）+ `POST /accounts/{id}/broker-connection/tr/verify`（4 位码→加密 cookies 入库） | ✅ |
+| **P1-6d** | 复用 `POST /accounts/{id}/sync`：orchestrator 按 `row.provider` dispatch，TR 走 `resume_websession` cookies 路径（不需要 playwright，不影响常驻服务性能） | ✅ |
+| **P1-6e** | 测试：`test_broker_sync.py` 覆盖 ISIN 映射 / 持仓映射 / fetch / 过期 session / 登录 round-trip / orchestrator（`_FakeTR` monkeypatch，不打外网） | ✅ |
+
+**注意**：TR 无官方 API（社区逆向库 `pytr`，仅只读）；session 过期需重连；登录依赖 Playwright（`python -m playwright install chromium`）。**未做**：会话自动续期、交易流水导入。未经过真实账户 UAT。
+
+---
+
+## 修订后的执行序列（2026-06-25 更新）
 
 | 顺序 | 阶段 | 估时 | 状态 |
 |---|---|---|---|
@@ -193,12 +239,26 @@ V1 21 项问题修复进度：
 | 7 | **P1-1a/c/d** LLM fallback + 知识库 | 2-3 天 | ✅ 2026-05-08 |
 | 8 | **transfer-matcher** 改进（5 天窗口 + 手动绑 + 容差） | 1 天 | ✅ 2026-05-09 |
 | 9 | **P1-4** 链上钱包 + CEX + 价格 + include_in_total | 3-4 天 | ✅ 2026-05-18~19 |
-| 10 | **稳定化 sprint**：docs + 多 agent code review + 修 review 出的 bug | 1-2 天 | 🚧 进行中（2026-05-19） |
-| 11 | **P1-4-ext** 持仓 UI 加列 + Binance 合约（可选）| 1-1.5 天 | 待启动 |
-| 12 | **P1-2** GoCardless | 1-2 天 | 依赖账号 |
-| 13 | **P1-3** Notion | 1-2 天 | 依赖 token + 库结构 |
-| 14 | **P1-5** 储蓄口径 | 0.5 天 | 依赖用户定义 |
-| 15+ | **P2** 工程化债务（Dockerfile / E2E / CI / 生产 Bearer） | 视优先级 | 待启动 |
+| 10 | **Sprint 6** PDF 预览入库 + 转账口径修正 | 1-2 天 | ✅ 2026-06 |
+| 11 | **Sprint 7** IBKR Flex 券商同步 | 2-3 天 | ✅ 2026-06-10 |
+| 12 | **Sprint 8** Trade Republic 券商同步 | 2-3 天 | ✅ 2026-06-23（未 UAT） |
+| 13 | **TR UAT** 真实账户验证 | 0.5 天 | 待用户操作 |
+| 14 | **P1-2** GoCardless | 1-2 天 | 依赖账号 |
+| 15 | **P1-3** Notion | 1-2 天 | 依赖 token + 库结构 |
+| 16+ | **P2** 工程化债务（Dockerfile / E2E / CI / 生产 Bearer） | 视优先级 | 待启动 |
+
+---
+
+## 下一步 / 未来计划
+
+| 优先级 | 功能 | 备注 |
+|---|---|---|
+| 高 | **TR UAT**（真实账户验证） | 需用户提供 TR 手机号+PIN 做一次完整登录+同步测试 |
+| 中 | **盘中实时券商行情** | IBKR 需 Pro 账户 + 常驻 Client Portal Gateway；TR 无官方实时 API |
+| 中 | **券商交易流水导入**（IBKR Flex Trades section / TR 未来 API） | 目前只有持仓快照，无历史成交记录 |
+| 低 | **账单期缺口检测** | 检测导入序列中的月份空缺，提醒用户补传 |
+| 低 | **P1-2** GoCardless 银行直连联调 | 依赖用户决策 + GoCardless 账号 |
+| 低 | **P1-3** Notion 同步联调 | 依赖 integration token + 库结构决策 |
 
 ---
 

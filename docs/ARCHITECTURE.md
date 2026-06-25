@@ -51,7 +51,7 @@
 | `schemas/` | Pydantic v2 请求/响应模型 (与 `docs/API.md` 对齐) |
 | `api/v1/` | FastAPI route handlers (薄,只做参数校验和调用 service) |
 | `services/` | 业务逻辑层（见下表） |
-| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `05f31889722c`；新增字段走 `alembic revision --autogenerate`） |
+| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `b2c3d4e5f6a7`；新增字段走 `alembic revision --autogenerate`） |
 
 #### `services/` 详细结构（2026-05-18）
 
@@ -64,12 +64,13 @@
 | `cashflow/` | `recompute_period` / `recompute_for_periods`：transaction CRUD 后即时重算 snapshot；多币种用 `_AMOUNT_BASE_EXPR`（`CASE` 表达式：same-currency 直取、有 `base_amount` 用 `base_amount`、有 `fx_rate_to_base` 则乘算，三者都缺时返回 NULL 跳过该行，避免混币汇总错误） |
 | `market_data/` | 取价（yfinance / CoinGecko / FX）+ `scheduler.py` AsyncIOScheduler 三 job；`coingecko.py` 含 token 价格与原生代币 native price 两种 fetcher |
 | `asset_search/` | CoinGecko + yfinance 联合查询自动识别资产 |
-| `valuation/` | 占位（旧 helper 已删，估值逻辑在 `api/v1/holdings.py`）|
+| `valuation/` | `fx.py::convert_to_base`：多币种折算到 BASE_CURRENCY（含 stablecoin→USD 别名 + CNY 三角 pivot）；被 holdings / portfolio / net-worth / brokerage 估值共用（`api/v1/holdings.py` 委托保留旧名） |
 | `bank_sync/` | GoCardless 银行直连（scaffold，未启用）；`crypto.py` 提供 AES-256-GCM `encrypt_str` / `decrypt_str`，被 wallet_sync 和 llm 路由复用 |
 | `notion_sync/` | Notion 三模块同步（scaffold，未联调） |
-| `wallet_sync/` | **P1-4 链上/CEX 同步编排**：`orchestrator.py` 按账户类型分发；`upsert.py` 写 `asset_holdings` (is_active + quantity)；`spam_filter.py` 过滤粉尘代币；`holdings_value.py` 原生 SQL 聚合最新市价 |
+| `wallet_sync/` | **链上/CEX/券商 同步编排**：`orchestrator.py` 按账户类型分发（crypto_wallet / exchange / brokerage）；`upsert.py` 写 `asset_holdings` (is_active + quantity)；`spam_filter.py` 过滤粉尘代币；`holdings_value.py` 聚合最新市价（crypto 走 USDT、`compute_brokerage_value_per_account` 走原币折 base） |
 | `crypto_sync/` | **链上余额 provider**：`evm_alchemy.py`（Alchemy Token API，EVM 系全链通用）、`btc_blockstream.py`（Blockstream API）、`sol_rpc.py`（Solana JSON-RPC）、`tron_grid.py`（TronGrid REST） |
 | `exchange_sync/` | **CEX 余额 provider**：`binance.py`（Binance Spot）、`bitget.py`（Bitget Spot + 签名）、`sign.py`（HMAC 签名辅助） |
+| `broker_sync/` | **券商持仓 provider**（2026-06）：`ibkr.py`（IBKR Flex Web Service，两步下载，EOD 快照 + 现金，markPrice 原币）、`traderepublic.py`（非官方 pytr，cookie session + `compactPortfolioByType` + per-ISIN ticker）；`__init__.py` 定义 `BrokerPosition`/`BrokerProvider`/`dispatch`/`map_asset_class`；`upsert.py::apply_broker_snapshot`。凭据存 `broker_connections`（token_enc AES-256-GCM） |
 | `llm/` | **P1-1 三层分类管道**：`provider.py` 定义 `LLMProvider` Protocol；`gemini.py` 是唯一实现（google-genai SDK）；`classifier.py` 检索知识库 → 构造 prompt → Provider → 解析 JSON → 写审计列；`cost_tracker.py` 按月累计 USD 消耗 |
 | `app_settings.py` | `app_settings` KV 表的类型化读写访问器，用于 LLM 配置持久化 |
 
@@ -77,7 +78,7 @@
 
 | 目录 | 职责 |
 |------|------|
-| `app/` | Next.js App Router 页面 (dashboard / transactions / assets / settings) |
+| `app/` | Next.js App Router 页面 (dashboard / transactions / assets / analytics / settings) |
 | `components/` | UI 原子 (shadcn/ui 衍生) + 业务组件 (charts/forms) |
 | `lib/` | API client、formatters、i18n、constants |
 | `types/` | OpenAPI 生成的类型 |
@@ -88,10 +89,13 @@
 
 ## 关键流程
 
-### 1. PDF 上传 → 入库 → 自动分类 + 转账识别 + 级联
+### 1. PDF 上传 → 预览 → 确认入库 → 自动分类 + 转账识别 + 级联
+
+> **2026-06 改造（preview-before-commit）**：`upload` **只解析不入库**（落 `status='awaiting_review'`，返回全部 `parsed_preview`）。用户在预览里确认后，`POST /statements/{id}/commit?account_id=` 才真正插入 + 跑下面的 ingestion 管道；`DELETE`（取消）连带删除暂存记录 + 存储的 PDF（无痕可重传）。下面的「分类 / 转账识别 / 级联」步骤发生在 **commit** 时。`bank_format` 可在上传时手动指定银行。
 
 ```
-[Web UI] → POST /statements/upload?account_id=X (multipart)
+[Web UI] → POST /statements/upload (multipart, 可选 bank_format)  →  status='awaiting_review'（不入库，返回 parsed_preview）
+[用户确认] → POST /statements/{id}/commit?account_id=X
        → SHA-256 hash 去重
        → asyncio.to_thread(parse_pdf_statement)：pdfplumber 抽 text + words
        → _detect_bank() 按 BIC/域名识别银行
@@ -153,6 +157,10 @@
 - expense −ABS / income +ABS / adjustment 保留原符号
 
 `transactions.amount` 始终存正绝对值，方向由 `type` + metadata 决定（adjustment 例外保留符号）。
+
+> 注：`v_account_balance` 是 **per-account 按方向累加**，转账两条腿落在各自账户互不重复，所以余额视图天然不双算。但**「按 type 求和」的统计（cashflow_by_category / 快照 `transfer_total` / 前端分类断点视图）必须按 pair 去重**（保留 id 较小腿），否则一笔转账的真实腿 + 镜像腿会各算一次（2026-06-25 修复）。
+
+> **快照账户不可有合成交易腿**（架构不变量）：brokerage / crypto_wallet / exchange 的余额 = `v_account_balance(交易) + holdings_value(同步快照)`。这类账户的到账由下次同步快照反映，因此 bank→这类账户的转账只能记**单边**（`mark-transfer` 不为其合成镜像腿），否则会与快照叠加双算。
 
 ### 4. Notion 数据同步 (P2)
 

@@ -5,7 +5,7 @@
 > 鉴权: `Authorization: Bearer <FINANCE_TRACKER_API_TOKEN>` (除 `/health` 外全部要求；本地默认 `AUTH_DISABLED=true` 跳过——Sprint 2 FIX-9 加了 invariant：仅当 `BACKEND_HOST` 是 loopback 时才允许跳过鉴权)
 > CORS: 允许列表由 `ALLOWED_ORIGINS` 控制（默认 `http://localhost:3000,http://localhost:3010,…`）
 > 前端 token 注入：用户在 Settings → API Token 输入框手动粘贴（FIX-18 后不再走 `NEXT_PUBLIC_API_TOKEN` bundle 注入）
-> 最后修订: 2026-05-18 (V5-P2-5)
+> 最后修订: 2026-06-25 (券商同步 + PDF 预览入库 + 转账端点补全)
 
 ## 通用约定
 
@@ -54,7 +54,9 @@
 **`AccountOut` 新增字段** (P1-4):
 - `include_in_total: bool` — 账户是否计入 net_worth / portfolio 汇总。`AccountCreate` 和 `AccountUpdate` 均接受此字段。
 
-**`/accounts/balances` 与 `/accounts/{id}/balance`**：对于 `type=crypto_wallet` 或 `type=exchange` 类型的账户，返回余额 = 初始余额 + holdings × 最新市价（折算到账户主币种）。
+**`/accounts/balances` 与 `/accounts/{id}/balance`**：
+- `crypto_wallet` / `exchange` 账户：余额 = `v_account_balance` + holdings × 最新 CoinGecko 价（USDT 路径）
+- `brokerage` 账户：余额 = `v_account_balance` + `compute_brokerage_value_per_account`（持仓 × markPrice，折算到 `BASE_CURRENCY`，由 `services/valuation/fx.py::convert_to_base` 处理 EUR/USD→CNY）
 
 **创建请求示例**
 ```json
@@ -130,21 +132,36 @@
 
 ### 跨账户转账识别
 
-| Method | Path                                            | 说明                                                |
-|--------|-------------------------------------------------|-----------------------------------------------------|
-| GET    | `/transactions/transfers/suggestions`           | 候选转账配对列表（评分 ≥ 50 但未自动配对）         |
-| POST   | `/transactions/{id}/mark-transfer`              | 用户手动确认配对（body schema 见下）                |
+| Method | Path                                                              | 说明                                                         |
+|--------|-------------------------------------------------------------------|--------------------------------------------------------------|
+| GET    | `/transactions/transfers/unpaired`                                | 未配对单边转账列表（排除内部储蓄分类 + counter_account_hint 行） |
+| GET    | `/transactions/transfers/{id}/counter-leg-candidates`             | 模糊匹配对手腿候选（仅其他账户、同币、金额±容差、日期±窗口）  |
+| GET    | `/transactions/transfers/suggestions`                             | 自动评分的候选配对（评分 50–74，未自动配对）                 |
+| POST   | `/transactions/{id}/mark-transfer`                                | 用户手动确认配对（body schema 见下）                         |
+| POST   | `/transactions/{id}/unbind-counter`                               | 解绑对手（合成腿软删，真实腿清指针）                         |
 
-**`mark-transfer` 请求 body**（Sprint 0 FIX-1）：
+**`GET /transfers/unpaired`** 过滤规则：`type='transfer'`、`counter_account_id IS NULL`、非子账户、`paired_with_tx_id IS NULL`、非 `counter_account_hint`（快照账户单边转账不再出现在此列表）、非内部储蓄分类。
+
+**`GET /transfers/{id}/counter-leg-candidates`** 查询参数：
+- `window_days` (int, 默认 10, 最大 30) — 日期窗口天数
+- `amount_tolerance` (str 数字, 默认 `"0.01"`) — 允许金额差上限
+
+每条候选返回字段：`transaction_id`, `account_id`, `account_name`, `occurred_at`, `amount`, `amount_diff`（带符号）, `currency`, `type`, `description`, `raw_description`, `days_diff`, `status`（`free` 或 `synthetic_bound`）。
+
+**`mark-transfer` 请求 body**（`MarkTransferIn`）：
 ```json
 {
-  "counter_transaction_id": 42,           // optional
-  "transfer_direction": "out"             // "in" | "out"，单边场景必填
+  "counter_transaction_id": 42,       // 可选；给定时双腿配对
+  "counter_account_id": 3,            // 可选；给定时合成镜像腿
+  "transfer_direction": "out",        // "in" | "out"，单边/counter_account_id 场景必填
+  "category_id": 7,                   // 可选；必须是 kind='transfer' 分类
+  "amount_tolerance": "0.01"          // 可选；双腿配对时允许金额差
 }
 ```
-- 双边（counter_transaction_id 给定）：调用 `pair_transactions()` 同时给两腿打 `metadata.transfer_direction`，`v_account_balance` 视图据此正负折算余额
-- 单边（无 counter）：仅当腿 `type = transfer` + 写 metadata.transfer_direction
-- 缺 direction → 422 INVALID_INPUT
+- `counter_transaction_id` 给定 → 双腿配对（`pair_transactions()`）；要求同币种、不同账户、金额在 tolerance 内
+- `counter_account_id` 给定（无 counter_transaction_id） → 若对手账户是快照型（`brokerage`/`crypto_wallet`/`exchange`），**降级为单边**（存 `counter_account_hint`，不合成镜像，防持仓余额双算）；否则合成镜像腿
+- 两者都不给 → 纯单边，`transfer_direction` 必填
+- 缺 direction 且无法推断 → 422 INVALID_INPUT
 
 **评分算法（`transfer_matcher`）**：
 - 金额相同 +50；±0.5% 浮动 +30
@@ -202,34 +219,54 @@
 
 ## 5. PDF 账单导入 Statements
 
-| Method | Path                              | 说明                                           |
-|--------|-----------------------------------|------------------------------------------------|
-| POST   | `/statements/upload`              | 上传 PDF (multipart/form-data, field=`file`, query `?account_id=N`) |
-| GET    | `/statements`                     | 历史导入批次列表                               |
-| GET    | `/statements/{id}`                | 批次详情 (含已生成的 transactions)             |
-| POST   | `/statements/{id}/reparse`        | 触发重新解析 (用于解析器升级后)                |
-| POST   | `/statements/{id}/confirm`        | 确认入账 (将 pending 交易转为正式)             |
-| DELETE | `/statements/{id}`                | 撤销整个批次的所有 transactions                |
+> **2026-06 重要改造**：上传流程改为「预览后入库」。`POST /statements/upload` 现在**只解析不入库**，返回全量 `parsed_preview`，交易记录要到 `POST /statements/{id}/commit` 才真正写入账本。
 
-**支持银行**：AMEX-DE / N26 / Revolut / TFBank / Advanzia (5 家欧洲银行)
+| Method | Path                              | 说明                                                                              |
+|--------|-----------------------------------|-----------------------------------------------------------------------------------|
+| POST   | `/statements/upload`              | 上传并解析 PDF（只解析，不插交易）；落 `status='awaiting_review'`，返回全量 `parsed_preview` |
+| GET    | `/statements`                     | 历史导入批次列表；支持 `?offset=N&limit=N&status=X`；响应 `meta.total`           |
+| GET    | `/statements/{id}`                | 批次详情；`awaiting_review` 状态时**重解析**返回预览（不从 DB 读交易）            |
+| POST   | `/statements/{id}/commit`         | 确认入库：重解析 PDF + 插入交易 + 跑 ingestion；`?account_id=N`（可选，缺省用上传时候选账户） |
+| POST   | `/statements/{id}/confirm`        | 将已入库的 pending 交易翻为已确认（仅已分类行；未分类行留在 inbox）；向后兼容保留 |
+| POST   | `/statements/{id}/reparse`        | 触发重新解析（用于解析器升级；需 account_id 已绑定）                              |
+| DELETE | `/statements/{id}`                | 取消 / 撤销：暂存期删除 import 记录 + PDF 文件（无痕可重传）；已入库则软删所有交易 |
+
+**工作流（新）**：
+1. `POST /upload` → `status=awaiting_review`，响应携带 `parsed_preview`（全部解析结果）
+2. 用户在 UI 确认预览 → `POST /{id}/commit?account_id=N` → 交易入库，`status=success`
+3. 用户想取消 → `DELETE /{id}` → 记录和 PDF 文件一并删除，SHA-256 去重哈希释放，可重传
+
+**`POST /statements/upload` 查询参数**：
+- `account_id` (int, 可选) — 指定目标账户；省略时自动推断（唯一活跃账户 / 机构名匹配）
+- `bank_format` (str, 可选) — 手动指定银行格式（`n26`/`revolut`/`tfbank`/`advanzia`/`amex_de`/其他）；省略则自动检测
+
+**`PdfImportOut` 字段**：
+- `parsed_preview: list[ParsedPreviewTx]` — 解析输出的全部行（`awaiting_review` 状态）；每行含 `occurred_at`, `amount`, `currency`, `type`, `description`
+- `preview: list[TransactionOut]` — 已入库的交易（前 5 条，`success` 状态）
+- `status`: `pending` | `parsing` | `awaiting_review` | `awaiting_account` | `success` | `failed`
+
+**支持银行**：AMEX-DE / N26 / Revolut / TFBank / Advanzia（5 家欧洲银行）
 - Revolut 使用 column-aware 解析器（按 Money out / Money in 列定位）
-- 其他使用 text-regex 解析器
-- 上传时 SHA-256 哈希去重
+- 银行检测按最早出现位置，防止跨行互转账单误判
+- 上传时 SHA-256 哈希去重（409 CONFLICT）
 
-**上传响应示例**
+**上传响应示例（awaiting_review）**：
 ```json
 {
   "id": 7,
   "filename": "statement_2026_04.pdf",
   "file_hash": "abc...",
   "file_size": 124567,
-  "detected_bank": "<bank-key>",
-  "parser_version": "<bank-key>-v1",
+  "detected_bank": "n26",
+  "parser_version": "n26-v1",
   "account_id": 1,
   "statement_period": "2026-04",
   "transactions_count": 42,
-  "status": "success",
-  "preview": [ /* 前 5 条 TransactionOut */ ],
+  "status": "awaiting_review",
+  "parsed_preview": [
+    { "occurred_at": "2026-04-01T00:00:00Z", "amount": "12.50", "currency": "EUR", "type": "expense", "description": "GROCERY STORE" }
+  ],
+  "preview": [],
   "created_at": "2026-04-29T08:00:00Z",
   "updated_at": "2026-04-29T08:00:00Z"
 }
@@ -479,7 +516,63 @@
 
 ---
 
-## 13. LLM 智能分类 LLM Classification (P1-1)
+## 13. 券商同步 Broker Sync (IBKR Flex + Trade Republic)
+
+券商账户（`type=brokerage`）持仓快照与估值。与 crypto/exchange 同表 `asset_holdings`，共用 `POST /accounts/{id}/sync` orchestrator。Flex token / TR cookie session 以 AES-256-GCM 加密存入 `broker_connections`（需 `FINANCE_BANK_ENCRYPTION_KEY`）；secrets 绝不回显。
+
+### IBKR Flex 连接（静态 token）
+
+| Method | Path                                   | 说明                                                      |
+|--------|----------------------------------------|-----------------------------------------------------------|
+| GET    | `/accounts/{id}/broker-connection`     | 获取连接状态（未设时 `data=null`；`credentials_stale=true` 表示加密密钥已轮换需重填）|
+| PUT    | `/accounts/{id}/broker-connection`     | IBKR：创建或覆盖（body: `provider`+`token`+`query_id`；token 加密入库）|
+| DELETE | `/accounts/{id}/broker-connection`     | 删除连接                                                  |
+
+**`PUT /accounts/{id}/broker-connection` 请求**（`BrokerConnectionIn`）：
+```json
+{ "provider": "ibkr", "token": "<Flex Web Service token>", "query_id": "<数字 Query ID>" }
+```
+- `provider` 当前仅支持 `"ibkr"`（TR 走下方专属端点）
+- `query_id` 为 IBKR Client Portal 创建的 Activity Flex Query ID（只需勾选 Open Positions section，Format=XML）
+- 未配置 `FINANCE_BANK_ENCRYPTION_KEY` 时返回 400
+
+**`BrokerConnectionOut` 字段**：`id`, `provider`, `query_id`（TR 为 `null`）, `has_token` (bool), `credentials_stale` (bool), `last_synced_at`, `last_sync_status`, `last_sync_error`。
+
+> IBKR 为**收盘快照（EOD）**：`markPrice` 原币写入 `market_prices(source='ibkr')`，不调 CoinGecko。
+
+### Trade Republic 两步登录（交互式）
+
+TR 无官方 API，使用社区逆向库 `pytr`（仅只读）。登录需两步：
+
+| Method | Path                                                    | 说明                                                                  |
+|--------|---------------------------------------------------------|-----------------------------------------------------------------------|
+| POST   | `/accounts/{id}/broker-connection/tr/connect`           | 第一步：手机号 + PIN → TR 发送 4 位验证码；进程内暂存 pending session |
+| POST   | `/accounts/{id}/broker-connection/tr/verify`            | 第二步：4 位验证码 → 加密 cookie session 写入 `broker_connections`    |
+
+**`tr/connect` 请求**（`TRConnectIn`）：
+```json
+{ "phone": "+4917612345678", "pin": "1234" }
+```
+- 手机号自动格式化（去空格/连字符，`00→+`）
+- 成功响应（`TRConnectOut`）：`{ "countdown_seconds": 120, "message": "验证码已发送..." }`
+- WAF 防护：内部走 Playwright（无头 Chromium），需在服务器提前执行 `python -m playwright install chromium`
+
+**`tr/verify` 请求**（`TRVerifyIn`）：
+```json
+{ "code": "1234" }
+```
+- 成功后返回 `BrokerConnectionOut`（`provider="traderepublic"`, `query_id=null`）
+- Session 过期需重新调用 `tr/connect` + `tr/verify`（不支持自动续期）
+
+### 同步触发（共用）
+
+`POST /accounts/{id}/sync` 对 `brokerage` 类型账户也适用（orchestrator 按 `provider` dispatch：IBKR 走 Flex token，TR 走 cookie session）。同步完成后持仓写入 `asset_holdings`，价格写入 `market_prices`。
+
+> `GET /accounts/balances` 对 brokerage 账户返回 `compute_brokerage_value_per_account` 折算到 `BASE_CURRENCY` 的估值（EUR/USD→CNY via `services/valuation/fx.py`）。
+
+---
+
+## 14. LLM 智能分类 LLM Classification (P1-1)
 
 运行时配置存于 `app_settings` KV 表，不需要重启进程即可调整。
 
@@ -510,7 +603,7 @@
 
 ---
 
-## 14. 分类知识库 Categorization Notes (P1-1)
+## 15. 分类知识库 Categorization Notes (P1-1)
 
 供 LLM 管道使用的 few-shot 上下文条目。大多数条目由 inbox confirm + `user_note` 自动创建，也可在 Settings → 知识库 UI 直接编辑。
 
@@ -525,7 +618,7 @@
 
 ---
 
-## 15. Notion 同步 Notion Sync (P2-3)
+## 16. Notion 同步 Notion Sync (P2-3)
 
 | Method | Path                              | 说明                                       |
 |--------|-----------------------------------|--------------------------------------------|
@@ -540,7 +633,7 @@
 
 ---
 
-## 16. MCP Tools (非 HTTP, stdio)
+## 17. MCP Tools (非 HTTP, stdio)
 
 由 `mcp-server/` 进程暴露，Agent 可调用以下 tool（共 7 个，已 6 轮回归测试 9 bug 全修）：
 
