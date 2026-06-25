@@ -66,6 +66,31 @@ _NOT_SUBACCOUNT = (
     ") = 0"
 )
 
+
+def paired_dedup_predicate(table: str = "transactions") -> str:
+    """A SQL predicate that keeps only ONE leg of each transfer pair.
+
+    A transfer is ONE economic event recorded as TWO ``type='transfer'``
+    rows (the real leg + its paired/synthetic mirror), both carrying the
+    same category — so any ``SUM`` over transfers double-counts unless we
+    drop one leg. We drop a leg when its paired partner is still live AND
+    has a smaller id; non-transfers / single-leg transfers have no live
+    smaller-id partner so they're untouched.
+
+    ``table`` is the alias/name of the OUTER ``transactions`` row in the
+    query this predicate is spliced into (``transactions`` when unaliased,
+    or ``t`` when the query aliases it). Single source of truth so every
+    cashflow entrypoint (monthly / recompute / by-category / snapshot /
+    MCP) dedups identically — review V7 §P1-3 / §P2-4.
+    """
+    return (
+        "NOT EXISTS ("
+        "SELECT 1 FROM transactions p "
+        f"WHERE p.deleted_at IS NULL AND p.id < {table}.id "
+        f"AND {table}.metadata_json IS NOT NULL AND json_valid({table}.metadata_json) "
+        f"AND p.id = json_extract({table}.metadata_json, '$.paired_with_tx_id'))"
+    )
+
 _RECOMPUTE_SQL = text(f"""
     INSERT OR REPLACE INTO cash_flow_snapshots
         (period_year, period_month, base_currency,
@@ -89,19 +114,10 @@ _RECOMPUTE_SQL = text(f"""
       AND t.is_pending = 0
       AND CAST(substr(t.occurred_at, 1, 4) AS INTEGER) = :year
       AND CAST(substr(t.occurred_at, 6, 2) AS INTEGER) = :month
-      -- A transfer is ONE event recorded as TWO legs; both are type='transfer'
-      -- so summing both double-counts transfer_total. Drop a leg when its
-      -- paired partner is live AND has a smaller id (keeps one leg per pair).
-      -- Only paired transfers match, so income/expense/adjustment/savings are
-      -- untouched. Mirrors the dedup in api/v1/cashflow.py::cashflow_by_category.
-      AND NOT EXISTS (
-          SELECT 1 FROM transactions p
-          WHERE p.deleted_at IS NULL
-            AND p.id < t.id
-            AND t.metadata_json IS NOT NULL
-            AND json_valid(t.metadata_json)
-            AND p.id = json_extract(t.metadata_json, '$.paired_with_tx_id')
-      )
+      -- Keep one leg per transfer pair (see paired_dedup_predicate). Only
+      -- paired transfers match, so income/expense/adjustment/savings are
+      -- untouched.
+      AND {paired_dedup_predicate("t")}
 """)
 
 

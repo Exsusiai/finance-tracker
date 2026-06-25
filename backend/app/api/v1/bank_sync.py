@@ -27,6 +27,7 @@ from app.schemas.bank_sync import (
     ConnectionCreateResult,
     GoCardlessSetupRequest,
     GoCardlessSetupResponse,
+    InstitutionListRequest,
     InstitutionOut,
     SyncResultOut,
 )
@@ -67,22 +68,24 @@ async def setup_gocardless(
 # ─── Institutions ─────────────────────────────────────────────────────────
 
 
-@router.get("/institutions", response_model=ApiSuccess[list[InstitutionOut]])
+@router.post("/institutions", response_model=ApiSuccess[list[InstitutionOut]])
 async def list_institutions(
-    country: str = Query(..., min_length=2, max_length=2, description="ISO 3166-1 alpha-2"),
-    encrypted_credentials: str = Query(..., description="Encrypted GoCardless credentials"),
+    body: InstitutionListRequest,
     db: AsyncSession = Depends(get_db),
     _auth: None = Depends(require_auth),
 ):
     """List available financial institutions for a country.
 
     Requires encrypted GoCardless credentials (from /setup endpoint).
+
+    V7-P1-7: POST (credentials in body), not GET — keeps the encrypted
+    credential blob out of query strings / logs / browser history.
     """
     engine = BankSyncEngine(db)
     institutions = await engine.list_institutions(
         provider_name="gocardless",
-        encrypted_creds=encrypted_credentials,
-        country=country,
+        encrypted_creds=body.encrypted_credentials,
+        country=body.country,
     )
     return ApiSuccess(data=[InstitutionOut(**inst) for inst in institutions])
 
@@ -103,11 +106,13 @@ async def create_connection(
     """
     engine = BankSyncEngine(db)
 
-    # Get institution info for the connection record
+    # Get institution info for the connection record. V7-P1-7: use the
+    # explicit `country` field — previously `redirect_url` was passed here,
+    # which made the institution lookup fail / return wrong metadata.
     institutions = await engine.list_institutions(
         provider_name=body.provider,
         encrypted_creds=body.encrypted_credentials,
-        country=body.redirect_url,  # We need country — get from institution
+        country=body.country,
     )
 
     # Create requisition
@@ -123,14 +128,20 @@ async def create_connection(
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
 
-    # Store connection in DB
-    # Try to find institution name from the requisition
+    # Store connection in DB. V8-P2-3: persist the real country (body.country)
+    # and, when the institution lookup returned a match, its name / bic / logo —
+    # instead of hardcoding DE/EUR, which mislabelled every non-German bank.
+    matched = next(
+        (i for i in institutions if i.get("id") == body.institution_id), None
+    )
     conn = BankConnection(
         provider=body.provider,
         institution_id=body.institution_id,
-        institution_name=body.institution_id,  # Will update after callback
-        institution_country="DE",  # Default, update after callback
-        currency="EUR",  # Default, update after callback
+        institution_name=(matched or {}).get("name") or body.institution_id,
+        institution_bic=(matched or {}).get("bic"),
+        institution_country=(matched or {}).get("country") or body.country,
+        institution_logo=(matched or {}).get("logo_url"),
+        currency="EUR",  # GoCardless reports balances per-account; refined after callback
         gc_requisition_id=result["requisition_id"],
         gc_agreement_id=result.get("agreement_id"),
         encrypted_creds=result.get("updated_credentials") or body.encrypted_credentials,

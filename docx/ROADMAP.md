@@ -226,6 +226,49 @@ V1 21 项问题修复进度：
 
 ---
 
+## ✅ Sprint 9 — Code Review V7 资金口径 / 安全修复（2026-06-25）
+
+按 `code review/review V7.md` 逐条核实 + 修复，全套 **360 passed**。已修：
+
+| 编号 | 内容 | 状态 |
+|---|---|---|
+| **V7-P1-1** | 券商 `/accounts/balances` 折算到账户币种（非 base 币种误标） | ✅ |
+| **V7-P1-2** | 快照账户禁初始/调整余额（前端隐藏 + 后端 400 + net_worth cash 排除） | ✅ |
+| **V7-P1-3** | paired-transfer 去重收敛 `paired_dedup_predicate`，REST monthly/recompute/by-category/snapshot + MCP live `get_cashflow` 一致（MCP snapshot recompute 在 V8-P1-4 补齐） | ✅ |
+| **V7-P1-4** | ingestion 去掉中途 commit，改 `after_commit` 钩子派发 LLM（恢复原子性） | ✅ |
+| **V7-P1-5** | AccountUpdate 校验最终 `(type,currency)` 守住 crypto/exchange⇒USDT | ✅ |
+| **V7-P1-7** | GoCardless `/institutions` 改 POST（凭据出 query string）+ `country` 显式字段 | ✅ |
+| **V7-P1-8** | Notion 资产摘要余额改读 `v_account_balance` + `include_in_total` | ✅ |
+| **V7-P1-9** | `asset_holdings.source` 列（迁移 `c3d4e5f6a7b8`）+ 券商重置仅清同 source | ✅ |
+| **V7-P2-1** | 券商资产同 symbol 不同 conid 不合并（contract=conid 消歧） | ✅ |
+| **V7-P2-2/3** | Gemini abstain 日志不写原始输出；TR 登录失败清临时 cookie | ✅ |
+
+**延后（结构治理，需独立投入，未在本轮做）**：
+
+| 编号 | 内容 | 原因 |
+|---|---|---|
+| **V7-P1-6** | MCP PDF 导入完整 ingestion 镜像（外币 FX 折算 / 完整跨账户 transfer matcher / outbox / audit 字段） | 应抽出 MCP 可复用的同步 ingestion service 或改调后端 API；改动面大，单独排期 |
+| **V7-P2-4** | 现金流公式（amount/subaccount/paired 谓词）完全统一到单一 SQL builder | P1-3 已统一 paired 谓词；amount/subaccount 谓词仍分散，留待整体重构 |
+| **V7-P2-5** | `main.py` lifespan 拆分（schema/data migration 移出 → Alembic / maintenance command） | 启动副作用治理，独立任务 |
+| **V7-P2-6** | 大文件拆分（assets page 1505 / transactions API 1543 / MCP server 1248 / main.py） | 纯结构重构，需充分回归 |
+
+## ✅ Sprint 10 — Code Review V8 残留缺口修复（2026-06-25）
+
+V8 复审 V7 修复，发现并修复以下残留（全套 **365 passed**）：
+
+| 编号 | 内容 | 状态 |
+|---|---|---|
+| **V8-P1-1** | 券商同步**回收**历史已同步持仓（migration 后默认 `manual` 的旧行）→ 卖出仓能再次被清零 | ✅ |
+| **V8-P1-2** | 多 provider 同账户覆盖：实际不可达（broker-connection API 一账户一连接），改正过度表述注释 | ✅ |
+| **V8-P1-3** | 快照账户彻底无现金腿：create 拒非零初始余额 + `POST /transactions` 拒落快照账户 + `/accounts/balances` 忽略 ledger | ✅ |
+| **V8-P1-4** | MCP `_recompute_snapshot_sql` 接入 paired dedup（与 REST 一致） | ✅ |
+| **V8-P2-1** | `after_commit` 增 `after_rollback` 取消，rolled-back 行不入 LLM 队列 | ✅ |
+| **V8-P2-2** | `_mark_failed` 用独立 session 提交失败状态，不被外层 rollback 吞 | ✅ |
+| **V8-P2-3** | GoCardless 落库用真实 country + 匹配 institution 元数据（不再写死 DE/EUR） | ✅ |
+| **V8-P2-4** | MCP PDF 完整 ingestion 镜像 | 维持延后（README/API 已注明） |
+
+---
+
 ## 修订后的执行序列（2026-06-25 更新）
 
 | 顺序 | 阶段 | 估时 | 状态 |
@@ -256,6 +299,8 @@ V1 21 项问题修复进度：
 | 高 | **TR UAT**（真实账户验证） | 需用户提供 TR 手机号+PIN 做一次完整登录+同步测试 |
 | 中 | **盘中实时券商行情** | IBKR 需 Pro 账户 + 常驻 Client Portal Gateway；TR 无官方实时 API |
 | 中 | **券商交易流水导入**（IBKR Flex Trades section / TR 未来 API） | 目前只有持仓快照，无历史成交记录 |
+| 中 | **V7-P1-6** MCP PDF 完整 ingestion 镜像 | 抽共享同步 ingestion service 或改调 REST，补外币 FX / 完整 transfer matcher / audit |
+| 中 | **V7-P2-5 / P2-6** 结构治理 | lifespan 迁移逻辑外移 + 大文件拆分（assets page / transactions API / MCP server） |
 | 低 | **账单期缺口检测** | 检测导入序列中的月份空缺，提醒用户补传 |
 | 低 | **P1-2** GoCardless 银行直连联调 | 依赖用户决策 + GoCardless 账号 |
 | 低 | **P1-3** Notion 同步联调 | 依赖 integration token + 库结构决策 |

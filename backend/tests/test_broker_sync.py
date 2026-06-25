@@ -330,6 +330,102 @@ class TestBrokerUpsert:
         assert len(assets) == 1, "must reuse the manual MSFT row, not duplicate"
         assert assets[0].data_source_id == "777777"
 
+    async def test_resync_leaves_manual_holding_untouched(self, db: AsyncSession):
+        """V7-P1-9: a manually-added holding (source='manual') in a connected
+        brokerage account must survive a broker re-sync — the reset only zeroes
+        holdings owned by the syncing provider."""
+        acc = await _make_brokerage_account(db, "IBKR-ManualKeep")
+        gold = Asset(symbol="GLDBAR", name="Gold Bar", asset_class="gold",
+                     currency="CNY", chain="", contract="")
+        db.add(gold)
+        await db.flush()
+        db.add(AssetHolding(
+            account_id=acc.id, asset_id=gold.id, chain="", quantity=Decimal("3"),
+            is_active=True, source="manual",
+            created_at=_utcnow(), updated_at=_utcnow(),
+        ))
+        await db.commit()
+
+        # Broker sync brings a totally different position; GLDBAR is absent.
+        await apply_broker_snapshot(db, acc.id, [
+            BrokerPosition(
+                symbol="SAP", conid="111111", asset_category="STK", currency="EUR",
+                quantity=Decimal("40"), mark_price=Decimal("181.00"),
+                avg_cost=Decimal("160.00"), description="SAP SE",
+            ),
+        ])
+        await db.commit()
+
+        held = (await db.execute(
+            select(AssetHolding).where(
+                AssetHolding.account_id == acc.id, AssetHolding.asset_id == gold.id
+            )
+        )).scalar_one()
+        assert held.quantity == Decimal("3"), "manual holding was wiped by broker sync"
+        assert held.is_active is True
+
+    async def test_resync_reclaims_and_zeroes_legacy_synced_holding(self, db: AsyncSession):
+        """V8-P1-1: a holding synced before the `source` column existed defaults
+        to source='manual'. If the position is later sold (absent from the next
+        fetch), the reclaim step must adopt it (last_synced_at set + asset owned
+        by this provider) so the reset can zero it — otherwise a sold position
+        is counted forever."""
+        acc = await _make_brokerage_account(db, "IBKR-LegacyReclaim")
+        legacy_asset = Asset(symbol="LEGCY", name="Legacy Co", asset_class="us_stock",
+                             currency="USD", data_source="ibkr", data_source_id="LEG1",
+                             chain="", contract="")
+        db.add(legacy_asset)
+        await db.flush()
+        db.add(AssetHolding(
+            account_id=acc.id, asset_id=legacy_asset.id, chain="", quantity=Decimal("5"),
+            is_active=True, source="manual", last_synced_at=_utcnow(),
+            created_at=_utcnow(), updated_at=_utcnow(),
+        ))
+        await db.commit()
+
+        # Next sync: the legacy position is gone (different position returned).
+        await apply_broker_snapshot(db, acc.id, [
+            BrokerPosition(
+                symbol="SAP", conid="111111", asset_category="STK", currency="EUR",
+                quantity=Decimal("40"), mark_price=Decimal("181.00"),
+                avg_cost=Decimal("160.00"), description="SAP SE",
+            ),
+        ])
+        await db.commit()
+
+        held = (await db.execute(
+            select(AssetHolding).where(
+                AssetHolding.account_id == acc.id, AssetHolding.asset_id == legacy_asset.id
+            )
+        )).scalar_one()
+        assert held.quantity == Decimal("0"), "legacy synced holding not zeroed after sale"
+        assert held.is_active is False
+
+    async def test_same_symbol_different_conid_does_not_merge(self, db: AsyncSession):
+        """V7-P2-1: two securities sharing a ticker but with different conids
+        must not collapse into one asset (which would let their prices overwrite
+        each other)."""
+        existing = Asset(symbol="DUPSYM", name="First Corp", asset_class="us_stock",
+                         currency="USD", data_source="ibkr", data_source_id="AAA",
+                         chain="", contract="")
+        db.add(existing)
+        await db.flush()
+        acc = await _make_brokerage_account(db, "IBKR-Conflict")
+        await apply_broker_snapshot(db, acc.id, [
+            BrokerPosition(
+                symbol="DUPSYM", conid="BBB", asset_category="STK", currency="USD",
+                quantity=Decimal("2"), mark_price=Decimal("50.00"),
+                avg_cost=Decimal("40.00"), description="Second Corp",
+            ),
+        ])
+        await db.commit()
+
+        rows = (await db.execute(
+            select(Asset).where(Asset.symbol == "DUPSYM")
+        )).scalars().all()
+        ids = {a.data_source_id for a in rows}
+        assert ids == {"AAA", "BBB"}, f"securities merged instead of disambiguating: {ids}"
+
 
 # ─── orchestrator brokerage branch ───────────────────────────────────────────
 

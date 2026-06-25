@@ -43,8 +43,13 @@ async def monthly_cashflow(
 
     Sprint 4 FIX-19 (§V3-P0-1): foreign-currency rows with no FX data are
     excluded rather than silently added at face value.
+
+    Review V7 §P1-3: a transfer pair's second leg is dropped via
+    ``paired_dedup_predicate`` so monthly transfer volume matches the
+    snapshot / by-category numbers (previously it double-counted).
     """
-    stmt = text("""
+    from app.services.cashflow.engine import paired_dedup_predicate
+    stmt = text(f"""
         SELECT
             substr(occurred_at, 1, 7) AS period,
             SUM(CASE WHEN type = 'income'  THEN ABS(CASE WHEN currency = :base_currency THEN amount WHEN base_amount IS NOT NULL THEN base_amount WHEN fx_rate_to_base IS NOT NULL THEN amount * fx_rate_to_base ELSE NULL END) ELSE 0 END) AS income,
@@ -61,6 +66,7 @@ async def monthly_cashflow(
           AND is_pending = 0
           AND (:start IS NULL OR substr(occurred_at, 1, 7) >= :start)
           AND (:end IS NULL OR substr(occurred_at, 1, 7) <= :end)
+          AND {paired_dedup_predicate("transactions")}
         GROUP BY period
         ORDER BY period DESC
     """)
@@ -71,7 +77,7 @@ async def monthly_cashflow(
     for r in rows:
         period = r[0]
 
-        cat_stmt = text("""
+        cat_stmt = text(f"""
             SELECT
                 c.name,
                 c.kind,
@@ -83,6 +89,7 @@ async def monthly_cashflow(
               AND t.is_pending = 0
               AND substr(t.occurred_at, 1, 7) = :period
               AND t.category_id IS NOT NULL
+              AND {paired_dedup_predicate("t")}
             GROUP BY t.category_id
             ORDER BY total DESC
         """)
@@ -120,7 +127,7 @@ async def cashflow_by_category(
     engine (CASE: base currency → amount; FX present → fold; else NULL),
     so `/by-category` and `/monthly` agree exactly.
     """
-    from app.services.cashflow.engine import _AMOUNT_BASE_EXPR
+    from app.services.cashflow.engine import _AMOUNT_BASE_EXPR, paired_dedup_predicate
     stmt = text(f"""
         SELECT
             c.id,
@@ -139,20 +146,9 @@ async def cashflow_by_category(
         WHERE t.deleted_at IS NULL
           AND t.is_pending = 0
           AND substr(t.occurred_at, 1, 7) = :period
-          -- A transfer is ONE economic event recorded as TWO legs (the real
-          -- leg + its paired/synthetic mirror), and both carry the same
-          -- category — so summing both double-counts it in the breakdown.
-          -- Keep only one leg per pair: drop a leg when its paired partner is
-          -- still live AND has a smaller id. Non-transfers / single-leg
-          -- transfers have no live smaller-id partner, so they're untouched.
-          AND NOT EXISTS (
-              SELECT 1 FROM transactions p
-              WHERE p.deleted_at IS NULL
-                AND p.id < t.id
-                AND t.metadata_json IS NOT NULL
-                AND json_valid(t.metadata_json)
-                AND p.id = json_extract(t.metadata_json, '$.paired_with_tx_id')
-          )
+          -- Keep only one leg per transfer pair (see paired_dedup_predicate),
+          -- otherwise the 借还钱 category double-counts the moved amount.
+          AND {paired_dedup_predicate("t")}
         GROUP BY t.category_id
         ORDER BY total DESC
     """)
@@ -248,6 +244,8 @@ async def recompute_cashflow(
     comparison on ``substr(occurred_at, 1, 7)`` instead of independent
     year/month comparisons that broke cross-year queries.
     """
+    from app.services.cashflow.engine import paired_dedup_predicate
+
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     base_currency = settings.base_currency
 
@@ -259,7 +257,7 @@ async def recompute_cashflow(
     if effective_to is None and end_year is not None and end_month is not None:
         effective_to = f"{end_year:04d}-{end_month:02d}"
 
-    stmt = text("""
+    stmt = text(f"""
         INSERT OR REPLACE INTO cash_flow_snapshots
             (period_year, period_month, base_currency, income_total, expense_total,
              transfer_total, savings_total, other_total, by_category_json, computed_at)
@@ -280,6 +278,9 @@ async def recompute_cashflow(
         WHERE deleted_at IS NULL AND is_pending = 0
           AND (:from_period IS NULL OR substr(occurred_at, 1, 7) >= :from_period)
           AND (:to_period   IS NULL OR substr(occurred_at, 1, 7) <= :to_period)
+          -- Keep one leg per transfer pair so transfer_total here matches the
+          -- snapshot service / monthly endpoint (review V7 §P1-3).
+          AND {paired_dedup_predicate("transactions")}
         GROUP BY substr(occurred_at, 1, 7)
     """)
 

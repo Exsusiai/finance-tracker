@@ -83,17 +83,23 @@ async def compute_holdings_value_per_account(
 async def compute_brokerage_value_per_account(
     db: AsyncSession,
     account_ids: Iterable[int],
-    base_currency: str,
 ) -> dict[int, Decimal]:
-    """Return ``{account_id → base-currency value}`` for brokerage holdings.
+    """Return ``{account_id → value in that account's OWN currency}`` for
+    brokerage holdings.
 
     Unlike the crypto/CEX path (everything quoted in USDT), brokerage
-    positions are priced in their native currency (USD / EUR / …), so each
-    holding's value is converted to ``base_currency`` via the shared FX
-    helper. Holdings whose currency has no FX path are skipped (omitted
-    from the sum) — the same lenient behaviour as net_worth.
+    positions are priced in their native currency (USD / EUR / …) and a
+    single IBKR/TR account can hold positions in several currencies. We
+    convert each holding's market value into the *account's declared
+    currency* so the value can be returned with ``currency=account.currency``
+    honestly — review V7 §P1-1 (previously this returned base-currency value
+    but ``/accounts/balances`` labelled it as the account currency and the
+    frontend re-converted it, doubling the error).
+
+    Holdings whose currency has no FX path to the account currency are
+    skipped (omitted from the sum) — the same lenient behaviour as net_worth.
     """
-    from app.models import Asset, AssetHolding, MarketPrice
+    from app.models import Account, Asset, AssetHolding, MarketPrice
     from app.services.valuation.fx import convert_to_base
 
     ids = list(account_ids)
@@ -102,8 +108,9 @@ async def compute_brokerage_value_per_account(
 
     rows = (
         await db.execute(
-            select(AssetHolding, Asset)
+            select(AssetHolding, Asset, Account.currency)
             .join(Asset, Asset.id == AssetHolding.asset_id)
+            .join(Account, Account.id == AssetHolding.account_id)
             .where(
                 AssetHolding.account_id.in_(ids),
                 AssetHolding.is_active == True,  # noqa: E712
@@ -112,7 +119,7 @@ async def compute_brokerage_value_per_account(
     ).all()
 
     out: dict[int, Decimal] = {}
-    for holding, asset in rows:
+    for holding, asset, account_currency in rows:
         latest = (
             await db.execute(
                 select(MarketPrice)
@@ -124,7 +131,9 @@ async def compute_brokerage_value_per_account(
         if latest is None:
             continue
         original = holding.quantity * latest.price
-        converted = await convert_to_base(db, original, latest.currency, base_currency)
+        # convert_to_base is a generic from→to converter despite the name;
+        # here the "base" target is the account's own currency.
+        converted = await convert_to_base(db, original, latest.currency, account_currency)
         if converted is None:
             continue
         out[holding.account_id] = out.get(holding.account_id, Decimal("0")) + converted

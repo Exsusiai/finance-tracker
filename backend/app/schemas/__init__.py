@@ -103,6 +103,26 @@ class AccountCreate(BaseModel):
             )
         return v
 
+    @field_validator("initial_balance", mode="after")
+    @classmethod
+    def _snapshot_initial_balance_zero(cls, v: str, info) -> str:
+        """V8-P1-3: snapshot accounts (brokerage / crypto_wallet / exchange)
+        are valued from holdings, not a cash ledger. A non-zero initial_balance
+        would be added on top of the holdings value in /accounts/balances.
+        Reject it at the API edge (the UI already hides the field)."""
+        t = (info.data or {}).get("type")
+        if t in ("brokerage", "crypto_wallet", "exchange"):
+            try:
+                amount = Decimal(v or "0")
+            except ArithmeticError as e:
+                raise ValueError(f"invalid initial_balance: {v!r}") from e
+            if amount != 0:
+                raise ValueError(
+                    f"{t} accounts are valued from holdings — initial_balance "
+                    "must be 0 (no cash ledger)."
+                )
+        return v
+
 
 class AccountUpdate(BaseModel):
     name: str | None = None

@@ -298,15 +298,23 @@ class NotionSyncService:
             stats.errors.append("Asset summary page ID not configured")
             return stats
 
-        from sqlalchemy import select, func
-        from app.models import AssetHolding, Asset, MarketPrice, Account
+        from sqlalchemy import select, text
+        from app.models import AssetHolding, Asset, Account
 
-        # Get all holdings with asset info
+        # Get all holdings with asset info. V7-P1-8: align the opt-out/active
+        # filter with net_worth — skip soft-deleted accounts, opted-out
+        # accounts (include_in_total=0) and inactive holdings, so the Notion
+        # summary matches the in-app portfolio instead of over-reporting.
         result = await db_session.execute(
             select(AssetHolding, Asset, Account)
             .join(Asset, AssetHolding.asset_id == Asset.id)
             .join(Account, AssetHolding.account_id == Account.id)
-            .where(Account.is_active == True)
+            .where(
+                Account.is_active == True,  # noqa: E712
+                Account.deleted_at.is_(None),
+                Account.include_in_total == True,  # noqa: E712
+                AssetHolding.is_active == True,  # noqa: E712
+            )
         )
         rows = result.all()
 
@@ -350,20 +358,25 @@ class NotionSyncService:
                 lines.append(f"  - {acct}")
             lines.append("")
 
-        # Also compute total account balances
-        from app.models import Transaction
-        bal_result = await db_session.execute(
-            select(Account, Account.initial_balance + func.coalesce(func.sum(Transaction.amount), 0))
-            .outerjoin(Transaction, Transaction.account_id == Account.id)
-            .where(Account.deleted_at.is_(None), Account.is_active == True, Transaction.deleted_at.is_(None))
-            .group_by(Account.id)
-        )
+        # Also list account balances. V7-P1-8: read the canonical
+        # `v_account_balance` view (initial_balance + SUM of non-deleted
+        # transactions, with the project's sign/soft-delete semantics) instead
+        # of re-deriving `initial_balance + SUM(amount)` here — the old formula
+        # added expenses (stored as positive magnitudes) to the balance and
+        # ignored pending/transfer/FX, so Notion published wrong numbers.
+        bal_result = await db_session.execute(text("""
+            SELECT v.account_name, v.currency, v.balance
+            FROM v_account_balance v
+            JOIN accounts a ON a.id = v.account_id
+            WHERE a.deleted_at IS NULL AND a.is_active = 1 AND a.include_in_total = 1
+            ORDER BY v.account_id
+        """))
         balances = bal_result.all()
 
         if balances:
             lines.append("### 账户余额\n")
-            for account, balance in balances:
-                lines.append(f"- {account.name} ({account.currency}): {balance}")
+            for name, currency, balance in balances:
+                lines.append(f"- {name} ({currency}): {balance}")
             lines.append("")
 
         # Build Notion blocks

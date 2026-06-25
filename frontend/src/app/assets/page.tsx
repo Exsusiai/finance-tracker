@@ -1441,7 +1441,11 @@ function AccountsPanel({
                   + 添加持仓
                 </button>
               )}
-              {bal && (
+              {/* Snapshot accounts (brokerage / crypto / exchange = INVESTMENT_TYPES)
+                  are valued from holdings, not a cash ledger — "adjust balance"
+                  would inject a phantom adjustment tx that double-counts against
+                  net worth, and the backend now rejects it (review V7 §P1-2). */}
+              {bal && !INVESTMENT_TYPES.has(a.type) && (
                 <button
                   onClick={() => onAdjust(bal)}
                   className="text-xs px-2.5 py-1.5 rounded-md text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"

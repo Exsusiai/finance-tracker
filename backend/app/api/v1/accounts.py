@@ -11,7 +11,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
-from app.core.config import get_settings
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import Account, Transaction
@@ -33,6 +32,12 @@ from app.schemas import (
 
 router = APIRouter()
 _auth = Annotated[str, Depends(require_auth)]
+
+# Snapshot-class accounts (brokerage / crypto_wallet / exchange) derive their
+# worth from `asset_holdings × market_prices`, NOT from a transaction ledger.
+# They must never carry initial_balance / adjustment cash, or net_worth would
+# double-count the ledger leg on top of the holdings value (review V7 §P1-2).
+_SNAPSHOT_ACCOUNT_TYPES = frozenset({"brokerage", "crypto_wallet", "exchange"})
 
 
 def _normalize_amount(val) -> str:
@@ -130,20 +135,22 @@ async def list_all_balances(
     crypto_account_ids = [r[0] for r in rows if r[4] in ("crypto_wallet", "exchange")]
     crypto_value = await compute_holdings_value_per_account(db, crypto_account_ids)
 
-    # Brokerage accounts hold equities priced in native currency (USD/EUR/…),
-    # so their value is converted to base currency rather than read as USDT.
+    # Brokerage accounts hold equities priced in native currency (USD/EUR/…);
+    # their value is converted to each account's OWN currency so the balance
+    # below can be returned with currency=account.currency honestly (V7-P1-1).
     broker_account_ids = [r[0] for r in rows if r[4] == "brokerage"]
-    broker_value = await compute_brokerage_value_per_account(
-        db, broker_account_ids, get_settings().base_currency
-    )
+    broker_value = await compute_brokerage_value_per_account(db, broker_account_ids)
 
+    # V8-P1-3: snapshot accounts are valued ONLY from holdings; ignore their
+    # ledger balance entirely so a stray initial_balance / legacy adjustment
+    # can't inflate the displayed balance (net_worth already excludes them).
     balances = [
         BalanceOut(
             account_id=r[0],
             account_name=r[1],
             currency=r[2],
             balance=_normalize_amount(
-                Decimal(str(r[3] or 0))
+                (Decimal("0") if r[4] in _SNAPSHOT_ACCOUNT_TYPES else Decimal(str(r[3] or 0)))
                 + crypto_value.get(r[0], Decimal("0"))
                 + broker_value.get(r[0], Decimal("0"))
             ),
@@ -182,14 +189,13 @@ async def get_account_balance(
     row = (await db.execute(stmt, {"aid": account_id})).first()
     if not row:
         raise NotFoundError("Account", account_id)
-    balance = Decimal(str(row[3] or 0))
+    # V8-P1-3: snapshot accounts ignore the ledger; their worth is holdings.
+    balance = Decimal("0") if row[4] in _SNAPSHOT_ACCOUNT_TYPES else Decimal(str(row[3] or 0))
     if row[4] in ("crypto_wallet", "exchange"):
         crypto = await compute_holdings_value_per_account(db, [account_id])
         balance += crypto.get(account_id, Decimal("0"))
     elif row[4] == "brokerage":
-        broker = await compute_brokerage_value_per_account(
-            db, [account_id], get_settings().base_currency
-        )
+        broker = await compute_brokerage_value_per_account(db, [account_id])
         balance += broker.get(account_id, Decimal("0"))
     return ApiSuccess(data=BalanceOut(
         account_id=row[0], account_name=row[1], currency=row[2],
@@ -319,6 +325,21 @@ async def update_account(
             value = Decimal(value)
         setattr(account, key, value)
 
+    # V7-P1-5: AccountCreate enforces crypto/exchange ⇒ USDT, but PATCH used to
+    # skip the check, letting a client set `{type: crypto_wallet, currency: EUR}`
+    # (or flip an existing crypto account's currency) and re-open the unit
+    # mismatch in /accounts/balances. Validate the FINAL (type, currency) — not
+    # just the patched fields — so the invariant holds regardless of which side
+    # was changed.
+    if account.type in ("crypto_wallet", "exchange") and (account.currency or "").upper() != "USDT":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{account.type} accounts must use currency=USDT "
+                f"(got {account.currency!r}); crypto positions are quoted in USDT internally."
+            ),
+        )
+
     touch_updated_at(account)
     await db.flush()
 
@@ -378,6 +399,20 @@ async def adjust_balance(
     account = acct_result.scalar_one_or_none()
     if not account:
         raise NotFoundError("Account", account_id)
+
+    # V7-P1-2: snapshot accounts have no cash ledger — adjusting their
+    # "balance" would inject an adjustment transaction that net_worth then
+    # adds on top of the holdings value (double-count). Refuse it server-side
+    # so a direct API call can't bypass the hidden-in-UI button.
+    if account.type in _SNAPSHOT_ACCOUNT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{account.type} accounts are valued from holdings, not a cash "
+                "ledger — balance adjustment is not supported. Sync the account "
+                "or edit its holdings instead."
+            ),
+        )
 
     bal_stmt = text(
         "SELECT balance FROM v_account_balance WHERE account_id = :aid"

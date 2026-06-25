@@ -42,10 +42,11 @@ export const ACCOUNT_TYPE_ICONS: Record<string, string> =
 // matching needs it. Hidden for crypto / cash / brokerage / etc.
 const IBAN_TYPES = new Set(["bank", "credit_card"]);
 
-// Initial balance is user-typed only for fiat / cash / brokerage. Crypto
-// wallets and CEX accounts derive their balance from the sync pipeline, so
-// the field would be misleading there.
-const HIDE_INITIAL_BALANCE_TYPES = new Set(["crypto_wallet", "exchange"]);
+// Initial balance is user-typed only for fiat / cash accounts. Snapshot
+// accounts (brokerage / crypto_wallet / exchange) derive their worth from the
+// sync pipeline (holdings × price), so a typed cash balance would be
+// double-counted against net worth — hide it (review V7 §P1-2).
+const HIDE_INITIAL_BALANCE_TYPES = new Set(["brokerage", "crypto_wallet", "exchange"]);
 
 // Types whose holdings live in USDT (per project decision 2026-05-18).
 const CRYPTO_TYPES = new Set(["crypto_wallet", "exchange"]);

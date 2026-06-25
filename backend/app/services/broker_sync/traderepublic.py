@@ -130,10 +130,15 @@ def initiate_login(phone: str, pin: str):
         prefix="tr_cookies_", suffix=".txt", delete=False
     )
     fd.close()
-    tr = _new_api(Path(fd.name), phone=phone, pin=pin)
+    # V7-P2-3: if _new_api / initiate_weblogin raises, the request fails before
+    # the pending entry is stored, so the verify/cleanup paths never run — the
+    # temp file (possibly holding partial WAF/session cookies) would be orphaned
+    # on disk. Unlink it on any failure so nothing private lingers.
     try:
+        tr = _new_api(Path(fd.name), phone=phone, pin=pin)
         countdown = tr.initiate_weblogin()
     except Exception as exc:  # noqa: BLE001
+        Path(fd.name).unlink(missing_ok=True)
         raise BrokerSyncError(_login_error_message(exc)) from exc
     return tr, int(countdown)
 

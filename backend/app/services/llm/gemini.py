@@ -197,16 +197,19 @@ class GeminiProvider:
         out_tokens = getattr(usage, "candidates_token_count", 0) or 0
         cost = _estimate_cost(self.model, in_tokens, out_tokens)
 
-        # When the parser couldn't extract a category, log a snippet of the
-        # raw Gemini output so we can diagnose abstain vs. parse-error vs.
-        # tool-call-only responses (grounding sometimes returns search
-        # function-call rounds with no final JSON).
+        # When the parser couldn't extract a category, log enough to diagnose
+        # abstain vs. parse-error vs. tool-call-only responses — but NOT the
+        # raw model output: it can echo the transaction description /
+        # counterparty / user notes from the prompt, which would persist
+        # private financial data in server logs (review V7 §P2-2). We log only
+        # non-sensitive shape signals (length, emptiness, token counts).
         if path is None:
             logger.info(
                 "gemini_classification_abstained",
                 model=self.model,
                 grounding=use_grounding,
-                raw_preview=text[:400] if text else "(empty)",
+                raw_len=len(text),
+                raw_empty=not text,
                 in_tokens=in_tokens,
                 out_tokens=out_tokens,
             )

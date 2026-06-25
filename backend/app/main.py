@@ -207,12 +207,15 @@ async def lifespan(app: FastAPI):
     _column_migrations = [
         ("transactions", "user_note", "ALTER TABLE transactions ADD COLUMN user_note TEXT"),
         ("accounts", "iban", "ALTER TABLE accounts ADD COLUMN iban TEXT"),
+        # V7-P1-9: ownership tag so broker re-sync only resets its own holdings.
+        ("asset_holdings", "source",
+         "ALTER TABLE asset_holdings ADD COLUMN source VARCHAR(50) NOT NULL DEFAULT 'manual'"),
     ]
     # Whitelist of identifiers that may appear in interpolated DDL.
     # SQLite has no parameter binding for PRAGMA / ALTER, so we vet the
     # value before substituting. Static today, the assert prevents a
     # future caller from feeding user input through this path.
-    _ALLOWED_TABLES = {"transactions", "accounts"}
+    _ALLOWED_TABLES = {"transactions", "accounts", "asset_holdings"}
     async with engine.begin() as conn:
         from sqlalchemy import text
         for table, column, ddl in _column_migrations:

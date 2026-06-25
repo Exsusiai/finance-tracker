@@ -84,6 +84,24 @@ async def _validate_kind_match(
         )
 
 
+async def _reject_snapshot_account(db: AsyncSession, account_id: int) -> None:
+    """V8-P1-3: refuse to create a normal transaction on a snapshot account
+    (brokerage / crypto_wallet / exchange). Those accounts are valued from
+    ``asset_holdings × market_prices``; a transaction would inject a phantom
+    cash ledger that ``/accounts/balances`` adds on top of the holdings value.
+    Their real movements come from sync, not hand-entered transactions.
+    """
+    acc = (await db.execute(
+        select(Account.type).where(Account.id == account_id, Account.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if acc in _SNAPSHOT_ACCOUNT_TYPES:
+        raise InvalidInputError(
+            f"{acc} accounts are valued from holdings — they cannot hold "
+            "transactions. Sync the account or edit its holdings instead.",
+            details={"account_id": account_id, "account_type": acc},
+        )
+
+
 def _tx_to_out(t: Transaction) -> TransactionOut:
     tags = []
     if t.tags_json:
@@ -221,6 +239,8 @@ async def create_transaction(
 ):
     # Sprint 1 FIX-5 (review V1 §P1-4): Category.kind must match Transaction.type.
     await _validate_kind_match(db, tx_type=body.type, category_id=body.category_id)
+    # V8-P1-3: snapshot accounts have no cash ledger.
+    await _reject_snapshot_account(db, body.account_id)
     tx = Transaction(
         account_id=body.account_id,
         counter_account_id=body.counter_account_id,
@@ -263,8 +283,10 @@ async def batch_create_transactions(
     db: AsyncSession = Depends(get_db),
 ):
     # Sprint 1 FIX-5: validate kind invariant for every row before creating any.
+    # V8-P1-3: and refuse any row targeting a snapshot account.
     for t_data in body.transactions:
         await _validate_kind_match(db, tx_type=t_data.type, category_id=t_data.category_id)
+        await _reject_snapshot_account(db, t_data.account_id)
     created = []
     for t_data in body.transactions:
         tx = Transaction(

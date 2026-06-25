@@ -451,8 +451,8 @@
 | Method | Path                                                  | 说明                                  |
 |--------|-------------------------------------------------------|---------------------------------------|
 | POST   | `/bank-sync/setup`                                    | GoCardless 初始化（保存 secret_id/key）|
-| GET    | `/bank-sync/institutions`                             | 列出支持的银行（?country=DE）          |
-| POST   | `/bank-sync/connections`                              | 创建连接（返回 OAuth 跳转链接）        |
+| POST   | `/bank-sync/institutions`                             | 列出支持的银行（body: `country` + `encrypted_credentials`；V7-P1-7 改 POST，凭据移出 query string）|
+| POST   | `/bank-sync/connections`                              | 创建连接（body 含显式 `country`，返回 OAuth 跳转链接）|
 | GET    | `/bank-sync/connections`                              | 已有连接列表                          |
 | GET    | `/bank-sync/connections/{id}`                         | 单个连接详情                          |
 | PATCH  | `/bank-sync/connections/{id}`                         | 更新连接（绑定 account_id 等）         |

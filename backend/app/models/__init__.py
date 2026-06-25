@@ -349,6 +349,16 @@ class AssetHolding(Base):
     # rows by default while still preserving the row identity (history
     # of last_synced_at, created_at, …).
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # V7-P1-9: which pipeline owns this holding — 'manual' for hand-entered
+    # rows, or a provider tag ('ibkr' / 'traderepublic' / …) for broker-synced
+    # rows. Broker re-sync only zeroes holdings with a matching source, so a
+    # user's manually-added gold/private position in a connected brokerage
+    # account is never wiped. NOTE (V8-P1-2): `source` is NOT part of the
+    # holding unique key `(account_id, asset_id, chain)`, so it does not let two
+    # providers hold the SAME asset in ONE account simultaneously — that's fine
+    # because the broker-connection API is one-connection-per-account (get /
+    # upsert / delete key by account_id alone, see api/v1/wallet_sync.py).
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="manual")
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
     updated_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)

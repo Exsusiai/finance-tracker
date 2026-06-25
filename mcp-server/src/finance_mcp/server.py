@@ -111,6 +111,17 @@ def _recompute_snapshot_sql(base_currency: str) -> str:
         "json_valid(metadata_json) AND "
         "json_extract(metadata_json, '$.subaccount') = 1, 0) = 0"
     )
+    # V8-P1-4: a transfer is ONE event stored as TWO type='transfer' legs;
+    # drop the second leg so the recomputed snapshot's transfer_total matches
+    # REST (cashflow.engine.paired_dedup_predicate) and MCP live get_cashflow.
+    # Previously this SQL only excluded subaccount, so MCP-written snapshots
+    # double-counted paired transfers even though the live query was correct.
+    paired_dedup = (
+        "NOT EXISTS (SELECT 1 FROM transactions p "
+        "WHERE p.deleted_at IS NULL AND p.id < transactions.id "
+        "AND transactions.metadata_json IS NOT NULL AND json_valid(transactions.metadata_json) "
+        "AND p.id = json_extract(transactions.metadata_json, '$.paired_with_tx_id'))"
+    )
     return f"""
         INSERT OR REPLACE INTO cash_flow_snapshots
             (period_year, period_month, base_currency,
@@ -134,6 +145,7 @@ def _recompute_snapshot_sql(base_currency: str) -> str:
           AND is_pending = 0
           AND CAST(substr(occurred_at, 1, 4) AS INTEGER) = ?
           AND CAST(substr(occurred_at, 6, 2) AS INTEGER) = ?
+          AND {paired_dedup}
     """
 
 
@@ -948,6 +960,17 @@ async def get_cashflow(
             "COALESCE(json_valid(metadata_json) AND "
             "json_extract(metadata_json, '$.subaccount') = 1, 0) = 0"
         )
+        # V7-P1-3: a transfer is ONE event recorded as TWO type='transfer'
+        # legs; drop the second leg (live partner with a smaller id) so MCP
+        # transfer volume matches the REST/snapshot numbers exactly. Mirrors
+        # cashflow.engine.paired_dedup_predicate (kept inline — MCP is a
+        # separate sync sqlite3 process).
+        paired_dedup = (
+            "NOT EXISTS (SELECT 1 FROM transactions p "
+            "WHERE p.deleted_at IS NULL AND p.id < {tbl}.id "
+            "AND {tbl}.metadata_json IS NOT NULL AND json_valid({tbl}.metadata_json) "
+            "AND p.id = json_extract({tbl}.metadata_json, '$.paired_with_tx_id'))"
+        )
         rows = conn.execute(f"""
             SELECT
                 substr(occurred_at, 1, 7) AS period,
@@ -962,6 +985,7 @@ async def get_cashflow(
             WHERE deleted_at IS NULL AND is_pending = 0
               AND (? IS NULL OR substr(occurred_at, 1, 7) >= ?)
               AND (? IS NULL OR substr(occurred_at, 1, 7) <= ?)
+              AND {paired_dedup.format(tbl="transactions")}
             GROUP BY period
             ORDER BY period DESC
             LIMIT ?
@@ -985,6 +1009,7 @@ async def get_cashflow(
                 LEFT JOIN categories c ON t.category_id = c.id
                 WHERE t.deleted_at IS NULL AND t.is_pending = 0
                   AND substr(t.occurred_at, 1, 7) = ? AND t.category_id IS NOT NULL
+                  AND {paired_dedup.format(tbl="t")}
                 GROUP BY t.category_id
                 ORDER BY total DESC
             """, (period,)).fetchall()

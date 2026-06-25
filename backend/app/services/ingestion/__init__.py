@@ -177,29 +177,25 @@ async def ingest_transactions(
 
     await db.flush()
 
-    # Step 2.5: dispatch L2 LLM tasks (fire-and-forget). Targets get a
-    # stable `tx.id` only after the flush above. We DO NOT await — the
-    # caller's HTTP response shouldn't be held hostage by a 1–3 s/row LLM
-    # round-trip. The background tasks open their own session.
+    # Step 2.5: schedule L2 LLM classification. Targets get a stable `tx.id`
+    # only after the flush above. The LLM worker drains its queue from an
+    # independent session, so it must only see rows that are already COMMITTED.
     #
-    # V6-P1-6 race fix: `asyncio.create_task` runs concurrently with the
-    # current coroutine. The worker opens a *new* session and does
-    # `session.get(Transaction, tx_id)` — if the parent request's session
-    # hasn't committed yet, that lookup returns None and the LLM call is
-    # silently skipped. Fix: commit the session now, before dispatching, so
-    # the worker's independent session is guaranteed to see the rows.
+    # V7-P1-4: previously we forced `await db.commit()` here, mid-pipeline, so
+    # the worker could see the rows (V6-P1-6 race). But committing here broke
+    # the caller's transaction boundary — if a later step (synthetic upgrade,
+    # transfer matcher, recompute, or the route's own status update) failed,
+    # the half-finished insert could no longer be rolled back. Reparse was the
+    # worst case: old rows deleted + new rows committed before the status flip.
     #
-    # Side-effect: the caller's DB session is committed here, mid-function,
-    # rather than at endpoint exit (where `get_db` normally commits). All
-    # subsequent writes in this function (Steps 3-5) are still safe because
-    # they continue on the same session, which SQLAlchemy will re-open as
-    # needed. The final `get_db` commit at endpoint exit becomes a no-op if
-    # nothing new was written after this point, which is fine.
+    # Fix: keep everything (insert → categorise → pair → recompute) in ONE
+    # transaction and defer the enqueue to a one-shot after_commit hook. The
+    # rows are queued only once the caller's commit lands; a rollback fires
+    # nothing, so the queue never points at rows that don't exist.
     if llm_target_txs:
         ids_to_classify = [tx.id for tx in llm_target_txs if tx.id is not None]
         if ids_to_classify:
-            await db.commit()  # V6-P1-6: ensure rows are visible to worker sessions
-            await _dispatch_llm_classification(ids_to_classify)
+            _enqueue_llm_after_commit(db, ids_to_classify)
             result.llm_dispatched += len(ids_to_classify)
 
     # Step 3: collect periods touched by the new batch BEFORE pairing — pairing
@@ -301,18 +297,45 @@ async def _classify_one_with_llm(tx_id: int) -> None:
         logger.warning("llm_classification_task_failed", tx_id=tx_id, error=str(exc)[:200])
 
 
-async def _dispatch_llm_classification(tx_ids: list[int]) -> None:
-    """Enqueue rows for paced, single-worker L2 classification.
+def _enqueue_llm_after_commit(db: AsyncSession, tx_ids: list[int]) -> None:
+    """Enqueue rows for paced L2 classification AFTER the caller commits.
 
-    Replaces the old fire-and-forget create_task burst (which tripped the
-    free-tier rate limit on bulk dispatch). The queue worker drains one
-    item every `llm_min_interval_sec` so we stay under ~15 RPM and the UI
-    can show remaining-queue progress (ERR-20260609-001).
+    Registers a one-shot ``after_commit`` hook on the async session's
+    underlying sync ``Session``. The queue worker drains one item every
+    `llm_min_interval_sec` (≤ ~15 RPM, ERR-20260609-001) from its own
+    session, so rows must be committed before they're enqueued.
+
+    V7-P1-4: this replaces the old mid-pipeline ``db.commit()`` so ingestion
+    stays a single atomic transaction. The ``fired`` guard makes it idempotent
+    if the session commits more than once during the request. We don't remove
+    the listener inside its own dispatch (that would mutate the listener
+    collection mid-iteration); the per-request session is discarded at request
+    end, so the listener can't leak across requests anyway.
+
+    V8-P2-1: also listen for ``after_rollback``. If THIS ingestion's
+    transaction rolls back, the rows are gone — mark cancelled so a later
+    commit on a reused session (service/test/script that rolls back then
+    commits other work) doesn't enqueue ids that no longer exist.
     """
+    from sqlalchemy import event
+
     from app.services.llm import queue as llm_queue
 
-    added = llm_queue.enqueue(list(tx_ids))
-    logger.info("llm_enqueued", requested=len(tx_ids), added=added)
+    sync_session = db.sync_session
+    state = {"fired": False, "cancelled": False}
+
+    def _after_commit(_session) -> None:
+        if state["fired"] or state["cancelled"]:
+            return
+        state["fired"] = True
+        added = llm_queue.enqueue(list(tx_ids))
+        logger.info("llm_enqueued", requested=len(tx_ids), added=added)
+
+    def _after_rollback(_session) -> None:
+        state["cancelled"] = True
+
+    event.listen(sync_session, "after_commit", _after_commit)
+    event.listen(sync_session, "after_rollback", _after_rollback)
 
 
 async def _backfill_transfer_category(db: AsyncSession, tx: Transaction, resolver) -> None:

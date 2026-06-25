@@ -26,6 +26,19 @@ class GoCardlessSetupResponse(BaseModel):
 
 # ─── Institution ──────────────────────────────────────────────────────────
 
+class InstitutionListRequest(BaseModel):
+    """Body for listing institutions.
+
+    V7-P1-7: the encrypted GoCardless credential blob is sent in the POST
+    body, not the query string — a query string lands in browser history,
+    proxy/access logs, APM traces and crash reports, where (even encrypted)
+    it is a replayable credential for this service.
+    """
+
+    country: str = Field(min_length=2, max_length=2, description="ISO 3166-1 alpha-2")
+    encrypted_credentials: str = Field(min_length=1, description="Encrypted GoCardless credentials")
+
+
 class InstitutionOut(BaseModel):
     id: str
     name: str
@@ -42,6 +55,10 @@ class BankConnectionCreate(BaseModel):
     provider: str = Field(pattern=r"^(gocardless)$")
     encrypted_credentials: str
     institution_id: str
+    # V7-P1-7: explicit country for the institution lookup. Previously the
+    # route passed `redirect_url` as the country, which broke the lookup and
+    # could surface wrong institution metadata.
+    country: str = Field(min_length=2, max_length=2, description="ISO 3166-1 alpha-2")
     redirect_url: str = Field(
         default="http://localhost:3000/settings/bank-sync/callback",
         description="URL to redirect after bank auth",

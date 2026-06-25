@@ -445,11 +445,17 @@ async def net_worth(
 
     # 1. Cash: account balances grouped by currency. JOIN accounts to
     # drop opted-out rows from the SUM.
+    # Snapshot accounts (brokerage / crypto_wallet / exchange) contribute via
+    # the investments leg below (holdings × price); their cash ledger must be
+    # excluded here or a stray initial_balance / adjustment would be counted on
+    # top of the holdings value (review V7 §P1-2). For correctly-set-up snapshot
+    # accounts the ledger is already 0, so this is a belt-and-suspenders guard.
     balances_stmt = text("""
         SELECT v.currency, SUM(v.balance) AS total
         FROM v_account_balance v
         JOIN accounts a ON a.id = v.account_id
         WHERE a.include_in_total = 1 AND a.deleted_at IS NULL
+          AND a.type NOT IN ('brokerage', 'crypto_wallet', 'exchange')
         GROUP BY v.currency
     """)
     balances_result = await db.execute(balances_stmt)

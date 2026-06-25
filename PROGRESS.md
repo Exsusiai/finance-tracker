@@ -9,6 +9,31 @@
 - **本地端口**: Backend `8010`, Frontend `3002`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
 - **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT + **P1-1 LLM 智能分类** + **P1-4 加密钱包 / CEX 同步** + **券商同步（IBKR Flex + Trade Republic）** + **PDF 预览后入库改造** 全部已实装。最近在做 UAT 资金口径修正（转账/现金流）。下一步：TR 真实凭据 UAT、IBKR Flex quota 复测 → 等用户拍板 P1-2 GoCardless / P1-3 Notion / P1-5 储蓄口径
 
+## 2026-06-25 新交付：Code Review V8 残留缺口修复
+V8 复审 V7 修复，补齐残留（全套 **365 passed**）：
+- **P1-1** 券商同步回收历史已同步持仓（migration 后默认 `manual` 的旧行 → 卖出仓能再次清零）。
+- **P1-2** 多 provider 同账户覆盖实际不可达（一账户一连接）；改正过度表述注释。
+- **P1-3** 快照账户彻底无现金腿：create 拒非零初始余额 + `POST /transactions`/batch 拒落快照账户 + `/accounts/balances` 与单账户 balance 忽略 ledger（三处 + net_worth 共四道防线）。
+- **P1-4** MCP `_recompute_snapshot_sql` 接入 paired dedup（与 REST/`get_cashflow` 一致）。
+- **P2-1** `after_commit` 增 `after_rollback` 取消：回滚的行不入 LLM 队列（含同 session 后续 commit）。
+- **P2-2** `_mark_failed` 用独立 session 提交失败状态，不被外层 rollback 吞掉。
+- **P2-3** GoCardless 落库用真实 country + 匹配 institution 元数据（不再写死 DE/EUR）。
+- **维持延后**：P2-4 MCP PDF 完整 ingestion 镜像（README/API 已注明不等价 REST）。
+
+## 2026-06-25 新交付：Code Review V7 资金口径 / 安全修复
+按 `code review/review V7.md` 逐条核实并修复（全套 **360 passed**）：
+- **P1-1 券商余额单位**：`compute_brokerage_value_per_account` 改为折算到**账户自身币种**（原来返回 base 币种却标成账户币种，前端二次换算放大错误）。
+- **P1-2 快照账户无现金腿**：brokerage 也隐藏初始余额（前端）；snapshot 账户 `adjust-balance` 后端拒绝（400）+ 前端隐藏按钮；`net_worth` cash 腿排除 brokerage/crypto/exchange，防 ledger 与持仓双算。
+- **P1-3 转账双计**：`paired_dedup_predicate` 收敛到 `cashflow/engine.py`，`/cashflow/monthly`（含分类）、`/cashflow/recompute`、`by-category`、快照、**MCP get_cashflow** 全部按 pair 去重一致。
+- **P1-4 导入原子性**：`ingest_transactions` 不再中途 `commit()`；改用 `after_commit` 钩子在调用方提交后才入 LLM 队列（回滚则不派发），恢复 PDF 入库 / 重解析事务边界。
+- **P1-5 PATCH 绕过 USDT 不变量**：`update_account` 校验**最终** `(type, currency)`，crypto/exchange 不能改成非 USDT。
+- **P1-7 GoCardless 凭据**：`/institutions` 改 POST（密文 blob 移出 query string）；`BankConnectionCreate` 新增显式 `country`（不再误用 `redirect_url` 当 country）。
+- **P1-8 Notion 余额公式**：资产摘要改读 `v_account_balance` + `include_in_total`，不再 `initial_balance + SUM(amount)`（旧式把支出加进余额）。
+- **P1-9 券商重置误删**：`asset_holdings` 加 `source` 列（migration `c3d4e5f6a7b8`）；broker 重置只清零**同 source** 持仓，手工持仓 / 多 provider 互不影响。
+- **P2-1 券商资产身份**：同 symbol 不同 conid 不再合并（用 `contract=conid` 消歧 + 告警），避免价格互相覆盖。
+- **P2-2 / P2-3 安全**：Gemini abstain 日志不再写原始模型输出（防交易隐私落日志）；TR 登录失败 unlink 临时 cookie 文件。
+- **延后（结构治理，需独立投入）**：P1-6 MCP PDF 完整 ingestion 镜像（外币 FX / 完整跨账户配对）、P2-4 现金流公式完全统一、P2-5 lifespan 拆分、P2-6 大文件拆分 — 见 `docx/ROADMAP.md`。
+
 ## 2026-06-24~25 新交付：UAT 资金口径修正（转账 / 现金流）
 本轮 UAT 围绕「转账与现金流统计」发现并修复一连串口径问题（commit `4db51e3`，详见 `.learnings/LEARNINGS.md` ERR-20260624-003~006 / ERR/LRN-20260625-*）：
 - **快照账户单边转账（防双算）**：bank→broker/crypto/exchange 的转账不再合成镜像腿（到账由同步快照反映，合成会叠加双算）；降级为单边 transfer。`/transfers/unpaired` 面板排除快照 hint + 内部储蓄分类。
@@ -16,7 +41,7 @@
 - **转账双算去重**：一笔转账 = 两条腿（真实 + 镜像），`cashflow_by_category` / 快照 `transfer_total` / 前端 `category-breakdown-view` 全部按 pair 去重（保留 id 较小腿）。
 - **子账户/利息分类**：子账户名子串匹配会吞掉「Net interest paid to <space>」利息行；`_classify_transfer` + accounts 子账户重扫加 interest/fee 守卫（仅抑制子账户判定，不碰跨行识别）。
 - **数据修复**：N26↔Revolut 账户对调、IBKR 合成腿污染、内部储蓄缺 flag、145 笔 Revolut 利息归入存款利息——均原地修正 + 重算 cashflow。
-- **测试**：全套 **351 passed**。
+- **测试**：全套 **351 passed**（V7 修复后增至 360 passed）。
 
 ## 2026-06-24 新交付：PDF 导入「预览后入库」改造（commit `cd1f788`）
 - **preview-before-commit**：upload **只解析不入库**（status=`awaiting_review`，返回全部 `parsed_preview`）；`POST /statements/{id}/commit?account_id=` 才真正插入 + ingestion；`DELETE`（取消）连带删存储 PDF（无痕可重传）。
@@ -71,7 +96,7 @@
 
 **汇率折算修复**：`_convert_to_base` 三角换算 pivot 加 CNY（项目 FX 源全部 `base_currency='CNY'`）
 
-**测试**：全套 **306 passed**（含 spam_filter 28、coingecko 11、chain providers 15、exchange providers 14、wallet schema 14、orchestrator 8、upsert 7、API 10、holdings_value 7、usdt_alias 9、asset_identity 9、asset_lookup_chain_contract 14、transfer_pair_clears_pending 7、llm_dispatch_race 2）
+**测试**（P1-4 加密钱包阶段）：当时全套 **306 passed**（含 spam_filter 28、coingecko 11、chain providers 15、exchange providers 14、wallet schema 14、orchestrator 8、upsert 7、API 10、holdings_value 7、usdt_alias 9、asset_identity 9、asset_lookup_chain_contract 14、transfer_pair_clears_pending 7、llm_dispatch_race 2）。**当前全套 365 passed**（含券商同步 + V6/V7/V8 修复 + 回归）。
 
 ## 2026-05-08 新交付：P1-1 LLM 智能分类
 详见 [docx/LLM_CLASSIFICATION_PLAN.md](docx/LLM_CLASSIFICATION_PLAN.md)：

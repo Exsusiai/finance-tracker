@@ -1,7 +1,7 @@
 # 架构概览 (ARCHITECTURE)
 
 > Finance Tracker — 个人资金管理与记账系统
-> 最后修订: 2026-05-18 (V5-P2-5)
+> 最后修订: 2026-06-25 (Review V7 资金口径 / 安全修复)
 
 ## 高层架构
 
@@ -51,7 +51,7 @@
 | `schemas/` | Pydantic v2 请求/响应模型 (与 `docs/API.md` 对齐) |
 | `api/v1/` | FastAPI route handlers (薄,只做参数校验和调用 service) |
 | `services/` | 业务逻辑层（见下表） |
-| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `b2c3d4e5f6a7`；新增字段走 `alembic revision --autogenerate`） |
+| `alembic/` | Alembic 迁移（2026-05-07 启用；当前 head: `c3d4e5f6a7b8`（asset_holdings.source）；新增字段走 `alembic revision --autogenerate`） |
 
 #### `services/` 详细结构（2026-05-18）
 
@@ -67,7 +67,7 @@
 | `valuation/` | `fx.py::convert_to_base`：多币种折算到 BASE_CURRENCY（含 stablecoin→USD 别名 + CNY 三角 pivot）；被 holdings / portfolio / net-worth / brokerage 估值共用（`api/v1/holdings.py` 委托保留旧名） |
 | `bank_sync/` | GoCardless 银行直连（scaffold，未启用）；`crypto.py` 提供 AES-256-GCM `encrypt_str` / `decrypt_str`，被 wallet_sync 和 llm 路由复用 |
 | `notion_sync/` | Notion 三模块同步（scaffold，未联调） |
-| `wallet_sync/` | **链上/CEX/券商 同步编排**：`orchestrator.py` 按账户类型分发（crypto_wallet / exchange / brokerage）；`upsert.py` 写 `asset_holdings` (is_active + quantity)；`spam_filter.py` 过滤粉尘代币；`holdings_value.py` 聚合最新市价（crypto 走 USDT、`compute_brokerage_value_per_account` 走原币折 base） |
+| `wallet_sync/` | **链上/CEX/券商 同步编排**：`orchestrator.py` 按账户类型分发（crypto_wallet / exchange / brokerage）；`upsert.py` 写 `asset_holdings` (is_active + quantity)；`spam_filter.py` 过滤粉尘代币；`holdings_value.py` 聚合最新市价（crypto 走 USDT、`compute_brokerage_value_per_account` 折算到**账户币种**，V7-P1-1）。券商 `broker_sync/upsert.py` 重置只清零**同 `source`** 持仓（V7-P1-9），不误删手工/他 provider 持仓 |
 | `crypto_sync/` | **链上余额 provider**：`evm_alchemy.py`（Alchemy Token API，EVM 系全链通用）、`btc_blockstream.py`（Blockstream API）、`sol_rpc.py`（Solana JSON-RPC）、`tron_grid.py`（TronGrid REST） |
 | `exchange_sync/` | **CEX 余额 provider**：`binance.py`（Binance Spot）、`bitget.py`（Bitget Spot + 签名）、`sign.py`（HMAC 签名辅助） |
 | `broker_sync/` | **券商持仓 provider**（2026-06）：`ibkr.py`（IBKR Flex Web Service，两步下载，EOD 快照 + 现金，markPrice 原币）、`traderepublic.py`（非官方 pytr，cookie session + `compactPortfolioByType` + per-ISIN ticker）；`__init__.py` 定义 `BrokerPosition`/`BrokerProvider`/`dispatch`/`map_asset_class`；`upsert.py::apply_broker_snapshot`。凭据存 `broker_connections`（token_enc AES-256-GCM） |
@@ -158,9 +158,9 @@
 
 `transactions.amount` 始终存正绝对值，方向由 `type` + metadata 决定（adjustment 例外保留符号）。
 
-> 注：`v_account_balance` 是 **per-account 按方向累加**，转账两条腿落在各自账户互不重复，所以余额视图天然不双算。但**「按 type 求和」的统计（cashflow_by_category / 快照 `transfer_total` / 前端分类断点视图）必须按 pair 去重**（保留 id 较小腿），否则一笔转账的真实腿 + 镜像腿会各算一次（2026-06-25 修复）。
+> 注：`v_account_balance` 是 **per-account 按方向累加**，转账两条腿落在各自账户互不重复，所以余额视图天然不双算。但**「按 type 求和」的统计必须按 pair 去重**（保留 id 较小腿），否则一笔转账的真实腿 + 镜像腿会各算一次。去重谓词单一来源 `cashflow/engine.py::paired_dedup_predicate`，V7-P1-3 起 `/cashflow/monthly`（含分类）、`/cashflow/recompute`、`by-category`、快照 `transfer_total`、前端分类断点视图、**MCP `get_cashflow`** 全部一致使用；V8-P1-4 起 **MCP `_recompute_snapshot_sql`** 也接入（2026-06-25）。
 
-> **快照账户不可有合成交易腿**（架构不变量）：brokerage / crypto_wallet / exchange 的余额 = `v_account_balance(交易) + holdings_value(同步快照)`。这类账户的到账由下次同步快照反映，因此 bank→这类账户的转账只能记**单边**（`mark-transfer` 不为其合成镜像腿），否则会与快照叠加双算。
+> **快照账户不可有现金腿**（架构不变量，V7-P1-2 + V8-P1-3 强化）：brokerage / crypto_wallet / exchange 的真实价值 = `holdings_value(同步快照)`。到账由下次同步快照反映，因此：(1) bank→这类账户的转账只记**单边**（`mark-transfer` 不合成镜像腿）；(2) **不允许任何现金 ledger**——前端隐藏初始/调整余额、`AccountCreate` 拒非零初始余额、`adjust-balance` 拒绝（400）、`POST /transactions`(+batch) 拒落快照账户、`/accounts/balances`(+单账户) 忽略 ledger 只取持仓、`net_worth` cash 腿 SQL 排除这三类——多道防线杜绝 ledger 现金与持仓市值叠加双算。`/accounts/balances` 对 brokerage 把持仓折算到**账户币种**返回（不是 base 币种，V7-P1-1）。
 
 ### 4. Notion 数据同步 (P2)
 

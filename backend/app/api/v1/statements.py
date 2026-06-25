@@ -69,23 +69,31 @@ async def _mark_failed(db: AsyncSession, import_id: int, msg: str) -> None:
     handler.
 
     A mid-pipeline exception (e.g. an IntegrityError on flush) leaves the
-    session needing a rollback; calling ``db.flush()`` on it again raises
-    PendingRollbackError, which used to mask the real error as an opaque 500.
-    So: roll back first, then re-fetch and persist the failed status on the
-    now-clean session.
+    request session needing a rollback. We roll it back first to clear the
+    pending state, then persist the failed status on a **separate** session
+    that we commit ourselves.
+
+    V8-P2-2: the failed status used to be flushed on the request session, but
+    the caller re-raises afterwards and ``get_db`` rolls the request session
+    back on the exception path — so the 'failed' + error_message were lost and
+    the import stayed stuck in awaiting_review / parsing. A dedicated committed
+    session makes the failure durable regardless of the outer rollback.
     """
     try:
         await db.rollback()
     except Exception:  # noqa: BLE001
         pass
     try:
-        p = (await db.execute(
-            select(PdfImport).where(PdfImport.id == import_id)
-        )).scalar_one_or_none()
-        if p is not None:
-            p.status = "failed"
-            p.error_message = (msg or "")[:500]
-            await db.flush()
+        from app.db import async_session_factory
+
+        async with async_session_factory() as fail_session:
+            p = (await fail_session.execute(
+                select(PdfImport).where(PdfImport.id == import_id)
+            )).scalar_one_or_none()
+            if p is not None:
+                p.status = "failed"
+                p.error_message = (msg or "")[:500]
+                await fail_session.commit()
     except Exception:  # noqa: BLE001
         pass
 
