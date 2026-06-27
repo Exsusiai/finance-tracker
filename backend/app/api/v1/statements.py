@@ -19,7 +19,7 @@ from app.core.auth import require_auth
 from app.core.config import get_settings
 from app.core.errors import ConflictError, InvalidInputError, NotFoundError, ParserError
 from app.db import get_db
-from app.models import Transaction, PdfImport
+from app.models import Account, Transaction, PdfImport
 from app.services.cashflow import parse_period, recompute_for_periods
 from app.schemas import (
     ApiSuccess,
@@ -338,6 +338,56 @@ async def upload_pdf(
     except Exception as e:
         await _mark_failed(db, pdf_import.id, str(e))
         raise ParserError(f"Failed to parse PDF: {e}")
+
+
+@router.post("/upload-csv", response_model=ApiSuccess[dict])
+async def upload_csv(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    file: UploadFile = File(...),
+    account_id: int = Query(..., description="Target account for the CSV rows"),
+):
+    """Import a CSV account export (currently: PayPal activity export).
+
+    Unlike the PDF flow this imports directly (no preview/staging) and is
+    safe to call with OVERLAPPING date ranges — rows are deduped by their
+    ``external_id`` (PayPal Transaction ID), so re-uploading months that were
+    already imported just skips the duplicates. Any date range / multiple
+    months in one file is fine; the parser reads whatever rows are present.
+    """
+    from app.services.csv_import import import_csv_rows
+    from app.services.csv_parser import detect_and_parse_csv
+
+    content = await file.read()
+    if not content:
+        raise ParserError("Empty file uploaded")
+    _max_bytes = MAX_PDF_SIZE_MB * 1024 * 1024
+    if len(content) > _max_bytes:
+        raise ParserError(
+            f"Uploaded file exceeds the {MAX_PDF_SIZE_MB} MiB limit",
+            details={"max_mb": MAX_PDF_SIZE_MB, "got_bytes": len(content)},
+        )
+
+    # Validate the target account exists.
+    acct = (await db.execute(
+        select(Account).where(Account.id == account_id, Account.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if acct is None:
+        raise NotFoundError("Account", account_id)
+
+    parse_result = detect_and_parse_csv(content)
+    if parse_result.get("error"):
+        raise ParserError(parse_result["error"])
+
+    summary = await import_csv_rows(db, account_id, parse_result)
+    return ApiSuccess(data={
+        "detected_source": summary.detected_source,
+        "period": summary.period,
+        "parsed": summary.parsed,
+        "imported": summary.imported,
+        "skipped_duplicate": summary.skipped_duplicate,
+        "skipped_no_external_id": summary.skipped_no_external_id,
+    })
 
 
 @router.get("", response_model=ApiSuccess[list[PdfImportOut]])

@@ -263,6 +263,18 @@ class TransactionUpdate(BaseModel):
         return _validate_metadata_json(v)
 
 
+class TransactionSplitLine(BaseModel):
+    """One line of a split transaction (e.g. €20 餐饮 + €80 借出)."""
+    amount: str
+    type: str = Field(pattern=r"^(expense|income|transfer|adjustment)$")
+    category_id: int | None = None
+    description: str | None = None
+
+
+class TransactionSplitIn(BaseModel):
+    lines: list[TransactionSplitLine] = Field(min_length=2)
+
+
 class TransactionOut(BaseModel):
     id: int
     account_id: int

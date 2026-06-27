@@ -24,6 +24,7 @@ from app.schemas import (
     TransactionBatchCreate,
     TransactionCreate,
     TransactionOut,
+    TransactionSplitIn,
     TransactionUpdate,
 )
 from app.services.cashflow import parse_period, recompute_for_periods, recompute_period
@@ -549,6 +550,216 @@ async def delete_transaction(
     await db.flush()
     await recompute_for_periods(db, affected_periods)
     return ApiSuccess(data={"id": transaction_id, "deleted": True})
+
+
+# ─── Split (AA / 代付拆分) ──────────────────────────────────────────────
+
+
+async def _reload_with_rels(db: AsyncSession, ids: list[int]) -> list[Transaction]:
+    """Re-fetch rows with account/category eager-loaded (newly-added children
+    have unloaded relationships → _tx_to_out would trigger async lazy-load)."""
+    if not ids:
+        return []
+    rows = (await db.execute(
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(Transaction.id.in_(ids))
+        .order_by(Transaction.id)
+    )).scalars().all()
+    return list(rows)
+
+
+@router.post("/{transaction_id}/split", response_model=ApiSuccess[list[TransactionOut]])
+async def split_transaction(
+    transaction_id: int,
+    body: TransactionSplitIn,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Split ONE transaction into N line items that sum to its amount.
+
+    Use case: you front a €100 group dinner but only €20 is yours — split into
+    €20 餐饮 + €80 借出. The €80 借出 is transfer-kind (excluded from spend), and
+    the friends' reimbursements are separately re-categorised as 还款收回, so
+    your real spend shows €20, not €100.
+
+    Model (no parent container): the original row BECOMES the first line; the
+    rest are sibling rows tagged ``metadata.split_group_id``. Sum of the lines
+    equals the original amount, so the account balance and cashflow stay correct
+    with no special exclusion logic. The pre-split state is stashed in
+    ``metadata.split_original`` for /unsplit.
+    """
+    tx = (await db.execute(
+        select(Transaction).where(
+            Transaction.id == transaction_id, Transaction.deleted_at.is_(None)
+        )
+    )).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Transaction", transaction_id)
+
+    try:
+        meta = json.loads(tx.metadata_json) if tx.metadata_json else {}
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    if meta.get("split_group_id") is not None:
+        raise InvalidInputError("Transaction is already split; call /unsplit first.")
+    if tx.type == "adjustment":
+        raise InvalidInputError("Adjustment rows cannot be split.")
+
+    orig_amount = abs(tx.amount if isinstance(tx.amount, Decimal) else Decimal(str(tx.amount)))
+    total = Decimal("0")
+    for ln in body.lines:
+        amt = Decimal(ln.amount)
+        if amt <= 0:
+            raise InvalidInputError("Each split line amount must be positive.")
+        await _validate_kind_match(db, tx_type=ln.type, category_id=ln.category_id)
+        total += amt
+    if total != orig_amount:
+        raise InvalidInputError(
+            f"Split lines sum to {total} but the original amount is {orig_amount}.",
+            details={"lines_total": str(total), "original": str(orig_amount)},
+        )
+
+    # Which way did the original move money? Transfer lines inherit that side so
+    # the signed balance impact is preserved exactly.
+    orig_in = tx.type == "income" or (tx.type == "transfer" and meta.get("transfer_direction") == "in")
+    direction = "in" if orig_in else "out"
+
+    def _line_base(amt: Decimal):
+        if tx.base_amount is not None and orig_amount != 0:
+            return tx.base_amount * amt / orig_amount
+        return None
+
+    snapshot = {
+        "amount": str(tx.amount),
+        "type": tx.type,
+        "category_id": tx.category_id,
+        "description": tx.description,
+        "base_amount": str(tx.base_amount) if tx.base_amount is not None else None,
+        "fx_rate_to_base": str(tx.fx_rate_to_base) if tx.fx_rate_to_base is not None else None,
+        "metadata_json": tx.metadata_json,
+    }
+    group_id = tx.id
+
+    # First line → mutate the original row (keeps id + external_id for dedup).
+    first = body.lines[0]
+    first_amt = Decimal(first.amount)
+    tx.amount = first_amt
+    tx.type = first.type
+    tx.category_id = first.category_id
+    if first.description:
+        tx.description = first.description
+    tx.base_amount = _line_base(first_amt)
+    new_meta = {k: v for k, v in meta.items() if k not in ("transfer_direction", "paired_with_tx_id")}
+    new_meta["split_group_id"] = group_id
+    new_meta["split_original"] = snapshot
+    if first.type == "transfer":
+        new_meta["transfer_direction"] = direction
+    tx.metadata_json = json.dumps(new_meta, ensure_ascii=False)
+    tx.is_pending = False
+    touch_updated_at(tx)
+
+    children: list[Transaction] = []
+    for ln in body.lines[1:]:
+        amt = Decimal(ln.amount)
+        child_meta: dict = {"split_group_id": group_id}
+        if ln.type == "transfer":
+            child_meta["transfer_direction"] = direction
+        child = Transaction(
+            account_id=tx.account_id,
+            occurred_at=tx.occurred_at,
+            posted_at=tx.posted_at,
+            amount=amt,
+            currency=tx.currency,
+            type=ln.type,
+            category_id=ln.category_id,
+            description=ln.description or tx.description,
+            counterparty=tx.counterparty,
+            source=tx.source,
+            base_amount=_line_base(amt),
+            fx_rate_to_base=tx.fx_rate_to_base,
+            is_pending=False,
+            metadata_json=json.dumps(child_meta, ensure_ascii=False),
+        )
+        db.add(child)
+        children.append(child)
+
+    await db.flush()
+    period = parse_period(tx.occurred_at)
+    if period:
+        await recompute_period(db, period[0], period[1])
+
+    ids = [tx.id] + [c.id for c in children]
+    return ApiSuccess(data=[_tx_to_out(t) for t in await _reload_with_rels(db, ids)])
+
+
+@router.post("/{transaction_id}/unsplit", response_model=ApiSuccess[TransactionOut])
+async def unsplit_transaction(
+    transaction_id: int,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Undo a split: restore the original transaction and remove its siblings.
+
+    Accepts the id of ANY row in the split group; resolves the group via
+    ``metadata.split_group_id``.
+    """
+    from sqlalchemy import text as _text
+
+    tx = (await db.execute(
+        select(Transaction).where(
+            Transaction.id == transaction_id, Transaction.deleted_at.is_(None)
+        )
+    )).scalar_one_or_none()
+    if not tx:
+        raise NotFoundError("Transaction", transaction_id)
+    try:
+        meta = json.loads(tx.metadata_json) if tx.metadata_json else {}
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    group_id = meta.get("split_group_id") if isinstance(meta, dict) else None
+    if group_id is None:
+        raise InvalidInputError("Transaction is not part of a split.")
+
+    group_rows = (await db.execute(
+        select(Transaction)
+        .where(Transaction.deleted_at.is_(None))
+        .where(_text("json_extract(metadata_json, '$.split_group_id') = :gid"))
+        .params(gid=group_id)
+    )).scalars().all()
+
+    original = next((r for r in group_rows if r.id == group_id), None)
+    if original is None:
+        raise InvalidInputError("Split original row not found (already removed?).")
+
+    snap = (json.loads(original.metadata_json) or {}).get("split_original")
+    if not isinstance(snap, dict):
+        raise InvalidInputError("Split original snapshot missing; cannot unsplit.")
+
+    affected: set = set()
+    # Restore the original from its pre-split snapshot.
+    original.amount = Decimal(snap["amount"])
+    original.type = snap["type"]
+    original.category_id = snap["category_id"]
+    original.description = snap["description"]
+    original.base_amount = Decimal(snap["base_amount"]) if snap.get("base_amount") else None
+    original.fx_rate_to_base = Decimal(snap["fx_rate_to_base"]) if snap.get("fx_rate_to_base") else None
+    original.metadata_json = snap.get("metadata_json")
+    touch_updated_at(original)
+    affected.add(parse_period(original.occurred_at))
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for r in group_rows:
+        if r.id != group_id:
+            r.deleted_at = now
+            affected.add(parse_period(r.occurred_at))
+
+    await db.flush()
+    await recompute_for_periods(db, affected)
+    restored = await _reload_with_rels(db, [group_id])
+    return ApiSuccess(data=_tx_to_out(restored[0]))
 
 
 # ─── Transfer matching ────────────────────────────────────────────────

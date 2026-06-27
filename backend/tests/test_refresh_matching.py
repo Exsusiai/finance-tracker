@@ -400,4 +400,36 @@ class TestPairTransactionsSymmetricPointer:
         assert in_after.counter_account_id == a.id
 
 
+async def test_refresh_matching_llm_dispatch_no_import_error(db: AsyncSession, monkeypatch):
+    """Regression: V7-P1-4 renamed _dispatch_llm_classification → an after-commit
+    hook, but system.py::refresh_matching still imported the OLD name, so the
+    endpoint 500'd ('cannot import name _dispatch_llm_classification') whenever
+    LLM was enabled and there were untagged rows. Exercise that exact branch."""
+    from types import SimpleNamespace
+
+    import app.services.app_settings as aset
+    import app.services.llm.queue as q
+
+    acc = await _make_account(db, "RM-LLM")
+    # Unmatched pdf_import expense → the pipeline routes it to the LLM targets.
+    await _make_tx(db, acc, "9.99", tx_type="expense", source="pdf_import")
+    await db.commit()
+
+    async def _settings(_db):
+        return SimpleNamespace(enabled=True)
+
+    async def _key(_db):
+        return "fake-key"
+
+    monkeypatch.setattr(aset, "get_llm_settings", _settings)
+    monkeypatch.setattr(aset, "get_gemini_api_key", _key)
+    # Don't touch the real queue/worker — just count.
+    monkeypatch.setattr(q, "enqueue", lambda ids: len(list(ids)))
+
+    from app.api.v1.system import refresh_matching
+
+    resp = await refresh_matching(_token=_TEST_TOKEN, db=db)  # must not raise ImportError
+    assert resp.data["llm_dispatched"] >= 1
+
+
 pytestmark = pytest.mark.asyncio

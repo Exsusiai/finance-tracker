@@ -141,10 +141,13 @@ async def refresh_matching(
         runtime = await app_settings_svc.get_llm_settings(db)
         api_key = await app_settings_svc.get_gemini_api_key(db)
         if runtime.enabled and api_key:
+            # Rows are committed just above, so the queue worker's independent
+            # session will see them — enqueue directly. (V7-P1-4 renamed the old
+            # _dispatch_llm_classification to an after-commit hook used by the
+            # ingestion pipeline; this path already committed, so it just enqueues.)
             await db.commit()
-            from app.services.ingestion import _dispatch_llm_classification
-            await _dispatch_llm_classification(list(ctx.llm_targets))
-            ctx.summary["llm_dispatched"] = len(ctx.llm_targets)
+            from app.services.llm import queue as llm_queue
+            ctx.summary["llm_dispatched"] = llm_queue.enqueue(list(ctx.llm_targets))
 
     return ApiSuccess(data=ctx.summary)
 

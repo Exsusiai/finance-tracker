@@ -113,6 +113,26 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - **导入暂存流程（2026-06，preview-before-commit）**：upload **只解析不入库**，落 `status='awaiting_review'` 并返回**全部** `parsed_preview`（解析输出，非 DB 行）。`POST /statements/{id}/commit?account_id=` 才真正插入 + 跑 ingestion；`DELETE`（取消）连带删除暂存记录 + 存储的 PDF 文件（无痕，可重传）。`account_id` 可选（用 upload 时解析的候选账户）。旧 `awaiting_account`/`assign-account`/`confirm`(翻 is_pending) 保留向后兼容。`GET /statements/{id}` 对 awaiting_* 状态**重解析**出预览（DB 里还没有行）。
 - **银行识别覆盖的两道防线**（不做「改银行重新解析」——冗余）：(1) 上传时 `bank_format` 下拉手动指定；(2) 暂存预览里看到识别结果不对就取消重传。已入库的:撤销 + 重传。`list` 加 `offset` + `meta.total` 支持「加载更多」。`PdfImportStatus` 新增 `awaiting_review`（lifespan 幂等重建 CHECK）。
 
+### CSV 导入 / PayPal（2026-06-25 实装）
+
+PDF 之外的来源走 CSV。和 PDF 一样**没有通用 CSV 格式**——每个来源一个 parser，按表头签名识别。首个（目前唯一）来源：**PayPal**。
+
+- **包结构**：`services/csv_parser/`：`paypal.py`（`parse_paypal_csv`/`is_paypal_csv`）+ `__init__.detect_and_parse_csv`（按表头分发）。输出与 PDF parser 同 shape（`transactions[]` 里的 dict key 与 `_insert_and_ingest` 读取的一致），所以复用 ingestion 管道。`services/csv_import/import_csv_rows` 做**行级去重 + 插入 + ingest**。
+- **PayPal CSV 要点**：英文表头、`DD.MM.YYYY`、逗号小数、UTF-8 BOM；金额用 `Net`（余额影响），存 ABS，方向在 type/`metadata.transfer_direction`。`external_id = Transaction ID`（PayPal 偶尔**复用**一个 id，如 ACH 提现+其反转——parser 给后出现者加确定性 `#N` 后缀保证唯一且可重复去重）。
+- **行分类**：`Bank Deposit to PP Account`/`General Card Deposit` → transfer in（银行/卡→PayPal 的充值腿）；`User Initiated Withdrawal`/ACH 反转 → transfer out；其余（Mobile Payment/Express Checkout/PreApproved Bill/Payment Refund/EUR 货币转换腿）→ income/expense。**外币购买**（如 GitHub USD）：跳过净额为 0 的非 EUR FX 清算对，保留 EUR `General Currency Conversion` 作为真实支出（用 Reference Txn ID 回填商户名）。
+- **去重（关键）**：CSV 上传**预期日期范围重叠**（用户嫌登录麻烦，一次传几个月）。按 `external_id` 行级去重——已存在的行跳过，重复上传重叠月份安全。端点 `POST /statements/upload-csv?account_id=`（**直接入库，无 preview**，区别于 PDF 的暂存流程）。
+- **开户余额**：首次导入时把账户 `initial_balance` 设为 CSV 的开账余额（最早行 `Balance − Net`），使账户余额等于 PayPal 真实余额（只导了一个窗口，窗口前的余额=开账余额）。仅在账户为空且 `initial_balance==0` 时 seed，避免后续重叠上传移位。
+- **PayPal 账户建模**：`type='bank'` 流水账户（非快照），EUR；充值/提现腿与银行账单里的对应记录由 transfer-matcher 配对，形成「PayPal↔储蓄账户」闭环。历史银行侧记录（之前归在 餐饮/其他/工资 的 PayPal 扣款/到账）经 `pair_transactions` 翻成 transfer（跨行划转），其具体消费分类移到 PayPal 付款行。
+- **前端**：`pdf-import-panel.tsx` 加「CSV 导入（PayPal）」卡片（先选账户 → 选 .csv 上传 → 显示导入/去重计数）。
+
+### 交易拆分（AA / 代付，2026-06-25 实装）
+
+一笔交易拆成多条明细(各条之和=原额),用于「我集中付款、人均其实更少」的场景。`POST /transactions/{id}/split`(明细列表,校验和=原额)+ `POST /transactions/{id}/unsplit`(还原)。
+- **模型(无父容器)**:原行**变成第一条明细**(保留 id/external_id,所以 CSV 重导仍能去重),其余建**兄弟行**,都打 `metadata.split_group_id=原id`。因为各条之和=原额,**余额/现金流天然正确,无需任何排除谓词**。原始 {金额/类型/分类/metadata} 存进 `metadata.split_original` 供 unsplit 还原。
+- **转账腿方向**:拆分行若是 transfer(如「借出」),`transfer_direction` 继承原交易的资金流向(支出源→out),保证签名余额不变。
+- **base_amount** 按比例缩放(`原base × 本条/原额`),保 FX 口径。外币也对。
+- **典型用法**:€100 餐饮 → €20 餐饮 + €80 借出;别人转还的钱在交易列表改成「还款收回」(transfer)。前端 `split-transaction-form.tsx`(交易详情里「拆分」按钮,实时显示剩余额)。
+
 ### 市场数据 / 估值
 
 - `services/market_data/` 通过 APScheduler 定时拉取 yfinance / CoinGecko / exchangerate.host / metals，写入 `market_prices` 与 `fx_rates` 表。

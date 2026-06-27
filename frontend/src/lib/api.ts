@@ -480,6 +480,30 @@ export async function recategorizeTransaction(id: number): Promise<TransactionOu
   return request(`/api/v1/transactions/${id}/categorize`, { method: "POST" });
 }
 
+export interface SplitLineInput {
+  amount: string;
+  type: string;
+  category_id?: number | null;
+  description?: string | null;
+}
+
+/** Split one transaction into N lines summing to its amount (AA / 代付).
+ *  The original becomes the first line; the rest are sibling rows. */
+export async function splitTransaction(
+  id: number,
+  lines: SplitLineInput[],
+): Promise<TransactionOut[]> {
+  return request(`/api/v1/transactions/${id}/split`, {
+    method: "POST",
+    body: JSON.stringify({ lines }),
+  });
+}
+
+/** Undo a split: restore the original transaction, remove the siblings. */
+export async function unsplitTransaction(id: number): Promise<TransactionOut> {
+  return request(`/api/v1/transactions/${id}/unsplit`, { method: "POST" });
+}
+
 // ─── Categories ────────────────────────────────────────────────────────
 
 export interface CategoryOut {
@@ -886,6 +910,39 @@ export async function uploadPdf(
     throw new ApiError(res.status, body?.error?.message || res.statusText, body?.error?.code);
   }
 
+  const json = await res.json();
+  return json.data;
+}
+
+export interface CsvImportResult {
+  detected_source: string | null;
+  period: string | null;
+  parsed: number;
+  imported: number;
+  skipped_duplicate: number;
+  skipped_no_external_id: number;
+}
+
+/** Import a CSV account export (PayPal). Direct import with row-level dedup —
+ *  safe to re-upload overlapping date ranges. Requires a target account. */
+export async function uploadCsv(
+  file: File,
+  accountId: number,
+): Promise<CsvImportResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(
+    `${API_BASE}/api/v1/statements/upload-csv?account_id=${accountId}`,
+    { method: "POST", headers, body: formData },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body?.error?.message || res.statusText, body?.error?.code);
+  }
   const json = await res.json();
   return json.data;
 }

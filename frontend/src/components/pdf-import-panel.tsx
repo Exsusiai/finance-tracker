@@ -4,7 +4,9 @@ import { useState, useCallback, useRef } from "react";
 import { useAccounts, useStatementsPage, invalidateTransactionGraph } from "@/lib/hooks";
 import {
   type PdfImportOut,
+  type CsvImportResult,
   uploadPdf,
+  uploadCsv,
   commitStatement,
   deleteStatement,
   ApiError,
@@ -52,6 +54,12 @@ export function PdfImportPanel() {
   // Per-row account choice for awaiting_review records in the history list.
   const [rowAccount, setRowAccount] = useState<Record<number, number | undefined>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // CSV import (PayPal): account chosen up front, direct import + dedup.
+  const [csvAccountId, setCsvAccountId] = useState<number | undefined>();
+  const [csvUploading, setCsvUploading] = useState(false);
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [csvResult, setCsvResult] = useState<CsvImportResult | null>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
 
   const { data: accounts } = useAccounts(true);
   const {
@@ -106,6 +114,36 @@ export function PdfImportPanel() {
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
     [handleFile]
+  );
+
+  // CSV import (PayPal): direct import into the chosen account, row-level
+  // dedup makes re-uploading overlapping months safe.
+  const handleCsvFile = useCallback(
+    async (file: File) => {
+      if (!file.name.toLowerCase().endsWith(".csv")) {
+        setCsvError("仅支持 CSV 文件");
+        return;
+      }
+      if (!csvAccountId) {
+        setCsvError("请先选择要导入到的账户。");
+        return;
+      }
+      setCsvUploading(true);
+      setCsvError(null);
+      setCsvResult(null);
+      try {
+        const result = await uploadCsv(file, csvAccountId);
+        setCsvResult(result);
+        refreshStatements();
+        invalidateTransactionGraph();
+      } catch (e) {
+        setCsvError(e instanceof ApiError ? e.message : "上传失败，请重试");
+      } finally {
+        setCsvUploading(false);
+        if (csvInputRef.current) csvInputRef.current.value = "";
+      }
+    },
+    [csvAccountId, refreshStatements]
   );
 
   // Commit a staged import → actually inserts the transactions.
@@ -216,6 +254,55 @@ export function PdfImportPanel() {
         {uploadError && (
           <div className="mt-4 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">
             {uploadError}
+          </div>
+        )}
+      </div>
+
+      {/* ─── CSV import (PayPal) ──────────────────────────────────── */}
+      <div className="rounded-xl border border-border bg-card p-6">
+        <h3 className="text-base font-semibold mb-1">CSV 导入（PayPal）</h3>
+        <p className="text-xs text-muted-foreground mb-4">
+          从 PayPal 网页版导出 CSV（Activity → Reports → Statements）。可一次上传
+          多个月、任意日期范围；<strong>按交易号自动去重</strong>，重复上传重叠月份不会重复入账。
+        </p>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <select
+            value={csvAccountId ?? ""}
+            onChange={(e) => setCsvAccountId(e.target.value ? Number(e.target.value) : undefined)}
+            className="px-3 py-2 text-sm rounded-lg border border-border bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring sm:w-1/2"
+          >
+            <option value="">导入到账户…</option>
+            {pdfAccounts.map((a) => (
+              <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>
+            ))}
+          </select>
+          <button
+            onClick={() => csvInputRef.current?.click()}
+            disabled={csvUploading || !csvAccountId}
+            className="px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {csvUploading ? "导入中…" : "选择 CSV 上传"}
+          </button>
+          <input
+            ref={csvInputRef}
+            type="file"
+            accept=".csv"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) handleCsvFile(f); }}
+            disabled={csvUploading}
+            className="hidden"
+          />
+        </div>
+        {csvError && (
+          <div className="mt-3 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive">
+            {csvError}
+          </div>
+        )}
+        {csvResult && (
+          <div className="mt-3 p-3 rounded-lg bg-green-500/10 border border-green-500/20 text-sm text-foreground">
+            导入完成（{csvResult.detected_source ?? "csv"}{csvResult.period ? ` · ${csvResult.period}` : ""}）：
+            新增 <strong>{csvResult.imported}</strong> 笔
+            {csvResult.skipped_duplicate > 0 && <>，跳过重复 {csvResult.skipped_duplicate} 笔</>}
+            （共解析 {csvResult.parsed} 笔）。
           </div>
         )}
       </div>

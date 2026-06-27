@@ -8,11 +8,13 @@ import {
   updateTransaction,
   deleteTransaction,
   recategorizeTransaction,
+  unsplitTransaction,
   ApiError,
 } from "@/lib/api";
 import { invalidateTransactionGraph } from "@/lib/hooks";
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { TransactionForm } from "./transaction-form";
+import { SplitTransactionForm } from "./split-transaction-form";
 
 interface TransactionDetailProps {
   tx: TransactionOut;
@@ -44,8 +46,26 @@ export function TransactionDetail({
   onUpdate,
 }: TransactionDetailProps) {
   const [isEditing, setIsEditing] = useState(false);
+  const [isSplitting, setIsSplitting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [recategorizing, setRecategorizing] = useState(false);
+
+  // Is this row part of a split group? (metadata.split_group_id)
+  let isSplit = false;
+  try {
+    isSplit = !!(tx.metadata_json && JSON.parse(tx.metadata_json).split_group_id != null);
+  } catch { /* malformed metadata → treat as not split */ }
+
+  const handleUnsplit = async () => {
+    try {
+      await unsplitTransaction(tx.id);
+      invalidateTransactionGraph();
+      onUpdate();
+      onClose();
+    } catch (e) {
+      console.error("Unsplit failed:", e);
+    }
+  };
 
   const handleDelete = async () => {
     try {
@@ -125,6 +145,17 @@ export function TransactionDetail({
                 is_pending: tx.is_pending,
               }}
               isEdit
+            />
+          ) : isSplitting ? (
+            <SplitTransactionForm
+              tx={tx}
+              categories={categories}
+              onClose={() => setIsSplitting(false)}
+              onSuccess={() => {
+                setIsSplitting(false);
+                onUpdate();
+                onClose();
+              }}
             />
           ) : (
             <div className="space-y-5">
@@ -227,6 +258,29 @@ export function TransactionDetail({
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                     </svg>
                     {recategorizing ? "自动分类中…" : "智能分类"}
+                  </button>
+                )}
+
+                {/* Split (AA / 代付): only for non-adjustment, non-split rows */}
+                {!isSplit && tx.type !== "adjustment" && (
+                  <button
+                    onClick={() => setIsSplitting(true)}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border border-border hover:bg-muted transition-colors"
+                  >
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7h12m0 0l-4-4m4 4l-4 4m4 6H4m0 0l4 4m-4-4l4-4" />
+                    </svg>
+                    拆分(AA/代付)
+                  </button>
+                )}
+
+                {/* Unsplit: restore the original, remove siblings */}
+                {isSplit && (
+                  <button
+                    onClick={handleUnsplit}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border border-border hover:bg-muted transition-colors"
+                  >
+                    取消拆分(还原为原始整笔)
                   </button>
                 )}
 
