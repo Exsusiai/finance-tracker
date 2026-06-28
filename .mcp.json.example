@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to .mcp.json and set `command` to THIS host's absolute path to mcp-server/run.sh. .mcp.json is gitignored because the path is host-specific (mac: /Users/...; server: /home/...).",
+  "mcpServers": {
+    "finance-tracker": {
+      "command": "/ABSOLUTE/PATH/TO/finance-tracker/mcp-server/run.sh",
+      "args": []
+    }
+  }
+}

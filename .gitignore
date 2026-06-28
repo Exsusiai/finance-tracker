@@ -36,6 +36,10 @@ pnpm-debug.log*
 *.pem
 *.key
 
+# Host-specific MCP wiring (absolute path to mcp-server/run.sh differs per
+# machine). Each host keeps its own untracked copy; see .mcp.json.example.
+.mcp.json
+
 # ──────────────────────────── Project Data ──────────────────────
 # 数据库文件、PDF 原稿、备份 — 永不提交
 data/*.db

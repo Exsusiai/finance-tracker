@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "finance-tracker": {
-      "command": "/Users/jason/Project/finance-tracker/mcp-server/run.sh",
-      "args": []
-    }
-  }
-}
