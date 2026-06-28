@@ -4,10 +4,11 @@
 user upgrades, the classic v2 endpoints reject every call with
 ``code 40085: "You are in Unified Account mode, and the Classic Account API is
 not supported"`` → holdings would silently read 0. So we probe the classic spot
-endpoint first; on ``40085`` we switch to the v3 unified endpoint
-``/api/v3/account/assets`` (same HMAC signing), which returns one consolidated
-``assets`` list whose per-coin ``balance`` == ``available + locked`` (same
-"physical coin in wallet" semantics as the classic path).
+endpoint first; on ``40085`` we switch to the v3 unified endpoints (same HMAC
+signing) and sum BOTH wallets a unified account is split into:
+``/api/v3/account/assets`` (trading) + ``/api/v3/account/funding-assets``
+(funding / 资金). Per coin we take ``balance`` == ``available + locked/frozen``
+(same "physical coin in wallet" semantics as the classic path).
 
 **Classic account** — unchanged: aggregate four v2 endpoints by coin symbol:
 - ``/api/v2/spot/account/assets``                            — spot wallet
@@ -41,7 +42,8 @@ log = structlog.get_logger(__name__)
 _BASE = "https://api.bitget.com"
 _SPOT_PATH = "/api/v2/spot/account/assets"
 _MIX_PATH = "/api/v2/mix/account/accounts"
-_V3_ASSETS_PATH = "/api/v3/account/assets"  # Unified Account (UTA)
+_V3_ASSETS_PATH = "/api/v3/account/assets"  # Unified Account (UTA) — trading
+_V3_FUNDING_PATH = "/api/v3/account/funding-assets"  # UTA — funding (资金) wallet
 # Product types we pull. Order matters only for deterministic test
 # fixture iteration.
 _MIX_PRODUCT_TYPES = ("USDT-FUTURES", "USDC-FUTURES", "COIN-FUTURES")
@@ -155,10 +157,19 @@ class BitgetProvider:
         api_secret: str,
         passphrase: str,
     ) -> list[BalanceItem]:
-        """Unified Account (UTA) path: one v3 call returns a consolidated
-        ``assets`` list. Per coin, ``balance`` == ``available + locked`` (the
-        physical coin in the wallet); ``equity`` adds unrealizedPL, which we
-        skip to keep net worth from flickering — same rule as the classic path."""
+        """Unified Account (UTA) path. A unified account splits funds into two
+        wallets, BOTH queried via v3 and summed per coin:
+
+        - ``/api/v3/account/assets``         — the unified TRADING account
+        - ``/api/v3/account/funding-assets`` — the FUNDING (资金) wallet
+
+        Per coin we take ``balance`` (== available + locked/frozen, the physical
+        coin held); ``equity`` adds unrealizedPL, which we skip to keep net
+        worth from flickering — same rule as the classic path. A funding-wallet
+        failure doesn't drop the trading balances we already have."""
+        totals: dict[str, Decimal] = {}
+
+        # ─── Trading account (mandatory; auth/other errors are fatal) ─────
         body = await self._get_raw(
             http, _V3_ASSETS_PATH, query="",
             api_key=api_key, api_secret=api_secret, passphrase=passphrase,
@@ -169,22 +180,42 @@ class BitgetProvider:
                 f"Bitget v3 error {code}: {body.get('msg') or 'unknown'}"
             )
         data = body.get("data") or {}
-        assets = data.get("assets") if isinstance(data, dict) else None
-        out: list[BalanceItem] = []
-        for a in assets or []:
+        for a in (data.get("assets") if isinstance(data, dict) else None) or []:
             coin = a.get("coin")
             if not coin:
                 continue
-            # `balance` is the held coin amount; fall back to available+locked
-            # if a future response omits it.
             qty = _dec(a.get("balance"))
             if qty == 0:
                 qty = _dec(a.get("available")) + _dec(a.get("locked"))
             if qty > 0:
-                out.append(BalanceItem(
-                    symbol=coin, contract=None, quantity=qty.normalize(), decimals=8,
-                ))
-        return out
+                totals[coin] = totals.get(coin, Decimal(0)) + qty
+
+        # ─── Funding wallet (best-effort; don't lose trading on its failure) ─
+        try:
+            fbody = await self._get_raw(
+                http, _V3_FUNDING_PATH, query="",
+                api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+            )
+            fcode = str(fbody.get("code", "00000"))
+            if fcode == "00000":
+                for a in fbody.get("data") or []:
+                    coin = a.get("coin")
+                    if not coin:
+                        continue
+                    qty = _dec(a.get("balance"))
+                    if qty == 0:
+                        qty = _dec(a.get("available")) + _dec(a.get("frozen"))
+                    if qty > 0:
+                        totals[coin] = totals.get(coin, Decimal(0)) + qty
+            else:
+                log.warning("bitget_funding_failed", code=fcode, msg=fbody.get("msg"))
+        except httpx.HTTPError as exc:
+            log.warning("bitget_funding_failed", error=str(exc))
+
+        return [
+            BalanceItem(symbol=coin, contract=None, quantity=qty.normalize(), decimals=8)
+            for coin, qty in totals.items()
+        ]
 
     async def _get(
         self,

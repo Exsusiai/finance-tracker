@@ -3,9 +3,10 @@
     "scenario": "Bitget account upgraded to Unified Account (UTA). Classic v2 endpoints reject with code 40085; balances live on the v3 endpoint.",
     "endpoints": [
       "GET /api/v2/spot/account/assets — returns HTTP 400 + code 40085 (Unified Account mode)",
-      "GET /api/v3/account/assets — Unified Account consolidated assets (per-coin balance = available + locked)"
+      "GET /api/v3/account/assets — Unified trading account assets (per-coin balance = available + locked)",
+      "GET /api/v3/account/funding-assets — Funding (资金) wallet assets (balance = available + frozen)"
     ],
-    "note": "Provider probes spot first; on 40085 it switches to v3 and must NOT call the classic /mix endpoints. Zero-balance coins are dropped."
+    "note": "Provider probes spot first; on 40085 it switches to v3, sums trading + funding wallets per coin, must NOT call the classic /mix endpoints, and drops zero-balance coins. Here USDT appears in both wallets (536.94 trading + 880 funding = 1416.94)."
   },
   "spot_40085": {
     "code": "40085",
@@ -30,5 +31,14 @@
         {"coin": "ZERO", "equity": "0", "usdValue": "0", "balance": "0", "available": "0", "debt": "0", "locked": "0"}
       ]
     }
+  },
+  "v3_funding": {
+    "code": "00000",
+    "msg": "success",
+    "requestTime": 1700000000000,
+    "data": [
+      {"coin": "USDT", "available": "880", "frozen": "0", "balance": "880"},
+      {"coin": "ETH",  "available": "1.5", "frozen": "0", "balance": "1.5"}
+    ]
   }
 }

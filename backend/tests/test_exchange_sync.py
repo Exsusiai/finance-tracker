@@ -197,9 +197,9 @@ class TestBitgetProvider:
     @pytest.mark.asyncio
     async def test_unified_account_switches_to_v3(self):
         """Account upgraded to Unified Account: classic spot returns HTTP 400
-        + code 40085, so the provider must switch to the v3 endpoint, parse its
-        consolidated `assets`, drop zero-balance coins, and NEVER touch the
-        classic /mix endpoints."""
+        + code 40085, so the provider switches to the v3 endpoints, sums BOTH
+        the trading and funding (资金) wallets per coin, drops zero-balance
+        coins, and NEVER touches the classic /mix endpoints."""
         fx = _load("bitget_unified.json")
         paths_called: list[str] = []
 
@@ -210,6 +210,8 @@ class TestBitgetProvider:
                 return httpx.Response(400, json=fx["spot_40085"])
             if "/api/v3/account/assets" in path:
                 return httpx.Response(200, json=fx["v3_assets"])
+            if "/api/v3/account/funding-assets" in path:
+                return httpx.Response(200, json=fx["v3_funding"])
             return httpx.Response(404, json={"code": "404", "msg": "unexpected call"})
 
         client = httpx.AsyncClient(
@@ -222,13 +224,45 @@ class TestBitgetProvider:
         )
         await client.aclose()
 
-        # Switched to v3; classic mix endpoints were NOT called.
+        # Switched to v3 (both wallets); classic mix endpoints were NOT called.
         assert any("/api/v3/account/assets" in p for p in paths_called)
+        assert any("/api/v3/account/funding-assets" in p for p in paths_called)
         assert not any("/mix/account/accounts" in p for p in paths_called)
-        # Real balances surfaced; the zero-balance coin is dropped.
         got = {it.symbol: it.quantity for it in items}
-        assert set(got) == {"USDC", "USDT", "BTC", "BGB"}
+        # ETH comes only from funding; USDT is summed across BOTH wallets.
+        assert set(got) == {"USDC", "USDT", "BTC", "BGB", "ETH"}
+        assert got["USDT"] == Decimal("1416.94164805")  # 536.94164805 + 880
+        assert got["ETH"] == Decimal("1.5")
         assert got["USDC"] == Decimal("746.95565305")
+
+    @pytest.mark.asyncio
+    async def test_unified_funding_failure_keeps_trading(self):
+        """If the funding-wallet call fails, the trading balances we already
+        fetched still surface (best-effort funding, like classic mix tolerance)."""
+        fx = _load("bitget_unified.json")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if "/spot/account/assets" in path:
+                return httpx.Response(400, json=fx["spot_40085"])
+            if "/api/v3/account/assets" in path:
+                return httpx.Response(200, json=fx["v3_assets"])
+            if "/api/v3/account/funding-assets" in path:
+                return httpx.Response(500, json={"code": "500", "msg": "boom"})
+            return httpx.Response(404, json={"code": "404", "msg": "unexpected"})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.bitget.com",
+        )
+        items = await BitgetProvider(http=client).fetch_balances(
+            api_key="ak", api_secret="sk", passphrase="pp"
+        )
+        await client.aclose()
+        got = {it.symbol: it.quantity for it in items}
+        # Trading balances intact; funding-only ETH absent; USDT = trading only.
+        assert "ETH" not in got
+        assert got["USDT"] == Decimal("536.94164805")
         assert got["BTC"] == Decimal("0.00327113")
 
     @pytest.mark.asyncio
