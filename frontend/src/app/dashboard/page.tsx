@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   useBalances,
-  usePortfolioComposition,
+  usePortfolioBreakdown,
   useNetWorth,
   useFxRates,
   useCashFlowTimeseries,
@@ -12,8 +12,8 @@ import {
 import {
   formatCurrency,
   formatDate,
+  ASSET_CLASS_LABELS,
   ASSET_CLASS_COLORS,
-  CHART_COLORS,
   DISPLAY_CURRENCIES,
   cn,
   convertAmount,
@@ -34,9 +34,7 @@ import {
 export default function DashboardPage() {
   // ─── Data fetching ───────────────────────────────────────────────────
   const { data: balances, error: balancesError, isLoading: balancesLoading, mutate: refreshBalances } = useBalances();
-  // 资产分布用 composition(现金+投资全景，口径与资产页一致：银行现金 vs 券商闲置现金等分开），
-  // 而不是只含投资、按原始 asset_class 分组的 breakdown。
-  const { data: composition, error: compositionError, isLoading: compositionLoading, mutate: refreshComposition } = usePortfolioComposition();
+  const { data: breakdown, error: breakdownError, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
   const { data: netWorth } = useNetWorth();
   const { data: fxRatesRaw } = useFxRates("CNY");
   const fxMap = useMemo(() => latestFxMap(fxRatesRaw), [fxRatesRaw]);
@@ -100,40 +98,49 @@ export default function DashboardPage() {
       .sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
   }, [balances]);
 
-  // ─── Derived: composition allocation segments (display currency) ───────
-  // Same source as the assets page 按构成 view, so 现金 here == hero 现金.
+  // ─── Derived: Asset-class allocation segments (display currency) ───────
+  // Coarse by-class view (us_stock / crypto / fund / …) PLUS bank cash, with
+  // the lone "现金" class split into two so it's unambiguous:
+  //   • 银行现金 — bank-account cash (net of credit cards) = net_worth.cash_total
+  //   • 券商闲置现金 — the by_class "cash" bucket (idle cash held in IBKR/TR/CEX)
   const allocation = useMemo<AllocSegment[]>(() => {
-    const entries = composition?.entries ?? [];
-    const totalRaw = entries.reduce((s, e) => s + parseFloat(e.value || "0"), 0);
+    const raw: Array<{ key: string; label: string; base: number; color: string }> = [];
+
+    const bankCash = netWorth ? parseFloat(netWorth.cash_total) : 0;
+    if (Math.abs(bankCash) > 0.005) {
+      raw.push({ key: "bank_cash", label: "银行现金", base: bankCash, color: ASSET_CLASS_COLORS.cash });
+    }
+    for (const [key, val] of Object.entries(breakdown?.by_class ?? {})) {
+      const base = parseFloat(val.value || "0");
+      if (Math.abs(base) < 0.005) continue;
+      const isIdle = key === "cash"; // asset_class='cash' holdings = brokerage idle cash
+      raw.push({
+        key,
+        label: isIdle ? "券商闲置现金" : (ASSET_CLASS_LABELS[key] || key),
+        base,
+        color: isIdle ? "var(--cat-2)" : (ASSET_CLASS_COLORS[key] || "var(--chart-5)"),
+      });
+    }
+
+    const totalRaw = raw.reduce((s, x) => s + x.base, 0);
     if (totalRaw <= 0) return [];
-    return entries
-      .map((e, i) => {
-        const raw = parseFloat(e.value || "0");
-        const d = toDisplay(raw);
-        return {
-          key: e.key,
-          label: e.label,
-          value: d.v,
-          currency: d.c,
-          percent: (raw / totalRaw) * 100,
-          color:
-            ASSET_CLASS_COLORS[e.asset_class] ||
-            CHART_COLORS[i % CHART_COLORS.length] ||
-            "var(--chart-5)",
-        };
+    return raw
+      .map((x) => {
+        const d = toDisplay(x.base);
+        return { key: x.key, label: x.label, value: d.v, currency: d.c, percent: (x.base / totalRaw) * 100, color: x.color };
       })
       .sort((a, b) => b.value - a.value);
-  }, [composition, toDisplay]);
+  }, [breakdown, netWorth, toDisplay]);
 
   // ─── Error / Loading ──────────────────────────────────────────────────
-  const hasError = balancesError || compositionError;
-  const hasLoading = balancesLoading || compositionLoading;
-  const refreshAll = () => { refreshBalances(); refreshComposition(); };
+  const hasError = balancesError || breakdownError;
+  const hasLoading = balancesLoading || breakdownLoading;
+  const refreshAll = () => { refreshBalances(); refreshBreakdown(); };
 
   if (hasError) {
     return (
       <ErrorDisplay
-        message={balancesError?.message || compositionError?.message || "加载失败"}
+        message={balancesError?.message || breakdownError?.message || "加载失败"}
         onRetry={refreshAll}
       />
     );
@@ -222,8 +229,8 @@ export default function DashboardPage() {
                   />
                 </div>
                 <div className="mt-6 flex items-center justify-between border-t border-border pt-4 text-sm">
-                  <span className="text-muted-foreground">资产构成</span>
-                  <span className="font-medium tabular-nums">{allocation.length} 项</span>
+                  <span className="text-muted-foreground">资产类别</span>
+                  <span className="font-medium tabular-nums">{allocation.length} 类</span>
                 </div>
               </Tile>
             </div>
