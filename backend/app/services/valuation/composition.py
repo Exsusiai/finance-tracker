@@ -136,6 +136,15 @@ async def compute_composition(db: AsyncSession, base_currency: str) -> Compositi
         asset_class = asset.asset_class or "other"
         if symbol in _STABLECOINS:
             key, label, cls = "stable", "USD 稳定币", "stable"
+        elif asset_class == "cash":
+            # Idle cash sitting in a brokerage/exchange (e.g. IBKR EUR cash) is
+            # NOT the same as bank-account cash (which the cash leg above already
+            # captured, net of credit-card debt). Keep it as its own slice so the
+            # composition's 现金 == net_worth.cash_total (bank ledger) and this
+            # brokerage idle cash — counted under investments by net_worth — is
+            # shown distinctly rather than inflating 现金. (Distinct key avoids
+            # colliding with the cash-leg ``cash:{ccy}`` buckets.)
+            key, label, cls = "idle_cash", "券商闲置现金", "idle_cash"
         else:
             key = f"{asset_class}:{symbol}"
             label = _asset_label(asset.symbol, asset.name)
@@ -151,9 +160,10 @@ async def compute_composition(db: AsyncSession, base_currency: str) -> Compositi
         if b.value < _DUST:
             dust += 1
             continue
-        # Cash & stablecoins are never "junk-bucketed"; investments below
-        # _SMALL fold into a per-category small bucket.
-        if b.asset_class in ("cash", "stable") or b.value >= _SMALL:
+        # Cash-like buckets (bank cash / stablecoins / brokerage idle cash) are
+        # never "junk-bucketed"; investments below _SMALL fold into a
+        # per-category small bucket.
+        if b.asset_class in ("cash", "stable", "idle_cash") or b.value >= _SMALL:
             final[b.label] = _merge(final.get(b.label), b)
         else:
             label = _small_label(b.asset_class)

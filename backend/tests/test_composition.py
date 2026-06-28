@@ -67,6 +67,7 @@ async def _seed():
         usdt, usdc = asset("USDT", "crypto"), asset("USDC", "crypto")
         btc, small, dust = asset("BTC", "crypto"), asset("SMALLC", "crypto"), asset("DUST", "crypto")
         aapl = asset("AAPL", "us_stock")
+        idle = asset("EUR", "cash")  # brokerage idle cash holding
         # Broker-synced fund whose symbol is an ISIN but has a friendly name.
         isin = Asset(symbol="IE00B4L5Y983", name="Core MSCI World", asset_class="fund",
                      currency="EUR", created_at=_now(), updated_at=_now())
@@ -78,7 +79,7 @@ async def _seed():
                                source="test", quoted_at=_now()))
 
         for a, p in [(usdt, "1"), (usdc, "1"), (btc, "50000"), (small, "5"),
-                     (dust, "0.05"), (aapl, "100"), (isin, "200")]:
+                     (dust, "0.05"), (aapl, "100"), (isin, "200"), (idle, "1")]:
             price(a, p)
 
         def hold(acc, a, qty):
@@ -93,6 +94,7 @@ async def _seed():
         hold(ex1, dust, "1")       # €0.05 → dropped
         hold(ex1, aapl, "1")       # €100 → shown individually
         hold(ex1, isin, "1")       # €200 → label uses friendly name, not ISIN
+        hold(ex1, idle, "300")     # €300 brokerage idle cash → own bucket, NOT 现金
         await db.commit()
     yield
     async with _engine.begin() as conn:
@@ -108,8 +110,10 @@ async def test_composition_rules():
     # Stablecoins merged into one bucket (USDT 500 + USDC 300 = 800).
     assert Decimal(by_label["USD 稳定币"]["value"]) == Decimal("800")
     assert by_label["USD 稳定币"]["count"] == 2
-    # Cash grouped by currency (bank initial_balance).
+    # Bank cash (initial_balance) stays = €1000; brokerage idle cash (€300) is
+    # a SEPARATE bucket, not merged into 现金 — so the two never conflate.
     assert Decimal(by_label["EUR 现金"]["value"]) == Decimal("1000")
+    assert Decimal(by_label["券商闲置现金"]["value"]) == Decimal("300")
     # Same coin summed across accounts: BTC 0.01@ex1 + 0.006@ex2 = 0.016 × 50000.
     assert Decimal(by_label["BTC"]["value"]) == Decimal("800")
     assert by_label["BTC"]["count"] == 2
@@ -122,5 +126,5 @@ async def test_composition_rules():
     # ISIN-symbol asset shows its friendly name, not the raw ISIN.
     assert Decimal(by_label["Core MSCI World"]["value"]) == Decimal("200")
     assert "IE00B4L5Y983" not in by_label
-    # Total reconciles (1000 + 800 + 800 + 5 + 100 + 200 = 2905; dust excluded).
-    assert Decimal(r.total) == Decimal("2905")
+    # Total reconciles (1000 + 800 + 800 + 5 + 100 + 200 + 300 = 3205; dust excluded).
+    assert Decimal(r.total) == Decimal("3205")
