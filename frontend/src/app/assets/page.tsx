@@ -13,6 +13,7 @@ import {
   useHoldings,
   usePortfolioSummary,
   usePortfolioBreakdown,
+  usePortfolioComposition,
   useBalances,
   useAccounts,
   useAssets,
@@ -40,6 +41,7 @@ import {
   type AccountOut,
   type BalanceOut,
   type HoldingOut,
+  type PortfolioComposition,
 } from "@/lib/api";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { PageHeader, SegmentedControl, StatTile } from "@/components/ui-kit";
@@ -85,7 +87,7 @@ function pnlPercent(h: HoldingOut): number | null {
   return ((price - cost) / cost) * 100;
 }
 
-type AssetsTab = "accounts" | "holdings" | "distribution" | "balances";
+type AssetsTab = "accounts" | "holdings" | "balances";
 
 export default function AssetsPage() {
   const [tab, setTab] = useState<AssetsTab>("accounts");
@@ -97,7 +99,7 @@ export default function AssetsPage() {
   const [pendingDelete, setPendingDelete] = useState<HoldingOut | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [distMode, setDistMode] = useState<"class" | "currency">("class");
+  const [distMode, setDistMode] = useState<"class" | "currency" | "composition">("composition");
   const [adjustTarget, setAdjustTarget] = useState<BalanceOut | null>(null);
   // Account management state
   const [showAccountForm, setShowAccountForm] = useState(false);
@@ -123,6 +125,7 @@ export default function AssetsPage() {
   const { data: netWorth, isLoading: netWorthLoading, mutate: refreshNetWorth } = useNetWorth();
   const { data: holdings, error: holdingsError, isLoading: holdingsLoading, mutate: refreshHoldings } = useHoldings();
   const { data: breakdown, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
+  const { data: composition, isLoading: compositionLoading, mutate: refreshComposition } = usePortfolioComposition();
   const { data: balances, isLoading: balancesLoading, mutate: refreshBalances } = useBalances();
   const { data: accounts } = useAccounts(true);
   const { data: assets, mutate: refreshAssets } = useAssets();
@@ -159,6 +162,7 @@ export default function AssetsPage() {
     refreshNetWorth();
     refreshHoldings();
     refreshBreakdown();
+    refreshComposition();
     refreshBalances();
     refreshAssets();
     refreshByPrefix("accounts");
@@ -411,11 +415,49 @@ export default function AssetsPage() {
           })()}
         </div>
 
+        {/* 资产分布 — 独立成常显报表，无需切 Tab，随数据实时刷新 */}
+        <section className="mb-8">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">资产分布</h2>
+            <div className="inline-flex rounded-lg border border-border bg-card p-1">
+              {([
+                { value: "composition", label: "按构成" },
+                { value: "class", label: "按类型" },
+                { value: "currency", label: "按币种" },
+              ] as const).map((m) => (
+                <button
+                  key={m.value}
+                  onClick={() => setDistMode(m.value)}
+                  className={cn(
+                    "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                    distMode === m.value
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {(distMode === "composition" ? compositionLoading : breakdownLoading) ? (
+            <LoadingSpinner />
+          ) : (
+            <DistributionPanel
+              mode={distMode}
+              breakdown={breakdown}
+              composition={composition}
+              baseCurrency={summary?.base_currency ?? baseCurrency}
+              displayCurrency={displayCurrency}
+              fxMap={fxMap}
+            />
+          )}
+        </section>
+
         <div className="flex items-center gap-1 border-b border-border mb-6 overflow-x-auto">
           {([
             { value: "accounts", label: "账户" },
             { value: "holdings", label: "持仓" },
-            { value: "distribution", label: "资产分布" },
             { value: "balances", label: "账户余额" },
           ] as const).map((opt) => (
             <button
@@ -619,45 +661,6 @@ export default function AssetsPage() {
                   </table>
                 </div>
               </div>
-            )}
-          </div>
-        )}
-
-        {tab === "distribution" && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-muted-foreground">视图：</span>
-              <div className="inline-flex rounded-lg border border-border bg-card p-1">
-                {([
-                  { value: "class", label: "按类型" },
-                  { value: "currency", label: "按币种" },
-                ] as const).map((m) => (
-                  <button
-                    key={m.value}
-                    onClick={() => setDistMode(m.value)}
-                    className={cn(
-                      "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
-                      distMode === m.value
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {breakdownLoading ? (
-              <LoadingSpinner />
-            ) : (
-              <DistributionPanel
-                mode={distMode}
-                breakdown={breakdown}
-                baseCurrency={summary?.base_currency ?? baseCurrency}
-                displayCurrency={displayCurrency}
-                fxMap={fxMap}
-              />
             )}
           </div>
         )}
@@ -882,37 +885,62 @@ function Th({ label, sortKey, current, dir, onSort, align = "left" }: ThProps) {
 }
 
 interface DistPanelProps {
-  mode: "class" | "currency";
+  mode: "class" | "currency" | "composition";
   breakdown:
     | {
         by_class: Record<string, { value: string; count: number; assets: Array<{ symbol: string; name: string; value: string }> }>;
         by_currency: Record<string, { original_value: string; base_value: string; count: number }>;
       }
     | undefined;
+  composition?: PortfolioComposition;
   baseCurrency: string;
   displayCurrency: string;
   fxMap: Map<string, number>;
 }
 
-function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxMap }: DistPanelProps) {
-  // Normalise both shapes into a uniform list: { key, baseValue, originalValue, count }.
-  // by_class entries carry `value` (already in base currency).
-  // by_currency entries carry `base_value` (base currency) + `original_value` (quote currency).
-  const normalised: Array<{ key: string; baseValue: string; originalValue: string | null; count: number }> = (() => {
-    if (!breakdown) return [];
-    if (mode === "class") {
-      return Object.entries(breakdown.by_class).map(([k, v]) => ({
-        key: k,
-        baseValue: v.value,
+interface NormEntry {
+  label: string;
+  baseValue: string;
+  originalValue: string | null;
+  originalCurrency: string | null;
+  count: number;
+  fill: string;
+}
+
+function DistributionPanel({ mode, breakdown, composition, baseCurrency, displayCurrency, fxMap }: DistPanelProps) {
+  // Normalise every shape into a uniform list. by_class `value` and composition
+  // `value` are already in base currency; by_currency carries base_value +
+  // original_value (quote currency).
+  const normalised: NormEntry[] = (() => {
+    if (mode === "composition") {
+      if (!composition) return [];
+      return composition.entries.map((e, i) => ({
+        label: e.label,
+        baseValue: e.value,
         originalValue: null,
-        count: v.count,
+        originalCurrency: null,
+        count: e.count,
+        fill: ASSET_CLASS_COLORS[e.asset_class] || CHART_COLORS[i % CHART_COLORS.length],
       }));
     }
-    return Object.entries(breakdown.by_currency).map(([k, v]) => ({
-      key: k,
+    if (!breakdown) return [];
+    if (mode === "class") {
+      return Object.entries(breakdown.by_class).map(([k, v], i) => ({
+        label: ASSET_CLASS_LABELS[k] || k,
+        baseValue: v.value,
+        originalValue: null,
+        originalCurrency: null,
+        count: v.count,
+        fill: ASSET_CLASS_COLORS[k] || CHART_COLORS[i % CHART_COLORS.length],
+      }));
+    }
+    return Object.entries(breakdown.by_currency).map(([k, v], i) => ({
+      label: k,
       baseValue: v.base_value,
       originalValue: v.original_value,
+      originalCurrency: k,
       count: v.count,
+      fill: CHART_COLORS[i % CHART_COLORS.length],
     }));
   })();
 
@@ -937,29 +965,38 @@ function DistributionPanel({ mode, breakdown, baseCurrency, displayCurrency, fxM
   const totalRaw = normalised.reduce((s, e) => s + parseFloat(e.baseValue || "0"), 0);
   const total = convertVal(String(totalRaw));
 
-  const pieData = normalised.map((entry, i) => {
+  const pieData = normalised.map((entry) => {
     const d = convertVal(entry.baseValue);
     return {
-      name: mode === "class" ? (ASSET_CLASS_LABELS[entry.key] || entry.key) : entry.key,
+      name: entry.label,
       value: d.value,
       currency: d.currency,
       count: entry.count,
       // For currency mode, show original (quote-currency) value in tooltip
       originalValue: entry.originalValue,
-      originalCurrency: mode === "currency" ? entry.key : null,
-      fill:
-        mode === "class"
-          ? ASSET_CLASS_COLORS[entry.key] || CHART_COLORS[i % CHART_COLORS.length]
-          : CHART_COLORS[i % CHART_COLORS.length],
+      originalCurrency: entry.originalCurrency,
+      fill: entry.fill,
       percent: totalRaw > 0 ? (parseFloat(entry.baseValue || "0") / totalRaw) * 100 : 0,
     };
   });
 
+  const title =
+    mode === "class"
+      ? "按类型（仅投资）"
+      : mode === "currency"
+        ? "按币种（仅投资）"
+        : "按构成（现金 + 投资）";
+
   return (
     <div className="rounded-xl border border-border bg-card p-4 md:p-6">
-      <h3 className="text-base font-semibold mb-4">
-        {mode === "class" ? "资产分布（按类型）" : "资产分布（按币种）"}
-      </h3>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-medium text-muted-foreground">{title}</h3>
+        {mode === "composition" && composition && composition.dust_excluded_count > 0 && (
+          <span className="text-xs text-muted-foreground">
+            已剔除 {composition.dust_excluded_count} 项 &lt;€0.1 的微量币
+          </span>
+        )}
+      </div>
       <div className="flex flex-col lg:flex-row items-center gap-6">
         <ResponsiveContainer width="100%" height={300} className="max-w-[360px]">
           <PieChart>

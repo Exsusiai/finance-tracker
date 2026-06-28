@@ -184,6 +184,25 @@ export async function fetchPortfolioBreakdown(): Promise<PortfolioBreakdown> {
   return request("/api/v1/holdings/portfolio/breakdown");
 }
 
+export interface CompositionEntry {
+  key: string;
+  label: string;
+  asset_class: string; // cash / stable / crypto / us_stock / … / small
+  value: string; // folded to base currency
+  count: number;
+}
+
+export interface PortfolioComposition {
+  base_currency: string;
+  total: string;
+  entries: CompositionEntry[];
+  dust_excluded_count: number;
+}
+
+export async function fetchPortfolioComposition(): Promise<PortfolioComposition> {
+  return request("/api/v1/holdings/portfolio/composition");
+}
+
 export async function fetchHoldings(): Promise<HoldingOut[]> {
   return request("/api/v1/holdings");
 }

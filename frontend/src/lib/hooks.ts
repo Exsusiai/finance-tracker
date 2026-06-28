@@ -51,6 +51,7 @@ import {
   fetchCashFlowTimeseries,
   fetchPortfolioSummary,
   fetchPortfolioBreakdown,
+  fetchPortfolioComposition,
   fetchPortfolioValueHistory,
   fetchHoldings,
   fetchBalances,
@@ -118,6 +119,12 @@ export function usePortfolioBreakdown() {
 
 export function usePortfolioValueHistory() {
   return useSWR("portfolio-value-history", () => fetchPortfolioValueHistory(), {
+    revalidateOnFocus: false,
+  });
+}
+
+export function usePortfolioComposition() {
+  return useSWR("portfolio-composition", () => fetchPortfolioComposition(), {
     revalidateOnFocus: false,
   });
 }

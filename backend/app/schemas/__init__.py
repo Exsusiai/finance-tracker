@@ -513,6 +513,27 @@ class PortfolioBreakdown(BaseModel):
     by_currency: dict[str, dict[str, Any]] = {}
 
 
+class CompositionEntry(BaseModel):
+    """One logical-asset slice of the net-worth composition view."""
+
+    key: str
+    label: str
+    asset_class: str  # cash / stable / crypto / us_stock / … / small
+    value: str        # folded to base currency
+    count: int
+
+
+class PortfolioComposition(BaseModel):
+    """Net-worth composition (cash + investments) by logical asset — the third
+    distribution view. Stablecoins merged, same coin summed across accounts,
+    dust dropped, long-tail folded into per-category 小额 buckets."""
+
+    base_currency: str
+    total: str
+    entries: list[CompositionEntry] = []
+    dust_excluded_count: int = 0
+
+
 class NetWorthOut(BaseModel):
     base_currency: str
     cash_total: str

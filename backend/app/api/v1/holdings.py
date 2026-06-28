@@ -18,11 +18,13 @@ from app.models import Account, AssetHolding, Asset, MarketPrice, FxRate
 from app.models import touch_updated_at
 from app.schemas import (
     ApiSuccess,
+    CompositionEntry,
     HoldingCreate,
     HoldingOut,
     HoldingUpdate,
     NetWorthOut,
     PortfolioBreakdown,
+    PortfolioComposition,
     PortfolioSummary,
     PortfolioValuePoint,
 )
@@ -459,6 +461,28 @@ async def net_worth(
             for k, v in r.investment_by_currency.items()
         },
         as_of=r.as_of,
+    ))
+
+
+@router.get("/portfolio/composition", response_model=ApiSuccess[PortfolioComposition])
+async def portfolio_composition(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Net-worth composition (cash + investments) by logical asset.
+
+    Third distribution view: stablecoins merged into one bucket, the same coin
+    summed across accounts/exchanges, dust (< €0.1) dropped, and small long-tail
+    positions (< €20) folded into per-category 小额 buckets. Folded to base.
+    """
+    from app.services.valuation.composition import compute_composition
+
+    r = await compute_composition(db, settings.base_currency)
+    return ApiSuccess(data=PortfolioComposition(
+        base_currency=r.base_currency,
+        total=str(r.total),
+        entries=[CompositionEntry(**e) for e in r.entries],
+        dust_excluded_count=r.dust_excluded_count,
     ))
 
 
