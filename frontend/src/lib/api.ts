@@ -65,6 +65,7 @@ export interface CashFlowTimeseries {
   income: string[];
   expense: string[];
   savings: string[];
+  cash: string[];
 }
 
 export async function fetchCashFlowMonthly(from?: string, to?: string): Promise<CashFlowMonthly[]> {
@@ -74,8 +75,20 @@ export async function fetchCashFlowMonthly(from?: string, to?: string): Promise<
   return request(`/api/v1/cashflow/monthly?${params}`);
 }
 
-export async function fetchCashFlowByCategory(period: string): Promise<CashFlowByCategory[]> {
-  return request(`/api/v1/cashflow/by-category?period=${period}`);
+/** Single month (`period`) or an inclusive month range (`from`/`to`). */
+export async function fetchCashFlowByCategory(
+  period: string | null,
+  from?: string,
+  to?: string,
+): Promise<CashFlowByCategory[]> {
+  const params = new URLSearchParams();
+  if (from && to) {
+    params.set("from", from);
+    params.set("to", to);
+  } else if (period) {
+    params.set("period", period);
+  }
+  return request(`/api/v1/cashflow/by-category?${params}`);
 }
 
 export async function fetchCashFlowTimeseries(from?: string, to?: string): Promise<CashFlowTimeseries> {
@@ -152,6 +165,19 @@ export interface NetWorthData {
 
 export async function fetchNetWorth(): Promise<NetWorthData> {
   return request("/api/v1/holdings/portfolio/net-worth");
+}
+
+export interface PortfolioValuePoint {
+  period: string;
+  base_currency: string;
+  cash_total: string;
+  investment_total: string;
+  net_worth: string;
+  captured_at: string;
+}
+
+export async function fetchPortfolioValueHistory(): Promise<PortfolioValuePoint[]> {
+  return request("/api/v1/holdings/portfolio/value-history");
 }
 
 export async function fetchPortfolioBreakdown(): Promise<PortfolioBreakdown> {
@@ -586,6 +612,7 @@ export interface AccountOut {
   initial_balance: string;
   is_active: boolean;
   include_in_total: boolean;
+  sort_order: number;
   notes: string | null;
   metadata_json: string | null;
   created_at: string;
@@ -595,6 +622,27 @@ export interface AccountOut {
 export async function fetchAccounts(activeOnly?: boolean): Promise<AccountOut[]> {
   const params = activeOnly ? "?active_only=true" : "";
   return request(`/api/v1/accounts${params}`);
+}
+
+/** Persist a manual drag-to-reorder. `ids` is the full ordered list. */
+export async function reorderAccounts(ids: number[]): Promise<{ reordered: number }> {
+  return request("/api/v1/accounts/reorder", {
+    method: "PATCH",
+    body: JSON.stringify({ account_ids: ids }),
+  });
+}
+
+/** Anchor an account's initial_balance to a known-true balance as of a date
+ *  (e.g. a statement's closing balance). Shifts the whole history to reality. */
+export async function anchorBalance(
+  accountId: number,
+  balance: string,
+  asOf: string,
+): Promise<AccountOut> {
+  return request(`/api/v1/accounts/${accountId}/anchor-balance`, {
+    method: "POST",
+    body: JSON.stringify({ balance, as_of: asOf }),
+  });
 }
 
 export interface AccountCreateInput {
@@ -877,8 +925,19 @@ export interface PdfImportOut {
   preview: TransactionOut[];
   /** Pre-commit (awaiting_review): all parsed rows, not yet inserted. */
   parsed_preview: ParsedPreviewTx[];
+  /** Post-commit balance reconciliation (null if no closing balance parsed). */
+  reconciliation: StatementReconciliation | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface StatementReconciliation {
+  closing_balance: string; // from PDF (ledger sign convention)
+  computed_balance: string; // from the ledger
+  discrepancy: string; // closing − computed; ≈0 means it reconciles
+  currency: string;
+  as_of: string; // statement's last transaction date
+  previously_anchored: boolean; // drift (true) vs first-time calibration
 }
 
 export async function uploadPdf(

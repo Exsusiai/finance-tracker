@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
@@ -23,7 +23,9 @@ from app.services.wallet_sync.holdings_value import (
 from app.schemas import (
     AccountCreate,
     AccountOut,
+    AccountReorderIn,
     AccountUpdate,
+    AnchorBalanceIn,
     ApiSuccess,
     BalanceAdjustmentIn,
     BalanceOut,
@@ -67,6 +69,7 @@ def _account_to_out(a: Account) -> AccountOut:
         initial_balance=_normalize_amount(a.initial_balance),
         is_active=a.is_active,
         include_in_total=a.include_in_total,
+        sort_order=a.sort_order,
         notes=a.notes,
         metadata_json=a.metadata_json,
         created_at=a.created_at,
@@ -83,7 +86,9 @@ async def list_accounts(
     stmt = select(Account).where(Account.deleted_at.is_(None))
     if active_only:
         stmt = stmt.where(Account.is_active.is_(True))
-    stmt = stmt.order_by(Account.id)
+    # Manual drag order first; id breaks ties / orders never-reordered rows
+    # by creation.
+    stmt = stmt.order_by(Account.sort_order, Account.id)
     result = await db.execute(stmt)
     accounts = result.scalars().all()
     return ApiSuccess(data=[_account_to_out(a) for a in accounts])
@@ -95,6 +100,14 @@ async def create_account(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
 ):
+    # New accounts go to the end of the manual order.
+    next_order = (
+        await db.execute(
+            select(func.coalesce(func.max(Account.sort_order), -1)).where(
+                Account.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one() + 1
     account = Account(
         name=body.name,
         type=body.type,
@@ -104,12 +117,53 @@ async def create_account(
         currency=body.currency,
         initial_balance=Decimal(body.initial_balance),
         include_in_total=body.include_in_total,
+        sort_order=next_order,
         notes=body.notes,
         metadata_json=body.metadata_json,
     )
     db.add(account)
     await db.flush()
     return ApiSuccess(data=_account_to_out(account))
+
+
+@router.patch("/reorder", response_model=ApiSuccess[dict])
+async def reorder_accounts(
+    body: AccountReorderIn,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist a manual drag-to-reorder of the accounts list.
+
+    The request carries the full ordered list of account ids; each id's
+    position becomes its ``sort_order``. Ids are validated against existing,
+    non-deleted accounts. Declared before ``/{account_id}`` so the literal
+    path wins over the int path param.
+    """
+    valid_ids = set(
+        (
+            await db.execute(
+                select(Account.id).where(Account.deleted_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    unknown = [aid for aid in body.account_ids if aid not in valid_ids]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown account ids: {unknown}")
+
+    rows = (
+        await db.execute(
+            select(Account).where(Account.id.in_(body.account_ids))
+        )
+    ).scalars().all()
+    by_id = {a.id: a for a in rows}
+    for index, aid in enumerate(body.account_ids):
+        account = by_id[aid]
+        account.sort_order = index
+        touch_updated_at(account)
+    await db.flush()
+    return ApiSuccess(data={"reordered": len(body.account_ids)})
 
 
 @router.get("/balances", response_model=ApiSuccess[list[BalanceOut]])
@@ -376,6 +430,42 @@ async def delete_account(
     account.deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     await db.flush()
     return ApiSuccess(data={"id": account_id, "deleted": True})
+
+
+@router.post("/{account_id}/anchor-balance", response_model=ApiSuccess[AccountOut])
+async def anchor_balance(
+    account_id: int,
+    body: AnchorBalanceIn,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Anchor ``initial_balance`` to a known-true balance as of a date.
+
+    Sets ``initial_balance = balance − Σ(signed tx ≤ as_of)`` so the WHOLE
+    historical balance curve shifts to reality — no adjustment transaction.
+    Race-free (subtracts already-recorded tx up to ``as_of``), so it can run
+    any time, including mid-period. Use it to anchor against a statement's
+    closing balance (see /statements commit reconciliation).
+    """
+    account = (await db.execute(
+        select(Account).where(Account.id == account_id, Account.deleted_at.is_(None))
+    )).scalar_one_or_none()
+    if not account:
+        raise NotFoundError("Account", account_id)
+    if account.type in _SNAPSHOT_ACCOUNT_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{account.type} accounts are valued from holdings, not a cash "
+                "ledger — balance anchoring does not apply."
+            ),
+        )
+
+    from app.services.valuation.anchor import anchor_account_balance
+
+    await anchor_account_balance(db, account, body.balance, body.as_of)
+    await db.flush()
+    return ApiSuccess(data=_account_to_out(account))
 
 
 @router.post(

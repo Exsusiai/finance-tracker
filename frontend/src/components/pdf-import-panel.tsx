@@ -5,13 +5,15 @@ import { useAccounts, useStatementsPage, invalidateTransactionGraph } from "@/li
 import {
   type PdfImportOut,
   type CsvImportResult,
+  type StatementReconciliation,
   uploadPdf,
   uploadCsv,
   commitStatement,
   deleteStatement,
+  anchorBalance,
   ApiError,
 } from "@/lib/api";
-import { formatFileSize, formatDate, cn } from "@/lib/utils";
+import { formatFileSize, formatDate, formatCurrency, cn } from "@/lib/utils";
 import { LoadingSpinner, ErrorDisplay } from "@/components/ui-common";
 
 // Bank formats the backend can parse (mirrors _BANK_PARSERS in
@@ -54,6 +56,13 @@ export function PdfImportPanel() {
   // Per-row account choice for awaiting_review records in the history list.
   const [rowAccount, setRowAccount] = useState<Record<number, number | undefined>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Post-commit balance reconciliation that needs the user's attention (the
+  // statement's closing balance disagrees with the recorded ledger).
+  const [reconcile, setReconcile] = useState<
+    { accountId: number; rec: StatementReconciliation } | null
+  >(null);
+  const [anchoring, setAnchoring] = useState(false);
+  const [reconcileOk, setReconcileOk] = useState<string | null>(null);
   // CSV import (PayPal): account chosen up front, direct import + dedup.
   const [csvAccountId, setCsvAccountId] = useState<number | undefined>();
   const [csvUploading, setCsvUploading] = useState(false);
@@ -154,11 +163,24 @@ export function PdfImportPanel() {
         return;
       }
       setBusyId(importId);
+      setReconcileOk(null);
       try {
-        await commitStatement(importId, accountId);
+        const out = await commitStatement(importId, accountId);
         refreshStatements();
         invalidateTransactionGraph();
         if (uploadResult?.id === importId) setUploadResult(null);
+        // Balance reconciliation against the statement's closing balance.
+        const rec = out.reconciliation;
+        if (rec) {
+          const disc = Math.abs(parseFloat(rec.discrepancy));
+          if (disc > 0.005) {
+            setReconcile({ accountId, rec });
+          } else {
+            setReconcileOk(
+              `对账一致 ✓ 账单期末余额 ${formatCurrency(rec.closing_balance, rec.currency)}`,
+            );
+          }
+        }
       } catch (e) {
         setUploadError(e instanceof ApiError ? e.message : "导入失败");
       } finally {
@@ -167,6 +189,31 @@ export function PdfImportPanel() {
     },
     [refreshStatements, uploadResult]
   );
+
+  // Accept the statement's closing balance as truth → anchor initial_balance.
+  const handleAnchor = useCallback(async () => {
+    if (!reconcile) return;
+    setAnchoring(true);
+    try {
+      await anchorBalance(
+        reconcile.accountId,
+        reconcile.rec.closing_balance,
+        reconcile.rec.as_of,
+      );
+      invalidateTransactionGraph();
+      setReconcileOk(
+        `已锚定：该账户余额已对齐到账单期末 ${formatCurrency(
+          reconcile.rec.closing_balance,
+          reconcile.rec.currency,
+        )}`,
+      );
+      setReconcile(null);
+    } catch (e) {
+      setUploadError(e instanceof ApiError ? e.message : "锚定失败");
+    } finally {
+      setAnchoring(false);
+    }
+  }, [reconcile]);
 
   // Cancel/revert: removes the import record + its transactions (and the
   // stored file). For staged imports this leaves no trace.
@@ -193,6 +240,80 @@ export function PdfImportPanel() {
 
   return (
     <div className="space-y-6">
+      {/* ─── Balance reconciliation (post-commit) ────────────────── */}
+      {reconcileOk && (
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-300 flex items-center justify-between gap-3">
+          <span>{reconcileOk}</span>
+          <button onClick={() => setReconcileOk(null)} className="text-xs opacity-70 hover:opacity-100">关闭</button>
+        </div>
+      )}
+      {reconcile && (() => {
+        const anchored = reconcile.rec.previously_anchored;
+        return (
+        <div className={cn(
+          "rounded-xl border p-4",
+          anchored ? "border-amber-500/40 bg-amber-500/10" : "border-primary/30 bg-primary/5",
+        )}>
+          <div className="flex items-start gap-2 mb-2">
+            <span className="text-lg">{anchored ? "⚠️" : "📍"}</span>
+            <div>
+              <p className={cn(
+                "text-sm font-semibold",
+                anchored ? "text-amber-800 dark:text-amber-200" : "text-foreground",
+              )}>
+                {anchored
+                  ? "对账不一致：账单期末与系统推算对不上 — 要重新校准吗？"
+                  : "首次校准：要把该账户期初余额锚定到账单期末吗？"}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {anchored
+                  ? "自上次校准以来，记录的交易和账单对不上了 —— 可能有漏记 / 重复 / 金额写错的交易。点「重新校准」会以本期账单期末为准平移期初（不新增交易）；建议先核对再决定。"
+                  : "记账前账户期初是 0，所以系统余额与真实不符。点「校准」把期初锚定到本期账单期末，整条历史余额就对齐真实值（不新增交易）。"}
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-sm my-3">
+            <div className="rounded-lg bg-background/60 p-2.5">
+              <p className="text-[10px] text-muted-foreground">账单期末余额</p>
+              <p className="font-semibold tabular-nums">{formatCurrency(reconcile.rec.closing_balance, reconcile.rec.currency)}</p>
+            </div>
+            <div className="rounded-lg bg-background/60 p-2.5">
+              <p className="text-[10px] text-muted-foreground">系统推算</p>
+              <p className="font-semibold tabular-nums">{formatCurrency(reconcile.rec.computed_balance, reconcile.rec.currency)}</p>
+            </div>
+            <div className="rounded-lg bg-background/60 p-2.5">
+              <p className="text-[10px] text-muted-foreground">差额</p>
+              <p className={cn(
+                "font-semibold tabular-nums",
+                anchored ? "text-amber-700 dark:text-amber-300" : "text-foreground",
+              )}>
+                {formatCurrency(reconcile.rec.discrepancy, reconcile.rec.currency)}
+              </p>
+            </div>
+          </div>
+          <p className="text-[10px] text-muted-foreground mb-3">
+            截至 {formatDate(reconcile.rec.as_of)}（账单最后一笔交易日）
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleAnchor}
+              disabled={anchoring}
+              className="px-3 py-1.5 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+            >
+              {anchoring ? "校准中…" : anchored ? "重新校准（以账单为准）" : "校准期初"}
+            </button>
+            <button
+              onClick={() => setReconcile(null)}
+              disabled={anchoring}
+              className="px-3 py-1.5 text-sm font-medium rounded-lg border border-border hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              先不处理{anchored ? "（我去核对）" : ""}
+            </button>
+          </div>
+        </div>
+        );
+      })()}
+
       {/* ─── Upload area ─────────────────────────────────────────── */}
       <div className="rounded-xl border border-border bg-card p-6">
         <div className="mb-4">

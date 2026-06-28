@@ -107,6 +107,7 @@ async def parse_pdf_statement(
             if eid:
                 tx["external_id"] = f"{eid}_{pdf_disambiguator}"
 
+        closing = extract_closing_balance(detected_bank, raw_text)
         return {
             "detected_bank": detected_bank,
             "parser_version": "0.3.1",
@@ -114,6 +115,9 @@ async def parse_pdf_statement(
             "raw_text": raw_text[:10000],
             "error": None,
             "transactions": transactions,
+            # End-of-period balance AS PRINTED (None if unparsable); caller
+            # signs it by account type for anchoring / reconciliation.
+            "closing_balance": str(closing) if closing is not None else None,
         }
     finally:
         _reset_subaccount_names(_names_token)
@@ -163,6 +167,7 @@ def _empty_result(error: str | None = None) -> dict[str, Any]:
         "raw_text": "",
         "error": error,
         "transactions": [],
+        "closing_balance": None,
     }
 
 
@@ -933,3 +938,69 @@ _BANK_PARSERS = {
     "tfbank": _parse_tfbank,
     "advanzia": _parse_advanzia,
 }
+
+
+# ─── Closing-balance extraction (for balance anchoring / reconciliation) ──
+#
+# The statement's end-of-period balance lets us anchor account.initial_balance
+# to reality and flag book-keeping drift. Each bank prints it differently and
+# the SIGN is bank-specific (asset accounts print the held amount; credit cards
+# print the amount owed, sometimes positive, sometimes negative). We return the
+# number AS PRINTED here; the caller normalises the sign by account type
+# (credit_card → −abs, since the ledger stores card debt as negative).
+#
+# Returns None when no balance can be parsed (e.g. Revolut, whose closing
+# balance lives in a positional column) — callers then simply skip
+# reconciliation, degrading gracefully.
+
+
+def _closing_n26(text: str) -> Decimal | None:
+    # N26 prints "Previous balance" / "Your new balance" per pocket (main
+    # account + each Space). Money moved into a Space stays inside N26 and the
+    # ledger ignores those moves, so the account total == main + all Spaces ==
+    # the SUM of every "Your new balance".
+    vals = re.findall(r"Your new balance\s+([+-]?[\d.,]+)\s*€", text)
+    if not vals:
+        return None
+    total = Decimal("0")
+    for v in vals:
+        total += _de_amount(v.lstrip("+"))
+    return total
+
+
+def _closing_amex_de(text: str) -> Decimal | None:
+    # "Saldo des laufenden Monats fürHERRN JINGSHENG CHEN 548,72"
+    m = re.search(r"Saldo des laufenden Monats für\S.*?([\d.,]+)\s*$", text, re.M)
+    return _de_amount(m.group(1)) if m else None
+
+
+def _closing_tfbank(text: str) -> Decimal | None:
+    # "Neuer Saldo: -855.87" (TFBank uses dot decimals + space thousands)
+    m = re.search(r"Neuer Saldo:\s*(-?[\d.,\s]+?)\s*(?:\n|$)", text)
+    return _de_amount(m.group(1)) if m else None
+
+
+def _closing_advanzia(text: str) -> Decimal | None:
+    # "03.04.2026 NEUER SALDO 371,41"
+    m = re.search(r"NEUER SALDO\s+([\d.,]+)", text)
+    return _de_amount(m.group(1)) if m else None
+
+
+_CLOSING_BALANCE_EXTRACTORS = {
+    "n26": _closing_n26,
+    "amex_de": _closing_amex_de,
+    "tfbank": _closing_tfbank,
+    "advanzia": _closing_advanzia,
+    # "revolut": positional column — skipped (graceful None).
+}
+
+
+def extract_closing_balance(detected_bank: str | None, text: str) -> Decimal | None:
+    """Best-effort end-of-period balance, AS PRINTED (caller signs by acct type)."""
+    fn = _CLOSING_BALANCE_EXTRACTORS.get(detected_bank or "")
+    if fn is None:
+        return None
+    try:
+        return fn(text)
+    except (ArithmeticError, ValueError):
+        return None

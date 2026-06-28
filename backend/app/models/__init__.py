@@ -78,6 +78,10 @@ class Account(Base):
     # e.g. business / shared / experimental accounts the user doesn't
     # want to count toward their personal net worth.
     include_in_total: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Manual display order for the accounts list (drag-to-reorder in the UI).
+    # Lower sorts first; ties broken by id. Defaults to 0 so legacy rows keep
+    # creation order until the user reorders.
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     notes: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
@@ -443,6 +447,29 @@ class CashFlowSnapshot(Base):
     __table_args__ = (
         UniqueConstraint("period_year", "period_month", "base_currency", name="uq_cashflow_period"),
     )
+
+
+class PortfolioSnapshot(Base):
+    """Weekly snapshot of portfolio market value (cash + investments).
+
+    Historical portfolio value is NOT reconstructable — `asset_holdings`
+    only stores CURRENT quantities (crypto/broker are snapshot-synced, no
+    per-week position history). So we capture forward: a scheduler job
+    upserts the current week's row (keyed by that week's Monday) with the
+    latest valuation, and at week rollover a new row starts. Each week
+    therefore holds its last-captured value. Powers the dashboard
+    "组合市值走势" line.
+    """
+
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    period: Mapped[str] = mapped_column(String(10), nullable=False, unique=True)  # "YYYY-MM-DD" (week Monday)
+    base_currency: Mapped[str] = mapped_column(String(10), nullable=False, default="CNY")
+    cash_total: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    investment_total: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    net_worth: Mapped[Decimal] = mapped_column(Numeric(20, 8), nullable=False, default=Decimal("0"))
+    captured_at: Mapped[str] = mapped_column(String(30), nullable=False, default=_utcnow_str)
 
 
 # ─── Categorization Rule ────────────────────────────────────────────────────

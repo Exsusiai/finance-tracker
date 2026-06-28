@@ -174,4 +174,49 @@ async def test_by_category_counts_transfer_pair_once(
     assert rows[0]["count"] == 1
 
 
+async def test_by_category_range_aggregates_months(
+    client: AsyncClient, db: AsyncSession,
+):
+    """`from`/`to` aggregates a month range into one breakdown; a single
+    `period` returns only that month (req 2026-06-27: analytics category
+    distribution supports multi-month aggregation)."""
+    from app.core.config import get_settings
+    cur = get_settings().base_currency
+
+    acc = Account(name="Range-Acc", type="bank", currency=cur, initial_balance=Decimal("0"),
+                  is_active=True, created_at=_utcnow(), updated_at=_utcnow())
+    cat = Category(name="区间餐饮", kind="expense", parent_id=None, is_system=False)
+    db.add_all([acc, cat])
+    await db.flush()
+    db.add_all([
+        Transaction(account_id=acc.id, category_id=cat.id, occurred_at="2026-09-05T00:00:00Z",
+                    amount=Decimal("30"), currency=cur, type="expense", source="manual",
+                    is_pending=False, created_at=_utcnow(), updated_at=_utcnow()),
+        Transaction(account_id=acc.id, category_id=cat.id, occurred_at="2026-10-05T00:00:00Z",
+                    amount=Decimal("70"), currency=cur, type="expense", source="manual",
+                    is_pending=False, created_at=_utcnow(), updated_at=_utcnow()),
+    ])
+    await db.commit()
+
+    def _total(rows):
+        r = [x for x in rows if x["category_name"] == "区间餐饮"]
+        return Decimal(r[0]["total"]) if r else Decimal("0")
+
+    single = await client.get("/api/v1/cashflow/by-category",
+                              params={"period": "2026-09"}, headers=AUTH_HEADERS)
+    assert single.status_code == 200, single.text
+    assert _total(single.json()["data"]) == Decimal("30")
+
+    ranged = await client.get("/api/v1/cashflow/by-category",
+                              params={"from": "2026-09", "to": "2026-10"}, headers=AUTH_HEADERS)
+    assert ranged.status_code == 200, ranged.text
+    assert _total(ranged.json()["data"]) == Decimal("100")
+
+
+async def test_by_category_requires_scope(client: AsyncClient):
+    """Neither period nor from/to → 400, not an unscoped full-table scan."""
+    resp = await client.get("/api/v1/cashflow/by-category", headers=AUTH_HEADERS)
+    assert resp.status_code == 400, resp.text
+
+
 pytestmark = pytest.mark.asyncio

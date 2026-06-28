@@ -51,6 +51,7 @@ import {
   fetchCashFlowTimeseries,
   fetchPortfolioSummary,
   fetchPortfolioBreakdown,
+  fetchPortfolioValueHistory,
   fetchHoldings,
   fetchBalances,
   fetchNetWorth,
@@ -80,10 +81,17 @@ export function useCashFlowMonthly(from?: string, to?: string) {
   );
 }
 
-export function useCashFlowByCategory(period: string | null) {
+/** Single month (`period`) or an inclusive month range (`from`/`to`). */
+export function useCashFlowByCategory(period: string | null, from?: string, to?: string) {
+  const ranged = from && to;
+  const key = ranged
+    ? `cashflow-category-range-${from}-${to}`
+    : period
+      ? `cashflow-category-${period}`
+      : null;
   return useSWR(
-    period ? `cashflow-category-${period}` : null,
-    () => fetchCashFlowByCategory(period!),
+    key,
+    () => fetchCashFlowByCategory(period, from, to),
     { revalidateOnFocus: false },
   );
 }
@@ -104,6 +112,12 @@ export function usePortfolioSummary() {
 
 export function usePortfolioBreakdown() {
   return useSWR("portfolio-breakdown", () => fetchPortfolioBreakdown(), {
+    revalidateOnFocus: false,
+  });
+}
+
+export function usePortfolioValueHistory() {
+  return useSWR("portfolio-value-history", () => fetchPortfolioValueHistory(), {
     revalidateOnFocus: false,
   });
 }

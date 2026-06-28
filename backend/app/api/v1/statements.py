@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -39,6 +39,7 @@ def _pdf_to_out(
     p: PdfImport,
     preview_txs: list[TransactionOut] | None = None,
     parsed_preview: list[ParsedPreviewTx] | None = None,
+    reconciliation: dict | None = None,
 ) -> PdfImportOut:
     return PdfImportOut(
         id=p.id,
@@ -54,6 +55,7 @@ def _pdf_to_out(
         error_message=p.error_message,
         preview=preview_txs or [],
         parsed_preview=parsed_preview or [],
+        reconciliation=reconciliation,
         created_at=p.created_at,
         updated_at=p.updated_at,
     )
@@ -193,6 +195,31 @@ async def _insert_and_ingest(
         from app.services.ingestion import ingest_transactions
 
         await ingest_transactions(db, new_txs, auto_pair=True)
+
+
+async def _reconcile_commit(
+    db: AsyncSession, pdf_import: PdfImport, account, result: dict
+) -> dict | None:
+    """Compute statement→ledger reconciliation after a commit.
+
+    `as_of` = the statement's last transaction date (the closing balance is
+    "after" that row), so Σ(tx ≤ as_of) covers exactly this statement + prior.
+    Returns None when the parser found no closing balance.
+    """
+    closing_raw = result.get("closing_balance")
+    if closing_raw is None:
+        return None
+    as_of = (await db.execute(
+        text("""
+            SELECT MAX(occurred_at) FROM transactions
+            WHERE pdf_import_id = :pid AND deleted_at IS NULL
+        """),
+        {"pid": pdf_import.id},
+    )).scalar()
+    if not as_of:
+        return None
+    from app.services.valuation.anchor import compute_reconciliation
+    return await compute_reconciliation(db, account, Decimal(str(closing_raw)), as_of)
 
 
 def _tx_to_out(t: Transaction) -> TransactionOut:
@@ -528,6 +555,12 @@ async def commit_statement(
 
         await _insert_and_ingest(db, pdf_import, result, target_account_id)
 
+        # Balance reconciliation: compare the statement's printed closing
+        # balance against the computed ledger balance at the statement's last
+        # transaction date. Surfaces drift (mis-recorded rows) and lets the
+        # user one-click anchor. None when no closing balance was parsable.
+        reconciliation = await _reconcile_commit(db, pdf_import, target, result)
+
         preview_stmt = (
             select(Transaction)
             .options(selectinload(Transaction.account), selectinload(Transaction.category))
@@ -537,7 +570,7 @@ async def commit_statement(
         )
         preview_result = await db.execute(preview_stmt)
         preview_txs = [_tx_to_out(t) for t in preview_result.scalars().all()]
-        return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs))
+        return ApiSuccess(data=_pdf_to_out(pdf_import, preview_txs, reconciliation=reconciliation))
     except (InvalidInputError, ConflictError, NotFoundError, ParserError):
         raise
     except Exception as e:

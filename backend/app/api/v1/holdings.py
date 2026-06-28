@@ -24,6 +24,7 @@ from app.schemas import (
     NetWorthOut,
     PortfolioBreakdown,
     PortfolioSummary,
+    PortfolioValuePoint,
 )
 
 router = APIRouter()
@@ -440,99 +441,51 @@ async def net_worth(
     Honours per-account ``include_in_total`` — accounts the user
     explicitly excluded are dropped from BOTH cash and investment
     aggregation but still appear in the per-account balance list.
+
+    Math lives in ``services/valuation/net_worth.compute_net_worth`` so the
+    monthly portfolio snapshot job produces identical numbers.
     """
-    base_currency = settings.base_currency
+    from app.services.valuation.net_worth import compute_net_worth
 
-    # 1. Cash: account balances grouped by currency. JOIN accounts to
-    # drop opted-out rows from the SUM.
-    # Snapshot accounts (brokerage / crypto_wallet / exchange) contribute via
-    # the investments leg below (holdings × price); their cash ledger must be
-    # excluded here or a stray initial_balance / adjustment would be counted on
-    # top of the holdings value (review V7 §P1-2). For correctly-set-up snapshot
-    # accounts the ledger is already 0, so this is a belt-and-suspenders guard.
-    balances_stmt = text("""
-        SELECT v.currency, SUM(v.balance) AS total
-        FROM v_account_balance v
-        JOIN accounts a ON a.id = v.account_id
-        WHERE a.include_in_total = 1 AND a.deleted_at IS NULL
-          AND a.type NOT IN ('brokerage', 'crypto_wallet', 'exchange')
-        GROUP BY v.currency
-    """)
-    balances_result = await db.execute(balances_stmt)
-    cash_total = Decimal("0")
-    cash_details: dict[str, dict[str, str]] = {}
-    for currency, total in balances_result.all():
-        original = total if isinstance(total, Decimal) else Decimal(str(total or 0))
-        converted = await _convert_to_base(db, original, currency, base_currency)
-        if converted is not None:
-            cash_total += converted
-            cash_details[currency] = {
-                "original": str(original),
-                "converted": str(converted),
-            }
-        else:
-            # No FX rate — record original but cannot include in total
-            cash_details[currency] = {
-                "original": str(original),
-                "converted": "",
-            }
-
-    # 2. Investments: reuse portfolio_summary logic (skip rows missing price/FX)
-    # Sprint 4 FIX-22 (review V3 §V3-P1-5): track original_value AND
-    # base_value per quote currency, so callers reading
-    # investment_by_currency["EUR"] aren't surprised that the value is in CNY.
-    # P2.3: same opt-out check as the cash side — JOIN accounts +
-    # filter include_in_total + is_active (skip soft-deleted holdings
-    # too, which the per-chain re-sync may have left at quantity=0).
-    inv_stmt = (
-        select(AssetHolding, Asset)
-        .join(Asset, AssetHolding.asset_id == Asset.id)
-        .join(Account, Account.id == AssetHolding.account_id)
-        .where(
-            Account.include_in_total == True,  # noqa: E712
-            Account.deleted_at.is_(None),
-            AssetHolding.is_active == True,  # noqa: E712
-        )
-    )
-    inv_result = await db.execute(inv_stmt)
-    investment_total = Decimal("0")
-    investment_by_currency: dict[str, dict[str, Decimal]] = {}
-    for holding, asset in inv_result.all():
-        price_stmt = (
-            select(MarketPrice)
-            .where(MarketPrice.asset_id == asset.id)
-            .order_by(MarketPrice.quoted_at.desc())
-            .limit(1)
-        )
-        price_result = await db.execute(price_stmt)
-        latest = price_result.scalar_one_or_none()
-        if latest is None:
-            continue
-        original_value = holding.quantity * latest.price
-        bucket = investment_by_currency.setdefault(
-            latest.currency,
-            {"original_value": Decimal("0"), "base_value": Decimal("0")},
-        )
-        bucket["original_value"] += original_value
-        if latest.currency == base_currency:
-            converted = original_value
-        else:
-            converted = await _convert_to_base(db, original_value, latest.currency, base_currency)
-        if converted is None:
-            continue
-        bucket["base_value"] += converted
-        investment_total += converted
-
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r = await compute_net_worth(db, settings.base_currency)
     return ApiSuccess(data=NetWorthOut(
-        base_currency=base_currency,
-        cash_total=str(cash_total),
-        investment_total=str(investment_total),
-        net_worth=str(cash_total + investment_total),
-        cash_by_currency=cash_details,
+        base_currency=r.base_currency,
+        cash_total=str(r.cash_total),
+        investment_total=str(r.investment_total),
+        net_worth=str(r.net_worth),
+        cash_by_currency=r.cash_by_currency,
         investment_by_currency={
             k: {"original_value": str(v["original_value"]), "base_value": str(v["base_value"])}
-            for k, v in investment_by_currency.items()
+            for k, v in r.investment_by_currency.items()
         },
-        as_of=now,
+        as_of=r.as_of,
     ))
+
+
+@router.get("/portfolio/value-history", response_model=ApiSuccess[list[PortfolioValuePoint]])
+async def portfolio_value_history(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Monthly portfolio-value snapshots, oldest first.
+
+    Forward-captured by the scheduler (see services/valuation/snapshot.py) —
+    history cannot be reconstructed, so the series begins when snapshotting
+    started and grows one point per month.
+    """
+    from app.models import PortfolioSnapshot
+
+    rows = (
+        await db.execute(select(PortfolioSnapshot).order_by(PortfolioSnapshot.period))
+    ).scalars().all()
+    return ApiSuccess(data=[
+        PortfolioValuePoint(
+            period=s.period,
+            base_currency=s.base_currency,
+            cash_total=str(s.cash_total),
+            investment_total=str(s.investment_total),
+            net_worth=str(s.net_worth),
+            captured_at=s.captured_at,
+        )
+        for s in rows
+    ])

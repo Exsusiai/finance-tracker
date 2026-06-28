@@ -66,6 +66,18 @@ async def _job_fx():
     await _run_with_session("fx", refresh_fx)
 
 
+async def _job_portfolio_snapshot():
+    """Upsert the current month's portfolio-value snapshot. Runs after the
+    price jobs have had a chance to refresh, so the captured value reflects
+    fresh prices. Idempotent within a month (overwrites the period row)."""
+    async def _capture(db):
+        from app.services.valuation.snapshot import capture_portfolio_snapshot
+        snap = await capture_portfolio_snapshot(db, _settings.base_currency)
+        return {"period": snap.period, "net_worth": str(snap.net_worth)}
+
+    await _run_with_session("portfolio_snapshot", _capture)
+
+
 def start_scheduler() -> AsyncIOScheduler:
     """Boot the scheduler with three jobs (crypto / stocks / fx). Idempotent."""
     global _scheduler
@@ -99,6 +111,18 @@ def start_scheduler() -> AsyncIOScheduler:
         seconds=max(60, _settings.market_refresh_fx_sec),
         next_run_time=boot_delay,
         id="market_refresh_fx",
+        replace_existing=True,
+    )
+    # Portfolio value snapshot: WEEKLY upsert of the current week's row, plus
+    # an immediate first capture shortly after boot so the dashboard chart has
+    # a point right away. Runs a touch after the price jobs so it sees fresh
+    # prices.
+    sched.add_job(
+        _job_portfolio_snapshot,
+        trigger="interval",
+        seconds=7 * 86400,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+        id="portfolio_snapshot",
         replace_existing=True,
     )
 

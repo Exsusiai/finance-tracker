@@ -6,7 +6,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, text, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -115,9 +115,16 @@ async def monthly_cashflow(
 async def cashflow_by_category(
     _token: _auth,
     db: AsyncSession = Depends(get_db),
-    period: str = Query(..., description="Period in YYYY-MM format"),
+    period: str | None = Query(None, description="Single month YYYY-MM (ignored if from/to set)"),
+    start_period: str | None = Query(None, alias="from", description="Range start YYYY-MM (inclusive)"),
+    end_period: str | None = Query(None, alias="to", description="Range end YYYY-MM (inclusive)"),
 ):
-    """Aggregate spending/income by category for a specific month (folded to BASE_CURRENCY).
+    """Aggregate spending/income by category, folded to BASE_CURRENCY.
+
+    Scope is either a single month (``period``) or an inclusive month range
+    (``from``/``to`` — e.g. past several months aggregated into one
+    breakdown). When both are supplied the range wins. At least one of
+    ``period`` / ``from`` / ``to`` is required.
 
     Review V4-P0-1 fix: previously used the legacy
     `COALESCE(base_amount, amount*fx_rate, amount)` raw fallback, so a
@@ -127,6 +134,16 @@ async def cashflow_by_category(
     engine (CASE: base currency → amount; FX present → fold; else NULL),
     so `/by-category` and `/monthly` agree exactly.
     """
+    # Normalise scope: a range (from/to) takes precedence over a single
+    # period. Collapse a single period into a range so the SQL has one shape.
+    if start_period or end_period:
+        range_from = start_period or end_period
+        range_to = end_period or start_period
+    elif period:
+        range_from = range_to = period
+    else:
+        raise HTTPException(status_code=400, detail="Provide `period` or `from`/`to`")
+
     from app.services.cashflow.engine import _AMOUNT_BASE_EXPR, paired_dedup_predicate
     stmt = text(f"""
         SELECT
@@ -145,7 +162,8 @@ async def cashflow_by_category(
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.deleted_at IS NULL
           AND t.is_pending = 0
-          AND substr(t.occurred_at, 1, 7) = :period
+          AND substr(t.occurred_at, 1, 7) >= :range_from
+          AND substr(t.occurred_at, 1, 7) <= :range_to
           -- Keep only one leg per transfer pair (see paired_dedup_predicate),
           -- otherwise the 借还钱 category double-counts the moved amount.
           AND {paired_dedup_predicate("t")}
@@ -153,7 +171,8 @@ async def cashflow_by_category(
         ORDER BY total DESC
     """)
     result = await db.execute(stmt, {
-        "period": period,
+        "range_from": range_from,
+        "range_to": range_to,
         "base_currency": settings.base_currency,
     })
     rows = result.all()
@@ -212,11 +231,26 @@ async def cashflow_timeseries(
         expense.append(str(r[2] or Decimal("0")))
         savings.append(str(r[3] or Decimal("0")))
 
+    # Real cash-assets curve (anchored to account balances), carry-forwarded
+    # onto `periods` (ascending). A month with no cash activity keeps the prior
+    # balance; months before the first cash row read 0.
+    from app.services.valuation.cash_history import compute_cash_history
+    cash_hist = await compute_cash_history(db, settings.base_currency)
+    cash = []
+    i = 0
+    last = "0"
+    for p in periods:
+        while i < len(cash_hist) and cash_hist[i][0] <= p:
+            last = cash_hist[i][1]
+            i += 1
+        cash.append(last)
+
     return ApiSuccess(data=CashFlowTimeseries(
         periods=periods,
         income=income,
         expense=expense,
         savings=savings,
+        cash=cash,
     ))
 
 

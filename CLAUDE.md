@@ -105,6 +105,28 @@ frontend/src/
 
 API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<T>()` 自动解包 `data` 并把错误转成 `ApiError`。
 
+**账户管理统一在 `/assets`（2026-06-27）**：所有账户（银行/信用卡/券商/加密/交易所/现金）的增删改、同步、子账户清单、余额调整、拖动排序全部在资产页「账户」tab。设置页只剩分类管理 / 智能分类 / 知识库 / API Token（不再有账户列表）。
+- **拖动排序**：账户卡左上角 ⠿ 把手（仅把手 `draggable`，避免破坏卡内输入/按钮）→ `PATCH /accounts/reorder`（全量有序 id 列表）持久化 `accounts.sort_order`；`list_accounts` 按 `sort_order, id` 排序，新账户 `sort_order` 自动置末。
+- **显示币种**：`lib/utils.ts` 的 `DISPLAY_CURRENCIES` 收敛为 CNY/USD/EUR/USDT 四种（总览 + 资产页的「显示币种」切换共用）。
+- **分析页分类分布周期**：底部「支出/收入分类分布」有独立周期控件（单月 / 区间汇总），独立于上方图表的时间范围，且自己管理 loading 不连带其它图表。后端 `/cashflow/by-category` 支持 `?period=` 或 `?from=&to=`（区间聚合）。分类分布**上卷到一级类目（大类）**：前端用 `useCategories()` 建 child→top-level 映射再喂 `ExpensePieChart`，避免铺满二级类目看不清。
+- **饼图标签坑**：recharts 的 label/tooltip 回调入参里,**data row 的同名字段会 shadow recharts 注入的 `percent`(0–1 分数)**。`ExpensePieChart` 的 data 自带 `percent`(已×100),所以 label 里别读 `percent`,改用 `value`+闭包 `total` 自己算(见 `charts.tsx`)。
+
+**总览(dashboard)改版(2026-06-27)**：只保留「总资产」卡(净值 + 按币种 + 资产类型 mini-cards),去掉了本月收支/储蓄率/快捷操作/最近交易。两张图:
+- `FinancialFlowChart`(收支与现金资产趋势)：每月收入/支出(左轴) + **现金资产**(右轴)。现金资产 = 所有现金/银行/信用卡(=非快照、`include_in_total`)账户在该月末的**真实余额**(initial_balance + 账本签名累加,按币种折 base)。**不是**从 0 滚加的净储蓄(那版误导,已废弃)。数据来自 `/cashflow/timeseries`(钉 BASE_CURRENCY)。
+- `PortfolioValueChart`(组合市值走势)：来自 `portfolio_snapshots` 的**前向周度快照**(投资标的市值)。
+- **总资产 = 现金资产 + 组合市值** 恒等成立:现金资产线最新点 == `net_worth.cash_total`,组合市值 == `investment_total`。现金资产含信用卡负债(净现金口径),所以早期月份可能为负(净卡债)。
+
+### 现金资产历史（cash_history，可回溯）
+
+- 现金历史**可从账本重建**(不像组合市值):`services/valuation/cash_history.py::compute_cash_history` 按 (币种, 月) 累加签名金额(镜像 `v_account_balance` 的符号 CASE,含 pending、排除子账户移动),每币种桶用**最新 FX** 折 base ——与 `net_worth` 现金腿同口径,故最新点必然等于 `cash_total`。`/cashflow/timeseries` 新增 `cash[]`(carry-forward 对齐到各月)。
+
+### 组合市值快照（portfolio_snapshots，周度）
+
+- **为何前向**：组合市值历史**无法回溯**——`asset_holdings` 只存当前数量(crypto/券商是快照同步,无逐周持仓历史)。scheduler **每周** upsert 当周一行(键=本周一 `period`='YYYY-MM-DD' 唯一,最新估值),跨周自动冻结上周值。
+- **净值口径单一来源**：`services/valuation/net_worth.py::compute_net_worth(db, base)` 是净资产(现金+投资,折 base)的**唯一实现**,`GET /holdings/portfolio/net-worth` 与快照 job 都调它 → 数字必然一致(同 `paired_dedup_predicate`/`_AMOUNT_BASE_EXPR` 的单源理念)。快照逻辑在 `services/valuation/snapshot.py`。
+- **调度**：`market_data/scheduler.py` 的 `portfolio_snapshot` job(每周 + 启动后 ~30s 首跑)。读取端点 `GET /holdings/portfolio/value-history`(按 period 升序)。
+- **未做（C 方案明确不做）**：被动收入(已实现现金)线、已实现/未实现拆分。被动收入若以后做,用「类目加开关」(给 Category 加 `is_passive_income`),已与用户对齐但本期未实现。
+
 ### PDF 解析架构
 
 银行账单格式碎片化，**没有通用解析器**。`services/pdf_parser/engine.py` 内通过文本特征检测银行（icbc/cmb/n26/revolut/...），分发到对应解析器。新增银行 = 加一个 parser 文件 + 在 detector 注册关键词。`pdfplumber` 是主力库，`pypdf` 兜底。
@@ -112,6 +134,18 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - **银行检测按最早出现位置**（2026-06）：`_detect_bank` 取 `_BANK_MARKERS` 中**在文中出现位置最靠前**的银行。发行行标识在头部、对方银行 BIC 只在正文转账行——earliest-position 天然选发行行。修复了 N26↔Revolut 互转账单的交叉误判（N26 账单含 Revolut 的 `revodeb2`，反之含 `ntsbdeb1`）。
 - **导入暂存流程（2026-06，preview-before-commit）**：upload **只解析不入库**，落 `status='awaiting_review'` 并返回**全部** `parsed_preview`（解析输出，非 DB 行）。`POST /statements/{id}/commit?account_id=` 才真正插入 + 跑 ingestion；`DELETE`（取消）连带删除暂存记录 + 存储的 PDF 文件（无痕，可重传）。`account_id` 可选（用 upload 时解析的候选账户）。旧 `awaiting_account`/`assign-account`/`confirm`(翻 is_pending) 保留向后兼容。`GET /statements/{id}` 对 awaiting_* 状态**重解析**出预览（DB 里还没有行）。
 - **银行识别覆盖的两道防线**（不做「改银行重新解析」——冗余）：(1) 上传时 `bank_format` 下拉手动指定；(2) 暂存预览里看到识别结果不对就取消重传。已入库的:撤销 + 重传。`list` 加 `offset` + `meta.total` 支持「加载更多」。`PdfImportStatus` 新增 `awaiting_review`（lifespan 幂等重建 CHECK）。
+
+#### 期末余额提取 + 对账锚定（2026-06-27）
+
+- **问题**：账户 `initial_balance` 记账前填的是 0,不是真实期初 → 整条余额曲线被平移一个常数(现金资产线/净值现金腿都受影响)。
+- **解法:从 PDF 提取「这一期期末余额」反推 `initial_balance`**。`engine.py::extract_closing_balance(bank, text)` 按银行抽期末余额(**as printed**,调用方按账户类型定符号):
+  - n26: 所有 `Your new balance ±X€` **求和**(主账户+各 Space;子账户移动被账本忽略,所以总额=主+Space)。
+  - amex_de: `Saldo des laufenden Monats für… X`;tfbank: `Neuer Saldo: X`(点小数);advanzia: `NEUER SALDO X`。
+  - revolut: 期末在定位列里,**返回 None**(优雅跳过,不做对账)。
+- **符号**:`services/valuation/anchor.py::normalize_closing` 对 `credit_card` 取 `−abs`(账本里卡债为负;advanzia/AMEX 印正数、TFBank 印负数,统一成负);资产账户原样。
+- **锚定(race-free)**:`anchor_account_balance(db, acct, balance, as_of)` 设 `initial_balance = balance − Σ(signed tx ≤ as_of)`(签名口径镜像 `v_account_balance`,见 `cash_history._SIGNED_AMOUNT`)。**不建交易、平移整条历史**。可任何时候做(减掉了截至 as_of 的已记交易,as_of 之后的交易自然叠加)→ 不用卡「月底且下一笔开支之前」。端点 `POST /accounts/{id}/anchor-balance`(快照账户拒绝)。
+- **对账(catch 记账错误)**:`commit_statement` 插入后调 `compute_reconciliation`(as_of = 本期最后一笔交易日)→ 返回 `{closing_balance, computed_balance, discrepancy, currency, as_of}` 进 `PdfImportOut.reconciliation`。前端 `pdf-import-panel` 若 `|discrepancy|>0.005` 弹⚠️卡(账单期末/系统推算/差额)+「以账单为准锚定」按钮(调 anchor);一致则显示 ✓。**不自动改 `initial_balance`**——透明展示,用户点按钮才锚,这样漏记/重复能被发现而非被静默吸收。
+- **未做**:revolut 期末(定位列解析);PDF 自动从期末日期解析 as_of(目前用最后一笔交易日,对信用卡中周期也对)。
 
 ### CSV 导入 / PayPal（2026-06-25 实装）
 

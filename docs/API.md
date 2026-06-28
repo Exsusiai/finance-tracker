@@ -42,14 +42,16 @@
 
 | Method | Path                              | 说明                                        |
 |--------|-----------------------------------|---------------------------------------------|
-| GET    | `/accounts`                       | 列出所有账户                                |
-| POST   | `/accounts`                       | 创建账户                                    |
+| GET    | `/accounts`                       | 列出所有账户 (按 `sort_order`, `id` 排序)   |
+| POST   | `/accounts`                       | 创建账户 (`sort_order` 自动置末)            |
+| PATCH  | `/accounts/reorder`               | 手动拖动排序 (body: `account_ids` 全量有序列表) |
 | GET    | `/accounts/{id}`                  | 单个账户详情                                |
 | PATCH  | `/accounts/{id}`                  | 更新账户 (含 IBAN / 子账户清单)             |
 | DELETE | `/accounts/{id}`                  | 软删除账户                                  |
 | GET    | `/accounts/{id}/balance`          | 当前余额 (来自 `v_account_balance` 视图)    |
 | GET    | `/accounts/balances`              | 全账户余额一次返回                          |
 | POST   | `/accounts/{id}/adjust-balance`   | 余额校准（自动建一笔 `adjustment` 交易）    |
+| POST   | `/accounts/{id}/anchor-balance`   | 锚定真实余额：按 `(balance, as_of)` 反推并设 `initial_balance`（不建交易、平移整条历史；快照账户拒绝） |
 
 **`AccountOut` 新增字段** (P1-4):
 - `include_in_total: bool` — 账户是否计入 net_worth / portfolio 汇总。`AccountCreate` 和 `AccountUpdate` 均接受此字段。
@@ -299,6 +301,7 @@
 | GET    | `/holdings/portfolio/summary`     | 总资产估值 (折算到基础币种)          |
 | GET    | `/holdings/portfolio/breakdown`   | 按类别 / 币种饼图数据                |
 | GET    | `/holdings/portfolio/net-worth`   | 净资产 = 现金 + 投资（按币种细分）   |
+| GET    | `/holdings/portfolio/value-history` | 月度组合市值快照序列（前向记录，无法回溯） |
 
 **HoldingOut (单条持仓) 字段补充** — 2026-05-20 起：
 - `price_currency`：最新 `market_prices` 行的 currency（钱包/CEX 同步写入的 crypto 通常是 `USDT`）；与 `cost_currency` 解耦
@@ -386,8 +389,8 @@
 | Method | Path                              | 说明                                  |
 |--------|-----------------------------------|---------------------------------------|
 | GET    | `/cashflow/monthly`               | 按月聚合 (?from=2025-01&to=2026-04)   |
-| GET    | `/cashflow/by-category`           | 按分类聚合 (?period=2026-04)          |
-| GET    | `/cashflow/timeseries`            | 收入/支出/储蓄三线时间序列            |
+| GET    | `/cashflow/by-category`           | 按分类聚合：单月 `?period=2026-04` 或区间汇总 `?from=2026-01&to=2026-05` |
+| GET    | `/cashflow/timeseries`            | 收入/支出/储蓄 + 现金资产(`cash[]`,真实月末余额)时间序列 |
 | POST   | `/cashflow/recompute`             | 触发指定区间快照重算                  |
 
 > 数据源：`cash_flow_snapshots` 表（写时计算）。每次 transaction CRUD / inbox confirm / adjust-balance 都会自动重算受影响月份。

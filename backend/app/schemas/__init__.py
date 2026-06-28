@@ -148,12 +148,19 @@ class AccountOut(BaseModel):
     initial_balance: str
     is_active: bool
     include_in_total: bool = True
+    sort_order: int = 0
     notes: str | None
     metadata_json: str | None
     created_at: str
     updated_at: str
 
     model_config = {"from_attributes": True}
+
+
+class AccountReorderIn(BaseModel):
+    """Ordered list of account ids; index becomes the new sort_order."""
+
+    account_ids: list[int] = Field(min_length=1)
 
 
 class BalanceOut(BaseModel):
@@ -342,6 +349,19 @@ class ParsedPreviewTx(BaseModel):
     description: str | None = None
 
 
+class StatementReconciliation(BaseModel):
+    """Statement closing balance vs computed ledger balance at the statement's
+    last transaction date. All values in the account's currency, ledger sign
+    convention (credit-card debt is negative)."""
+
+    closing_balance: str   # from the PDF (sign-normalised)
+    computed_balance: str  # initial_balance + Σ signed tx ≤ as_of
+    discrepancy: str       # closing − computed; ≈0 means the ledger reconciles
+    currency: str
+    as_of: str             # the statement's last transaction date
+    previously_anchored: bool = False  # drift (True) vs first-time calibration
+
+
 class PdfImportOut(BaseModel):
     id: int
     filename: str
@@ -359,6 +379,9 @@ class PdfImportOut(BaseModel):
     # Parser-output preview (pre-commit / awaiting_review): ALL parsed rows,
     # nothing inserted yet.
     parsed_preview: list[ParsedPreviewTx] = []
+    # Post-commit balance reconciliation (None when the statement carried no
+    # parsable closing balance, e.g. Revolut).
+    reconciliation: StatementReconciliation | None = None
     created_at: str
     updated_at: str
 
@@ -503,6 +526,30 @@ class NetWorthOut(BaseModel):
     as_of: str
 
 
+class PortfolioValuePoint(BaseModel):
+    """One monthly portfolio-value snapshot (forward-captured)."""
+
+    period: str  # "YYYY-MM"
+    base_currency: str
+    cash_total: str
+    investment_total: str
+    net_worth: str
+    captured_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class AnchorBalanceIn(BaseModel):
+    """Anchor an account's initial_balance to a known-true balance as of a date.
+
+    `balance` is in the ledger sign convention (credit-card debt negative);
+    `as_of` is the reference date/time (ISO) the balance is true for — usually a
+    statement's last transaction date."""
+
+    balance: str
+    as_of: str
+
+
 class BalanceAdjustmentIn(BaseModel):
     target_balance: str
     note: str | None = None
@@ -562,6 +609,9 @@ class CashFlowTimeseries(BaseModel):
     income: list[str] = []
     expense: list[str] = []
     savings: list[str] = []
+    # Real cash assets at each month-end (account balances folded to base),
+    # carry-forwarded onto `periods`. Anchored to initial_balance + ledger.
+    cash: list[str] = []
 
 
 # ─── Categorization Rule ────────────────────────────────────────────────────
