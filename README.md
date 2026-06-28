@@ -31,6 +31,12 @@ cd frontend && npm install && npm run dev -- -p 3010
 
 打开 http://localhost:3010
 
+## 部署到服务器
+
+迁移/部署到另一台机器**不是 `git clone` 就行**——GitHub 上只有代码,数据库、PDF、密钥都在 `.gitignore` 里,必须手动迁移(SQLite 一致性快照 + 加密密钥 + PDF 绝对路径改写三大坑)。完整实测流程见 **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**。
+
+> 已部署一例:`cortana-box`(192.168.178.65)——后端 `:8000`、前端 `:3100`(3000 被占)、MCP 经 `run.sh` 供同机 OpenClaw stdio 接入。启停脚本 `deploy/start.sh` / `deploy/stop.sh`(tmux 持久化)。
+
 ## 核心能力速览
 
 | 模块 | 功能要点 |
