@@ -299,8 +299,9 @@
 | PATCH  | `/holdings/{id}`                  | 更新数量 / 成本                      |
 | DELETE | `/holdings/{id}`                  | 删除持仓                             |
 | GET    | `/holdings/portfolio/summary`     | 总资产估值 (折算到基础币种)          |
-| GET    | `/holdings/portfolio/breakdown`   | 按类别 / 币种饼图数据                |
+| GET    | `/holdings/portfolio/breakdown`   | 按类别 / 币种饼图数据（仅投资）       |
 | GET    | `/holdings/portfolio/net-worth`   | 净资产 = 现金 + 投资（按币种细分）   |
+| GET    | `/holdings/portfolio/composition` | 「按构成」分布（现金+投资全景，折 base）：稳定币合一、同币种跨所累计、<€0.1 剔除、€0.1–€20 折入「小额X」、券商闲置现金单列 |
 | GET    | `/holdings/portfolio/value-history` | 月度组合市值快照序列（前向记录，无法回溯） |
 
 **HoldingOut (单条持仓) 字段补充** — 2026-05-20 起：

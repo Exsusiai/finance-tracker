@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-✅ **已可用** — 5 家欧洲银行 PDF 解析（预览后入库）+ 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包）** + **券商同步（IBKR Flex / Trade Republic，EOD 持仓快照）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密/外币折算）+ 账户级「不计入总资产」开关 + 21 个 MCP tools（19 读 + 2 写，读工具复用后端 service 与 REST 口径一致）。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈 + 券商同步 + Review V6/V7/V8 资金口径修正 + MCP 完整读取改造已合入；**405 个单测全过**（backend 399 + MCP read 6）。
+✅ **已可用** — 5 家欧洲银行 PDF 解析（预览后入库）+ 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包 + 统一账户 UTA）** + **券商同步（IBKR Flex / Trade Republic，EOD 持仓快照）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密/外币折算）+ **资产分布三视图（按类型 / 按币种 / 按构成）** + 账户级「不计入总资产」开关 + 21 个 MCP tools（19 读 + 2 写，读工具复用后端 service 与 REST 口径一致）。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈 + 券商同步 + Review V6/V7/V8 资金口径修正 + MCP 完整读取改造 + Bitget 统一账户 + 资产分布「按构成」均已合入并**部署上线**（见 `docs/DEPLOYMENT.md`）；**408 个单测全过**（backend 402 + MCP read 6）。
 
 详细进度：`PROGRESS.md` · 最近一日工作日志：`docx/WORKLOG_2026-05-07.md` · 剩余优先级：`docx/ROADMAP.md` · 完整需求：`docx/PRD.md`
 

@@ -1,13 +1,23 @@
 # Finance Tracker — 项目进度
 
-> 修订日期: 2026-06-25
+> 修订日期: 2026-06-29
 > 根据"是否真正闭环并验证过"打分；详细分析见 `docx/REQUIREMENT_GAP.md`，剩余优先级见 `docx/ROADMAP.md`。
 
 ## 项目信息
-- **Repo**: https://github.com/Exsusiai/finance-tracker
-- **Git**: `master` 分支（feat/llm-classification 已合并；P1-4 + Phase 1/2 已 commit，本地领先 origin 2-4 个 commit）
+- **Repo**: https://github.com/Exsusiai/finance-tracker（服务器与本机均跟踪 `origin/master`）
+- **Git**: `master` 分支，已与 origin 同步。
 - **本地端口**: Backend `8010`, Frontend `3002`（默认 8000 / 3000 已被其他项目占用，详见 `CLAUDE.md`）
-- **当前阶段**: ✅ Sprint 0+1+2+3+4+UAT + **P1-1 LLM 智能分类** + **P1-4 加密钱包 / CEX 同步** + **券商同步（IBKR Flex + Trade Republic）** + **PDF 预览后入库改造** 全部已实装。最近在做 UAT 资金口径修正（转账/现金流）。下一步：TR 真实凭据 UAT、IBKR Flex quota 复测 → 等用户拍板 P1-2 GoCardless / P1-3 Notion / P1-5 储蓄口径
+- **线上部署（2026-06-28 起）**: `cortana-box`（192.168.178.65）后端 `:8000` / 前端 `:3100`（3000 被占）/ MCP 经 `run.sh` 供同机 OpenClaw stdio 接入。tmux 守护（`deploy/start.sh`/`stop.sh`），更新走 `deploy/update.sh`。详见 `docs/DEPLOYMENT.md`。
+- **当前阶段**: ✅ 全部已实装并部署上线。MCP 完整读取改造 + Bitget 统一账户 + 资产分布「按构成」均已合入。下一步：TR 真实凭据 UAT、IBKR Flex quota 复测 → 等用户拍板 P1-2 GoCardless / P1-3 Notion / P1-5 储蓄口径
+
+## 2026-06-28~29 新交付：MCP 完整读取 + 服务器上线 + Bitget 统一账户 + 资产分布
+
+- **MCP 完整读取改造（7→21 tool，19 读 + 2 写）**：读路径全部改为复用后端 async service / 共享 SQL 片段（`compute_net_worth`、`_AMOUNT_BASE_EXPR`、`paired_dedup_predicate`、`_tx_to_out` 等），读数与 REST/Web 构造一致，消除手抄 SQL 漂移。新增 `mcp-server/src/finance_mcp/{_backend,read_tools}.py` + `tests/test_mcp_read.py`（6 parity 测试）。接线 `.mcp.json`（host-specific，已 gitignore）。清单见 `docs/API.md §17`、`docs/MCP_USAGE.md`，方案见 `docs/MCP_READ_PLAN.md`。
+- **服务器部署**：迁移到 cortana-box（一致性 DB 快照 + 加密 key + PDF 路径改写三大坑）；转成跟踪 origin/master 的 git 克隆，`deploy/update.sh` 一键 pull+重装+迁移+重建+重启。`docs/DEPLOYMENT.md`。
+- **Bitget 统一账户（UTA）**：经典 v2 端点升级后返回 `code 40085`，切到 v3 `/api/v3/account/assets`（交易）+ `/api/v3/account/funding-assets`（资金）两钱包合并，修复持仓读成 0。
+- **资产分布「按构成」**：资产页分布独立成常显报表（移出 Tab）+ 新增第三视图「按构成」（现金+投资全景）：现金按币种归并、稳定币合一、同币种跨所累计、<€0.1 剔除、€0.1–€20 折入「小额X」、ISIN 标的显示友好名。后端 `services/valuation/composition.py` + `GET /holdings/portfolio/composition`。
+- **现金口径统一（关键资金不变量）**：`现金` = 银行账户现金净额（`net_worth.cash_total`）；券商/交易所里的闲置现金（`asset_class='cash'` 持仓）单列「券商闲置现金」、归投资腿。总览 hero、总览资产分布条、资产页按构成三处口径一致。
+- **测试**：backend **402 passed** + MCP read **6 passed**。
 
 ## 2026-06-25 新交付：Code Review V8 残留缺口修复
 V8 复审 V7 修复，补齐残留（全套 **365 passed**）：

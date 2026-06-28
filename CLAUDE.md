@@ -115,6 +115,13 @@ API 响应封装：`{ success, data, error, meta }`。`lib/api.ts` 的 `request<
 - `FinancialFlowChart`(收支与现金资产趋势)：每月收入/支出(左轴) + **现金资产**(右轴)。现金资产 = 所有现金/银行/信用卡(=非快照、`include_in_total`)账户在该月末的**真实余额**(initial_balance + 账本签名累加,按币种折 base)。**不是**从 0 滚加的净储蓄(那版误导,已废弃)。数据来自 `/cashflow/timeseries`(钉 BASE_CURRENCY)。
 - `PortfolioValueChart`(组合市值走势)：来自 `portfolio_snapshots` 的**前向周度快照**(投资标的市值)。
 - **总资产 = 现金资产 + 组合市值** 恒等成立:现金资产线最新点 == `net_worth.cash_total`,组合市值 == `investment_total`。现金资产含信用卡负债(净现金口径),所以早期月份可能为负(净卡债)。
+- **总览资产分布条**(`AllocationBar`)用 `breakdown.by_class`(粗类别:美股/加密/基金…)**外加**银行现金一段;`cash` 类(=券商闲置现金持仓)单独标注「券商闲置现金」,银行现金 = `net_worth.cash_total`。**别**误把它接成资产页那种逐标的 composition(用户明确要粗粒度)。
+
+### 资产分布「按构成」(composition,2026-06-29)
+
+- 资产页「资产分布」**独立成常显报表**(移出 Tab),三视图:按构成 / 按类型 / 按币种(后两者来自 `/holdings/portfolio/breakdown`,**仅投资**)。
+- 「按构成」= **现金 + 投资全景**:`services/valuation/composition.py::compute_composition` + `GET /holdings/portfolio/composition`。规则:现金按币种归并(所有 EUR→一个「EUR 现金」)、稳定币(USDT/USDC/DAI…)合并「USD 稳定币」、同币种跨账户/交易所累计(BTC on Bitget+Binance→一个 BTC)、`<€0.1` 剔除、`[€0.1,€20)` 投资折入「小额股票/小额加密货币」等桶、symbol 形如 ISIN 时显示 `name`(伯克希尔等)。阈值在 base 币种(校准 EUR base)。
+- **现金口径(资金不变量,见 [[fund-accounting-invariants]] 第 4 条)**:`现金` 一律 = **银行账户现金净额**(`net_worth.cash_total`,含信用卡负债)。券商/交易所里的闲置现金(`asset_class='cash'` 持仓)**归投资腿**,在 composition 里单列「券商闲置现金」(key=`idle_cash`,不与现金腿 `cash:{ccy}` 桶冲突)。三处展示(总览 hero、总览资产分布条、资产页按构成)口径必须一致。
 
 ### 现金资产历史（cash_history，可回溯）
 
