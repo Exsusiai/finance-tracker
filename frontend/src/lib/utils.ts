@@ -88,18 +88,17 @@ export function periodLabel(period: string): string {
   return date.toLocaleDateString("zh-CN", { year: "numeric", month: "short" });
 }
 
-/** Generate a palette of distinct colors for charts. */
+/** Categorical palette (theme-aware via CSS vars). Jewel-toned, evenly spaced
+ *  hues at matched lightness so distribution categories stay distinguishable. */
 export const CHART_COLORS = [
-  "hsl(220, 70%, 55%)",  // blue
-  "hsl(160, 60%, 45%)",  // teal
-  "hsl(35, 90%, 55%)",   // amber
-  "hsl(340, 70%, 55%)",  // rose
-  "hsl(270, 60%, 60%)",  // violet
-  "hsl(190, 70%, 50%)",  // cyan
-  "hsl(15, 80%, 55%)",   // orange
-  "hsl(140, 50%, 45%)",  // green
-  "hsl(50, 70%, 50%)",   // yellow
-  "hsl(300, 50%, 55%)",  // magenta
+  "var(--cat-1)",
+  "var(--cat-2)",
+  "var(--cat-3)",
+  "var(--cat-4)",
+  "var(--cat-5)",
+  "var(--cat-6)",
+  "var(--cat-7)",
+  "var(--cat-8)",
 ];
 
 export const ASSET_CLASS_LABELS: Record<string, string> = {
@@ -190,25 +189,26 @@ export const CURRENCY_GROUPS: Array<{ label: string; values: string[] }> = [
 /** Flat list (preserves group order) — handy for default-pick logic. */
 export const ALL_CURRENCIES: string[] = CURRENCY_GROUPS.flatMap((g) => g.values);
 
-/** Display currency choices in the resource selector. */
+/** Display currency choices in the resource selector.
+ *  Trimmed to the four the user actually tracks (2026-06-27). */
 export const DISPLAY_CURRENCIES = [
   { value: "CNY", label: "¥ CNY" },
   { value: "USD", label: "$ USD" },
   { value: "EUR", label: "€ EUR" },
   { value: "USDT", label: "₮ USDT" },
-  { value: "HKD", label: "HK$ HKD" },
-  { value: "JPY", label: "¥ JPY" },
-  { value: "GBP", label: "£ GBP" },
 ];
 
+/** Asset-class fills — each class a distinct categorical hue (theme-aware).
+ *  Assigned for MAX hue separation so commonly co-held classes never share a
+ *  family: cash=amber(gold), fund=emerald(green), us_stock=indigo, crypto=violet. */
 export const ASSET_CLASS_COLORS: Record<string, string> = {
-  cash: "hsl(220, 70%, 55%)",
-  a_share: "hsl(340, 70%, 55%)",
-  eu_stock: "hsl(190, 70%, 50%)",
-  us_stock: "hsl(220, 70%, 55%)",
-  crypto: "hsl(270, 60%, 60%)",
-  gold: "hsl(35, 90%, 55%)",
-  bond: "hsl(160, 60%, 45%)",
-  fund: "hsl(140, 50%, 45%)",
-  other: "hsl(0, 0%, 50%)",
+  cash: "var(--cat-3)",     // amber / gold (warm — distinct from fund's green)
+  fund: "var(--cat-5)",     // emerald
+  us_stock: "var(--cat-1)", // indigo
+  crypto: "var(--cat-4)",   // violet
+  eu_stock: "var(--cat-7)", // sky
+  a_share: "var(--cat-6)",  // rose
+  gold: "var(--cat-8)",     // orange
+  bond: "var(--cat-2)",     // teal
+  other: "oklch(0.6 0 0)",  // neutral
 };

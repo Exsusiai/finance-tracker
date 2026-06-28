@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 const NAV_ITEMS = [
   {
@@ -58,15 +59,19 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="hidden md:flex w-56 flex-col border-r border-border bg-card">
+    <aside className="hidden md:flex w-60 flex-col border-r border-border bg-secondary/40">
       {/* Logo */}
-      <div className="flex items-center gap-2 px-5 py-5 border-b border-border">
-        <span className="text-lg">💠</span>
-        <span className="font-semibold text-sm text-foreground">Finance Tracker</span>
+      <div className="flex items-center gap-2.5 px-5 h-16 shrink-0">
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold">
+          F
+        </span>
+        <span className="font-semibold text-sm tracking-tight text-foreground">
+          Finance Tracker
+        </span>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-2 space-y-0.5">
         {NAV_ITEMS.map((item) => {
           const isActive =
             pathname === item.href || pathname.startsWith(item.href + "/");
@@ -74,14 +79,17 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              aria-current={isActive ? "page" : undefined}
               className={cn(
-                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
+                "group flex items-center gap-3 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors",
                 isActive
                   ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                  : "text-muted-foreground hover:text-foreground hover:bg-accent",
               )}
             >
-              {item.icon}
+              <span className={cn("transition-colors", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")}>
+                {item.icon}
+              </span>
               {item.label}
             </Link>
           );
@@ -89,8 +97,9 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="px-5 py-4 border-t border-border">
-        <p className="text-xs text-muted-foreground">v0.1.0</p>
+      <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+        <p className="text-xs text-muted-foreground tabular-nums">v0.1.0</p>
+        <ThemeToggle />
       </div>
     </aside>
   );

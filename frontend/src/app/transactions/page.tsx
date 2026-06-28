@@ -195,9 +195,9 @@ export default function TransactionsPage() {
     <div className="min-h-screen bg-background text-foreground pb-16 md:pb-0">
       <div className="mx-auto max-w-6xl px-4 py-6 md:px-6 lg:px-8">
         {/* ─── Header ──────────────────────────────────────────────── */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">📝 交易记录</h1>
+            <h1 className="text-[1.75rem] font-semibold leading-tight tracking-tight">交易记录</h1>
             <p className="text-sm text-muted-foreground mt-1">
               {totalFiltered} 笔交易
               {accountId && accounts?.find((a) => a.id === accountId)
@@ -212,7 +212,7 @@ export default function TransactionsPage() {
             <RefreshMatchingButton />
             <button
               onClick={() => setShowCreateForm(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shadow-xs"
             >
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -230,7 +230,7 @@ export default function TransactionsPage() {
             <TabsTrigger value="inbox">
               待确认
               {inboxCount > 0 && (
-                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded-full bg-amber-500 text-white">
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded-full bg-warning text-warning-foreground">
                   {inboxCount}
                 </span>
               )}
@@ -238,7 +238,7 @@ export default function TransactionsPage() {
             <TabsTrigger value="transfers">
               转账建议
               {suggestionCount > 0 && (
-                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded-full bg-blue-500 text-white">
+                <span className="ml-1.5 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded-full bg-foreground text-background">
                   {suggestionCount}
                 </span>
               )}

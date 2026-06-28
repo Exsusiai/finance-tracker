@@ -2,46 +2,143 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Finance Tracker — design system (redesign/ui-minimal)
+ * Graphite monochrome, restrained, Apple-settings calm. Light default + dark toggle.
+ * Tokens are bare OKLCH components ("L C H") so Tailwind can apply `<alpha-value>`
+ * (e.g. bg-primary/10). The only chromatic colors are financial semantics:
+ * gain (green ↑), loss (red ↓), warning (amber). Everything else is true neutral.
+ */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --primary: 220 70% 55%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 220 70% 55%;
+    /* Neutral surfaces & ink (chroma 0 — a real off-white, never cream) */
+    --background: 0.985 0 0;
+    --foreground: 0.22 0 0;
+
+    --card: 1 0 0;
+    --card-foreground: 0.22 0 0;
+
+    --popover: 1 0 0;
+    --popover-foreground: 0.22 0 0;
+
+    /* Indigo is the brand accent. Primary actions / selection / links / focus. */
+    --primary: 0.53 0.16 277;
+    --primary-foreground: 0.99 0 0;
+
+    --secondary: 0.965 0 0;
+    --secondary-foreground: 0.28 0 0;
+
+    --muted: 0.965 0 0;
+    --muted-foreground: 0.45 0 0; /* ≥4.5:1 on --background */
+
+    --accent: 0.965 0 0;
+    --accent-foreground: 0.24 0 0;
+
+    /* Financial + state semantics (the only hues in the system) */
+    --gain: 0.58 0.13 155;
+    --gain-foreground: 0.985 0 0;
+    --loss: 0.55 0.2 27;
+    --loss-foreground: 0.985 0 0;
+    --warning: 0.66 0.13 65;
+    --warning-foreground: 0.22 0 0;
+    --destructive: 0.55 0.2 27; /* alias of loss for error chrome */
+    --destructive-foreground: 0.985 0 0;
+
+    --border: 0.915 0 0;
+    --input: 0.915 0 0;
+    --ring: 0.53 0.16 277;
+
     --radius: 0.625rem;
+
+    /* Chart colors — full color strings for recharts SVG fill/stroke.
+     * Single-series trends use --brand (indigo); income/expense use gain/loss;
+     * categorical distributions (asset class, pies, allocation bar) use the
+     * jewel-toned --cat-* palette so categories are clearly distinguishable. */
+    --brand: oklch(0.53 0.16 277);
+    --chart-ink: oklch(0.53 0.16 277);
+    --chart-gain: oklch(0.58 0.13 155);
+    --chart-loss: oklch(0.55 0.2 27);
+    --chart-grid: oklch(0.915 0 0);
+    --chart-axis: oklch(0.55 0 0);
+    /* Categorical palette (also exposed as --chart-1..8 for legacy refs) */
+    --cat-1: oklch(0.53 0.16 277);  /* indigo  */
+    --cat-2: oklch(0.66 0.12 205);  /* cyan    */
+    --cat-3: oklch(0.78 0.16 78);   /* amber   */
+    --cat-4: oklch(0.54 0.22 303);  /* violet  */
+    --cat-5: oklch(0.72 0.16 163);  /* emerald */
+    --cat-6: oklch(0.65 0.22 13);   /* rose    */
+    --cat-7: oklch(0.69 0.15 234);  /* sky     */
+    --cat-8: oklch(0.71 0.18 51);   /* orange  */
+    --chart-1: var(--cat-1);
+    --chart-2: var(--cat-2);
+    --chart-3: var(--cat-3);
+    --chart-4: var(--cat-4);
+    --chart-5: var(--cat-5);
+    --chart-6: var(--cat-6);
+    --chart-7: var(--cat-7);
+    --canvas-bg: #ffffff;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --primary: 220 70% 55%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 220 70% 55%;
+    --background: 0.18 0 0;
+    --foreground: 0.96 0 0;
+
+    --card: 0.213 0 0;
+    --card-foreground: 0.96 0 0;
+
+    --popover: 0.213 0 0;
+    --popover-foreground: 0.96 0 0;
+
+    /* On dark, the indigo accent lifts for contrast on the deep surface. */
+    --primary: 0.66 0.16 277;
+    --primary-foreground: 0.99 0 0;
+
+    --secondary: 0.25 0 0;
+    --secondary-foreground: 0.96 0 0;
+
+    --muted: 0.25 0 0;
+    --muted-foreground: 0.72 0 0; /* ≥4.5:1 on --background */
+
+    --accent: 0.27 0 0;
+    --accent-foreground: 0.96 0 0;
+
+    --gain: 0.72 0.14 155;
+    --gain-foreground: 0.18 0 0;
+    --loss: 0.65 0.19 27;
+    --loss-foreground: 0.18 0 0;
+    --warning: 0.78 0.13 75;
+    --warning-foreground: 0.18 0 0;
+    --destructive: 0.65 0.19 27;
+    --destructive-foreground: 0.985 0 0;
+
+    --border: 0.3 0 0;
+    --input: 0.3 0 0;
+    --ring: 0.66 0.16 277;
+
+    --brand: oklch(0.7 0.15 277);
+    --chart-ink: oklch(0.7 0.15 277);
+    --chart-gain: oklch(0.72 0.14 155);
+    --chart-loss: oklch(0.66 0.19 27);
+    --chart-grid: oklch(0.3 0 0);
+    --chart-axis: oklch(0.6 0 0);
+    /* Categorical palette — lifted L for vividness on the dark surface */
+    --cat-1: oklch(0.66 0.16 277);  /* indigo  */
+    --cat-2: oklch(0.74 0.12 205);  /* cyan    */
+    --cat-3: oklch(0.82 0.15 78);   /* amber   */
+    --cat-4: oklch(0.66 0.2 303);   /* violet  */
+    --cat-5: oklch(0.78 0.16 163);  /* emerald */
+    --cat-6: oklch(0.7 0.2 13);     /* rose    */
+    --cat-7: oklch(0.74 0.14 234);  /* sky     */
+    --cat-8: oklch(0.76 0.17 51);   /* orange  */
+    --chart-1: var(--cat-1);
+    --chart-2: var(--cat-2);
+    --chart-3: var(--cat-3);
+    --chart-4: var(--cat-4);
+    --chart-5: var(--cat-5);
+    --chart-6: var(--cat-6);
+    --chart-7: var(--cat-7);
+    --canvas-bg: #1a1a1a;
   }
 }
 
@@ -49,19 +146,121 @@
   * {
     @apply border-border;
   }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings: "cv01", "ss01";
+    /* Tabular figures align money columns; SF on Apple, system elsewhere. */
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Quiet, native-feeling focus ring (keyboard only). */
+  :focus-visible {
+    outline: 2px solid oklch(var(--ring));
+    outline-offset: 2px;
+  }
+
+  /* Text selection in the brand ink, low-key. */
+  ::selection {
+    background: oklch(var(--foreground) / 0.12);
+  }
+
+  /* Thin, unobtrusive scrollbars (Apple-like). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(var(--foreground) / 0.18) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: oklch(var(--foreground) / 0.16);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: oklch(var(--foreground) / 0.28);
   }
 }
 
-/* Recharts responsive tweaks */
-.recharts-wrapper {
-  font-family: inherit;
+@layer components {
+  /* Skeleton shimmer for loading states (replaces center spinners). */
+  .skeleton {
+    @apply rounded-md bg-muted;
+    position: relative;
+    overflow: hidden;
+  }
+  .skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(
+      90deg,
+      transparent,
+      oklch(var(--foreground) / 0.06),
+      transparent
+    );
+    animation: skeleton-shimmer 1.6s ease-in-out infinite;
+  }
+
+  /* Hairline divider (sub-pixel border between dense rows). */
+  .hairline {
+    @apply border-border;
+  }
 }
 
+@keyframes skeleton-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Subtle entrance for cards/sections — opacity+transform only, reduced-motion safe. */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .skeleton::after {
+    animation: none;
+  }
+}
+
+/* Recharts inherits the app font; tooltips/legends styled inline. */
+.recharts-wrapper,
 .recharts-default-tooltip {
   font-family: inherit;
+}
+.recharts-cartesian-axis-tick text {
+  fill: var(--chart-axis);
 }
 
 /* Print-friendly */

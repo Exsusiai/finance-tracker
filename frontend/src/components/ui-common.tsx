@@ -11,15 +11,15 @@ interface TimeRangeSelectorProps {
 
 export function TimeRangeSelector({ value, onChange, options }: TimeRangeSelectorProps) {
   return (
-    <div className="flex items-center gap-1 bg-muted rounded-lg p-1">
+    <div className="inline-flex items-center gap-0.5 rounded-full border border-border bg-card p-0.5 shadow-xs">
       {options.map((opt) => (
         <button
           key={opt.value}
           onClick={() => onChange(opt.value)}
           className={cn(
-            "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+            "px-3 py-1.5 text-xs font-medium rounded-full transition-colors",
             value === opt.value
-              ? "bg-background text-foreground shadow-sm"
+              ? "bg-primary text-primary-foreground"
               : "text-muted-foreground hover:text-foreground"
           )}
         >

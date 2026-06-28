@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   PieChart,
   Pie,
@@ -35,19 +35,25 @@ import {
   ApiError,
   deleteAccount,
   deleteHolding,
+  reorderAccounts,
   triggerMarketRefresh,
   type AccountOut,
   type BalanceOut,
   type HoldingOut,
 } from "@/lib/api";
 import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
+import { PageHeader, SegmentedControl, StatTile } from "@/components/ui-kit";
 import { HoldingForm } from "@/components/holding-form";
+import { SyncAccountButton } from "@/components/sync-account-button";
+import { SubaccountListEditor } from "@/components/subaccount-list-editor";
 import {
   AccountForm,
   ACCOUNT_TYPE_ICONS,
   ACCOUNT_TYPE_LABELS,
   INVESTMENT_TYPES,
 } from "@/components/account-form";
+
+const SYNCABLE_ACCOUNT_TYPES = new Set(["crypto_wallet", "exchange", "brokerage"]);
 
 type SortKey =
   | "asset_name"
@@ -289,18 +295,15 @@ export default function AssetsPage() {
   return (
     <div className="min-h-screen bg-background text-foreground pb-16 md:pb-0">
       <div className="mx-auto max-w-7xl px-4 py-6 md:px-6 lg:px-8">
-        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">💼 资产</h1>
-            <p className="text-sm text-muted-foreground mt-1">
-              先建立账户，再在账户内管理持仓
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
+        <PageHeader
+          title="资产"
+          subtitle="先建立账户，再在账户内管理持仓"
+          actions={
+          <>
             <button
               onClick={handleRefreshMarket}
               disabled={refreshingMarket}
-              className="inline-flex items-center gap-2 px-3 py-2 text-xs font-medium rounded-lg border border-border bg-card hover:bg-muted transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-medium rounded-full border border-border bg-card hover:bg-accent transition-colors disabled:opacity-50"
               title="拉取最新汇率与行情"
             >
               <svg className={cn("h-3.5 w-3.5", refreshingMarket && "animate-spin")} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -313,7 +316,7 @@ export default function AssetsPage() {
                 setEditingAccount(null);
                 setShowAccountForm(true);
               }}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border border-border bg-card hover:bg-muted transition-colors shadow-sm"
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-full border border-border bg-card hover:bg-accent transition-colors shadow-xs"
             >
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -339,7 +342,7 @@ export default function AssetsPage() {
                       ? "持仓用于股票 / 加密 / 黄金等投资品；银行存取款请用账户卡上的「存/取款」"
                       : "请先创建至少一个投资类账户（券商 / 加密钱包 / 交易所）"
                   }
-                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-full bg-primary text-primary-foreground hover:bg-primary/90 transition-colors shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -348,29 +351,18 @@ export default function AssetsPage() {
                 </button>
               );
             })()}
-          </div>
-        </div>
+          </>
+          }
+        />
 
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground">显示币种：</span>
-          <div className="inline-flex flex-wrap rounded-lg border border-border bg-card p-1">
-            {DISPLAY_CURRENCIES.map((c) => (
-              <button
-                key={c.value}
-                onClick={() => handleDisplayCurrencyChange(c.value)}
-                className={cn(
-                  "px-2.5 py-1 text-xs font-medium rounded-md transition-colors",
-                  displayCurrency === c.value
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {c.label}
-              </button>
-            ))}
-          </div>
+        <div className="mb-6 flex flex-wrap items-center gap-3">
+          <SegmentedControl
+            options={DISPLAY_CURRENCIES}
+            value={displayCurrency}
+            onChange={handleDisplayCurrencyChange}
+          />
           {displayCurrency !== baseCurrency && (
-            <span className="text-[10px] text-muted-foreground">
+            <span className="text-xs text-muted-foreground">
               基础币种 {baseCurrency} · 已按最近汇率折算
             </span>
           )}
@@ -384,70 +376,36 @@ export default function AssetsPage() {
             const pnl = display(totalUnrealizedPnl);
             return (
               <>
-                <div className="rounded-xl border border-border bg-card p-5">
-                  <p className="text-xs text-muted-foreground mb-1.5">现金总额</p>
-                  {netWorthLoading ? (
-                    <div className="h-7 w-32 animate-pulse rounded bg-muted" />
-                  ) : (
-                    <p className="text-2xl font-semibold tabular-nums">
-                      {formatCurrency(cash.value, cash.currency)}
-                    </p>
-                  )}
-                </div>
-                <div className="rounded-xl border border-border bg-card p-5">
-                  <p className="text-xs text-muted-foreground mb-1.5">投资总额</p>
-                  {netWorthLoading ? (
-                    <div className="h-7 w-32 animate-pulse rounded bg-muted" />
-                  ) : (
-                    <p className="text-2xl font-semibold tabular-nums">
-                      {formatCurrency(invest.value, invest.currency)}
-                    </p>
-                  )}
-                </div>
-                <div className="rounded-xl border-2 border-primary/40 bg-gradient-to-br from-primary/10 to-primary/[0.02] p-5 sm:col-span-2 lg:col-span-2">
-                  <p className="text-xs text-primary/80 mb-1.5 font-medium">总净值</p>
-                  {netWorthLoading ? (
-                    <div className="h-9 w-40 animate-pulse rounded bg-muted" />
-                  ) : (
+                <StatTile
+                  className="sm:col-span-2 lg:col-span-2"
+                  emphasis
+                  label="总净值"
+                  loading={netWorthLoading}
+                  value={formatCurrency(net.value, net.currency)}
+                  hint={
                     <>
-                      <p className="text-3xl font-bold tracking-tight tabular-nums">
-                        {formatCurrency(net.value, net.currency)}
-                      </p>
                       {net.degraded && (
-                        <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
-                          ⚠ 缺少 {baseCurrency}→{displayCurrency} 汇率，已退回基础币种
-                        </p>
+                        <span className="text-warning">⚠ 缺少 {baseCurrency}→{displayCurrency} 汇率，已退回基础币种</span>
+                      )}
+                      {netWorth?.as_of && (
+                        <span>截至 {new Date(netWorth.as_of).toLocaleString("zh-CN")}</span>
                       )}
                     </>
+                  }
+                />
+                <StatTile label="现金总额" loading={netWorthLoading} value={formatCurrency(cash.value, cash.currency)} />
+                <StatTile label="投资总额" loading={netWorthLoading} value={formatCurrency(invest.value, invest.currency)} />
+                <StatTile label="持仓数" loading={holdingsLoading} value={holdings ? String(holdings.length) : "—"} />
+                <StatTile label="资产类型" loading={holdingsLoading} value={holdings ? String(distinctClasses) : "—"} />
+                <StatTile
+                  className="sm:col-span-2 lg:col-span-2"
+                  label="未实现盈亏"
+                  loading={holdingsLoading}
+                  value={`${pnl.value >= 0 ? "+" : ""}${formatCurrency(pnl.value, pnl.currency)}`}
+                  valueClassName={cn(
+                    totalUnrealizedPnl > 0 ? "text-gain" : totalUnrealizedPnl < 0 ? "text-loss" : "text-foreground",
                   )}
-                  {netWorth?.as_of && (
-                    <p className="text-xs text-muted-foreground mt-2">
-                      截至 {new Date(netWorth.as_of).toLocaleString("zh-CN")}
-                    </p>
-                  )}
-                </div>
-                <StatCard label="持仓数" value={holdings ? String(holdings.length) : "—"} loading={holdingsLoading} />
-                <StatCard label="资产类型" value={holdings ? String(distinctClasses) : "—"} loading={holdingsLoading} />
-                <div className="rounded-xl border border-border bg-card p-5 sm:col-span-2 lg:col-span-2">
-                  <p className="text-xs text-muted-foreground mb-1.5">未实现盈亏</p>
-                  {holdingsLoading ? (
-                    <div className="h-7 w-32 animate-pulse rounded bg-muted" />
-                  ) : (
-                    <p
-                      className={cn(
-                        "text-2xl font-semibold tabular-nums",
-                        totalUnrealizedPnl > 0
-                          ? "text-emerald-600 dark:text-emerald-400"
-                          : totalUnrealizedPnl < 0
-                            ? "text-rose-600 dark:text-rose-400"
-                            : "text-foreground",
-                      )}
-                    >
-                      {pnl.value >= 0 ? "+" : ""}
-                      {formatCurrency(pnl.value, pnl.currency)}
-                    </p>
-                  )}
-                </div>
+                />
               </>
             );
           })()}
@@ -495,6 +453,8 @@ export default function AssetsPage() {
             }}
             onAddHolding={(accountId) => openAddHolding(accountId)}
             onAdjust={(b) => setAdjustTarget(b)}
+            onReordered={refreshAll}
+            onSynced={refreshAll}
             displayCurrency={displayCurrency}
             fxMap={fxMap}
           />
@@ -889,19 +849,6 @@ export default function AssetsPage() {
             </div>
           </div>
         </div>
-      )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, loading }: { label: string; value: string; loading: boolean }) {
-  return (
-    <div className="rounded-xl border border-border bg-card p-5">
-      <p className="text-xs text-muted-foreground mb-1.5">{label}</p>
-      {loading ? (
-        <div className="h-7 w-16 animate-pulse rounded bg-muted" />
-      ) : (
-        <p className="text-2xl font-semibold tabular-nums">{value}</p>
       )}
     </div>
   );
@@ -1316,6 +1263,8 @@ interface AccountsPanelProps {
   onDelete: (a: AccountOut) => void;
   onAddHolding: (accountId: number) => void;
   onAdjust: (b: BalanceOut) => void;
+  onReordered: () => void;
+  onSynced: () => void;
   displayCurrency: string;
   fxMap: Map<string, number>;
 }
@@ -1330,9 +1279,51 @@ function AccountsPanel({
   onDelete,
   onAddHolding,
   onAdjust,
+  onReordered,
+  onSynced,
   displayCurrency,
   fxMap,
 }: AccountsPanelProps) {
+  // Local drag order. Re-seeded from props on every change while preserving
+  // the current manual order (matches by id) and folding in fresh data /
+  // additions / removals — so an edit elsewhere refreshes the card without
+  // resetting a just-applied reorder.
+  const [order, setOrder] = useState<AccountOut[]>(accounts);
+  useEffect(() => {
+    setOrder((prev) => {
+      const byId = new Map(accounts.map((a) => [a.id, a]));
+      const kept = prev
+        .filter((a) => byId.has(a.id))
+        .map((a) => byId.get(a.id)!);
+      const keptIds = new Set(kept.map((a) => a.id));
+      const added = accounts.filter((a) => !keptIds.has(a.id));
+      return [...kept, ...added];
+    });
+  }, [accounts]);
+
+  const dragIndex = useRef<number | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [reorderError, setReorderError] = useState<string | null>(null);
+
+  const handleDrop = async (toIdx: number) => {
+    const from = dragIndex.current;
+    dragIndex.current = null;
+    setOverIndex(null);
+    if (from == null || from === toIdx) return;
+    const next = [...order];
+    const [moved] = next.splice(from, 1);
+    next.splice(toIdx, 0, moved);
+    setOrder(next); // optimistic
+    setReorderError(null);
+    try {
+      await reorderAccounts(next.map((a) => a.id));
+      onReordered();
+    } catch (e) {
+      setOrder(accounts); // rollback to server order
+      setReorderError(e instanceof ApiError ? e.message : "排序保存失败，请重试");
+    }
+  };
+
   if (loading) return <LoadingSpinner />;
   if (accounts.length === 0) {
     return (
@@ -1363,118 +1354,159 @@ function AccountsPanel({
   holdings.forEach((h) => holdingCount.set(h.account_id, (holdingCount.get(h.account_id) ?? 0) + 1));
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {accounts.map((a) => {
-        const icon = ACCOUNT_TYPE_ICONS[a.type] ?? "📋";
-        const typeLabel = ACCOUNT_TYPE_LABELS[a.type] ?? a.type;
-        const bal = balanceMap.get(a.id);
-        const balanceVal = bal?.balance ?? a.initial_balance;
-        const hCount = holdingCount.get(a.id) ?? 0;
-        return (
-          <div
-            key={a.id}
-            className={cn(
-              "rounded-xl border border-border bg-card p-5 transition-colors",
-              a.is_active && a.include_in_total
-                ? "hover:border-primary/40"
-                : "opacity-60",
-            )}
-          >
-            {!a.include_in_total && (
-              <div className="mb-2 text-[10px] px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-300 font-medium inline-block">
-                不计入总资产
-              </div>
-            )}
-            <div className="flex items-start justify-between mb-3 gap-3">
-              <div className="flex items-start gap-3 min-w-0">
-                <span className="text-2xl shrink-0" aria-hidden>
-                  {icon}
-                </span>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground truncate">{a.name}</p>
-                  {a.institution && (
-                    <p className="text-xs text-muted-foreground truncate">{a.institution}</p>
-                  )}
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">拖动卡片左上角的 ⠿ 可调整账户顺序</p>
+        {reorderError && <p className="text-xs text-destructive">{reorderError}</p>}
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {order.map((a, i) => {
+          const icon = ACCOUNT_TYPE_ICONS[a.type] ?? "📋";
+          const typeLabel = ACCOUNT_TYPE_LABELS[a.type] ?? a.type;
+          const bal = balanceMap.get(a.id);
+          const balanceVal = bal?.balance ?? a.initial_balance;
+          const hCount = holdingCount.get(a.id) ?? 0;
+          return (
+            <div
+              key={a.id}
+              onDragOver={(e) => {
+                if (dragIndex.current == null) return;
+                e.preventDefault();
+                if (overIndex !== i) setOverIndex(i);
+              }}
+              onDrop={() => handleDrop(i)}
+              className={cn(
+                "rounded-xl border bg-card p-5 transition-colors",
+                overIndex === i ? "border-primary ring-2 ring-primary/30" : "border-border",
+                a.is_active && a.include_in_total
+                  ? "hover:border-primary/40"
+                  : "opacity-60",
+              )}
+            >
+              {!a.include_in_total && (
+                <div className="mb-2 text-[10px] px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-700 dark:text-amber-300 font-medium inline-block">
+                  不计入总资产
                 </div>
+              )}
+              <div className="flex items-start justify-between mb-3 gap-3">
+                <div className="flex items-start gap-2 min-w-0">
+                  {/* Only the grip is draggable so card buttons / inputs stay
+                      usable (a draggable wrapper breaks text selection). */}
+                  <button
+                    draggable
+                    onDragStart={() => {
+                      dragIndex.current = i;
+                    }}
+                    onDragEnd={() => {
+                      dragIndex.current = null;
+                      setOverIndex(null);
+                    }}
+                    className="mt-0.5 shrink-0 cursor-grab active:cursor-grabbing text-muted-foreground hover:text-foreground select-none"
+                    aria-label="拖动排序"
+                    title="拖动排序"
+                  >
+                    ⠿
+                  </button>
+                  <span className="text-2xl shrink-0" aria-hidden>
+                    {icon}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground truncate">{a.name}</p>
+                    {a.institution && (
+                      <p className="text-xs text-muted-foreground truncate">{a.institution}</p>
+                    )}
+                  </div>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium shrink-0">
+                  {typeLabel}
+                </span>
               </div>
-              <span className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-muted-foreground font-medium shrink-0">
-                {typeLabel}
-              </span>
-            </div>
 
-            <div>
-              <p className="text-xs text-muted-foreground mb-0.5">
-                当前余额 · {a.currency}
-              </p>
-              <p className="text-xl font-bold tabular-nums">
-                {formatCurrency(balanceVal, a.currency)}
-              </p>
-              {(() => {
-                if (displayCurrency === a.currency) return null;
-                const num = parseFloat(balanceVal);
-                if (!isFinite(num)) return null;
-                const conv = convertAmount(num, a.currency, displayCurrency, fxMap);
-                if (conv == null) return null;
-                return (
-                  <p className="text-xs text-muted-foreground tabular-nums mt-0.5">
-                    ≈ {formatCurrency(conv, displayCurrency)}
-                  </p>
-                );
-              })()}
-              {INVESTMENT_TYPES.has(a.type) && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  持仓数 {hCount}
+              <div>
+                <p className="text-xs text-muted-foreground mb-0.5">
+                  当前余额 · {a.currency}
                 </p>
+                <p className="text-xl font-bold tabular-nums">
+                  {formatCurrency(balanceVal, a.currency)}
+                </p>
+                {(() => {
+                  if (displayCurrency === a.currency) return null;
+                  const num = parseFloat(balanceVal);
+                  if (!isFinite(num)) return null;
+                  const conv = convertAmount(num, a.currency, displayCurrency, fxMap);
+                  if (conv == null) return null;
+                  return (
+                    <p className="text-xs text-muted-foreground tabular-nums mt-0.5">
+                      ≈ {formatCurrency(conv, displayCurrency)}
+                    </p>
+                  );
+                })()}
+                {INVESTMENT_TYPES.has(a.type) && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    持仓数 {hCount}
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center gap-1.5">
+                {/* Holdings are an investment-account concept (stocks, crypto,
+                    gold, …). Bank / credit card / cash accounts only carry
+                    transactions, so we hide the "add holding" affordance for
+                    them. */}
+                {INVESTMENT_TYPES.has(a.type) && (
+                  <button
+                    onClick={() => onAddHolding(a.id)}
+                    className="text-xs px-2.5 py-1.5 rounded-md text-primary hover:bg-primary/10 transition-colors"
+                  >
+                    + 添加持仓
+                  </button>
+                )}
+                {/* Snapshot accounts (brokerage / crypto / exchange = INVESTMENT_TYPES)
+                    are valued from holdings, not a cash ledger — "adjust balance"
+                    would inject a phantom adjustment tx that double-counts against
+                    net worth, and the backend now rejects it (review V7 §P1-2). */}
+                {bal && !INVESTMENT_TYPES.has(a.type) && (
+                  <button
+                    onClick={() => onAdjust(bal)}
+                    className="text-xs px-2.5 py-1.5 rounded-md text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                  >
+                    调整余额
+                  </button>
+                )}
+                <span className="ml-auto inline-flex gap-1.5">
+                  <button
+                    onClick={() => onEdit(a)}
+                    className="text-xs px-2.5 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  >
+                    编辑
+                  </button>
+                  <button
+                    onClick={() => onDelete(a)}
+                    className="text-xs px-2.5 py-1.5 rounded-md text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                  >
+                    删除
+                  </button>
+                </span>
+              </div>
+
+              {/* Sync (crypto wallet / exchange / brokerage) — moved here from
+                  the old Settings page so all account management lives on /assets. */}
+              {SYNCABLE_ACCOUNT_TYPES.has(a.type) && (
+                <div className="mt-3 pt-3 border-t border-border/60 flex justify-end">
+                  <SyncAccountButton accountId={a.id} onSynced={onSynced} />
+                </div>
+              )}
+
+              {/* Sub-account name editor (PDF in-bank moves). */}
+              <SubaccountListEditor account={a} />
+
+              {!a.is_active && (
+                <p className="text-[10px] text-muted-foreground mt-2">已停用</p>
               )}
             </div>
-
-            <div className="mt-4 flex flex-wrap items-center gap-1.5">
-              {/* Holdings are an investment-account concept (stocks, crypto,
-                  gold, …). Bank / credit card / cash accounts only carry
-                  transactions, so we hide the "add holding" affordance for
-                  them. */}
-              {INVESTMENT_TYPES.has(a.type) && (
-                <button
-                  onClick={() => onAddHolding(a.id)}
-                  className="text-xs px-2.5 py-1.5 rounded-md text-primary hover:bg-primary/10 transition-colors"
-                >
-                  + 添加持仓
-                </button>
-              )}
-              {/* Snapshot accounts (brokerage / crypto / exchange = INVESTMENT_TYPES)
-                  are valued from holdings, not a cash ledger — "adjust balance"
-                  would inject a phantom adjustment tx that double-counts against
-                  net worth, and the backend now rejects it (review V7 §P1-2). */}
-              {bal && !INVESTMENT_TYPES.has(a.type) && (
-                <button
-                  onClick={() => onAdjust(bal)}
-                  className="text-xs px-2.5 py-1.5 rounded-md text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-                >
-                  调整余额
-                </button>
-              )}
-              <span className="ml-auto inline-flex gap-1.5">
-                <button
-                  onClick={() => onEdit(a)}
-                  className="text-xs px-2.5 py-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                >
-                  编辑
-                </button>
-                <button
-                  onClick={() => onDelete(a)}
-                  className="text-xs px-2.5 py-1.5 rounded-md text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                >
-                  删除
-                </button>
-              </span>
-            </div>
-
-            {!a.is_active && (
-              <p className="text-[10px] text-muted-foreground mt-2">已停用</p>
-            )}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }

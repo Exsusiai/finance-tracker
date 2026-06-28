@@ -1,11 +1,14 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Sidebar } from "@/components/sidebar";
+import { Sidebar, MobileNav } from "@/components/sidebar";
 
 export const metadata: Metadata = {
   title: "Finance Tracker",
   description: "个人资金管理与记账系统",
 };
+
+// Apply the persisted theme before first paint to avoid a light→dark flash.
+const themeBootstrap = `(function(){try{var t=localStorage.getItem('finance_theme')||'light';var r=document.documentElement;if(t==='dark'){r.classList.add('dark');}r.style.colorScheme=t;}catch(e){}})();`;
 
 // Sprint 3 FIX-18 (review V2 §V2-P2-4 closes V1 P2-7 partial):
 // the previous build inlined `NEXT_PUBLIC_API_TOKEN` into the JS bundle and
@@ -23,12 +26,16 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>
-      <body className="antialiased">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
+      </head>
+      <body className="font-sans antialiased">
         <div className="flex h-screen overflow-hidden bg-background">
           <Sidebar />
-          <main className="flex-1 overflow-y-auto">
+          <main className="flex-1 overflow-y-auto pb-16 md:pb-0">
             {children}
           </main>
+          <MobileNav />
         </div>
       </body>
     </html>

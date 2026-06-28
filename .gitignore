@@ -42,6 +42,7 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/*.bak*
 data/pdfs/
 data/backups/
 data/uploads/
