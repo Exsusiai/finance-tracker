@@ -19,6 +19,7 @@ holding filters as ``compute_net_worth`` so totals reconcile.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -49,6 +50,18 @@ _SMALL_LABELS: dict[str, str] = {
 
 def _small_label(asset_class: str) -> str:
     return _SMALL_LABELS.get(asset_class, "小额其他")
+
+
+# An ISIN is 2-letter country + 9 alphanumeric + 1 check digit. Broker syncs
+# (IBKR Flex) sometimes store the ISIN in `symbol`; show the friendly `name`
+# instead so the chart reads "Berkshire Hathaway (B)" not "US0846707026".
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+
+
+def _asset_label(symbol: str | None, name: str | None) -> str:
+    if name and symbol and _ISIN_RE.match(symbol):
+        return name
+    return symbol or name or "?"
 
 
 @dataclass
@@ -125,7 +138,7 @@ async def compute_composition(db: AsyncSession, base_currency: str) -> Compositi
             key, label, cls = "stable", "USD 稳定币", "stable"
         else:
             key = f"{asset_class}:{symbol}"
-            label = asset.symbol or asset.name or symbol
+            label = _asset_label(asset.symbol, asset.name)
             cls = asset_class
         b = buckets.setdefault(key, _Bucket(label=label, asset_class=cls))
         b.value += converted

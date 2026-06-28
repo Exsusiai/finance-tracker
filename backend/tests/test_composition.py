@@ -67,6 +67,10 @@ async def _seed():
         usdt, usdc = asset("USDT", "crypto"), asset("USDC", "crypto")
         btc, small, dust = asset("BTC", "crypto"), asset("SMALLC", "crypto"), asset("DUST", "crypto")
         aapl = asset("AAPL", "us_stock")
+        # Broker-synced fund whose symbol is an ISIN but has a friendly name.
+        isin = Asset(symbol="IE00B4L5Y983", name="Core MSCI World", asset_class="fund",
+                     currency="EUR", created_at=_now(), updated_at=_now())
+        db.add(isin)
         await db.flush()
 
         def price(a, p):
@@ -74,7 +78,7 @@ async def _seed():
                                source="test", quoted_at=_now()))
 
         for a, p in [(usdt, "1"), (usdc, "1"), (btc, "50000"), (small, "5"),
-                     (dust, "0.05"), (aapl, "100")]:
+                     (dust, "0.05"), (aapl, "100"), (isin, "200")]:
             price(a, p)
 
         def hold(acc, a, qty):
@@ -88,6 +92,7 @@ async def _seed():
         hold(ex1, small, "1")      # €5 → 小额加密货币
         hold(ex1, dust, "1")       # €0.05 → dropped
         hold(ex1, aapl, "1")       # €100 → shown individually
+        hold(ex1, isin, "1")       # €200 → label uses friendly name, not ISIN
         await db.commit()
     yield
     async with _engine.begin() as conn:
@@ -114,5 +119,8 @@ async def test_composition_rules():
     # Dust (€0.05) dropped; not present.
     assert "DUST" not in by_label
     assert r.dust_excluded_count == 1
-    # Total reconciles (1000 + 800 + 800 + 5 + 100 = 2705; dust excluded).
-    assert Decimal(r.total) == Decimal("2705")
+    # ISIN-symbol asset shows its friendly name, not the raw ISIN.
+    assert Decimal(by_label["Core MSCI World"]["value"]) == Decimal("200")
+    assert "IE00B4L5Y983" not in by_label
+    # Total reconciles (1000 + 800 + 800 + 5 + 100 + 200 = 2905; dust excluded).
+    assert Decimal(r.total) == Decimal("2905")
