@@ -195,6 +195,43 @@ class TestBitgetProvider:
         )
 
     @pytest.mark.asyncio
+    async def test_unified_account_switches_to_v3(self):
+        """Account upgraded to Unified Account: classic spot returns HTTP 400
+        + code 40085, so the provider must switch to the v3 endpoint, parse its
+        consolidated `assets`, drop zero-balance coins, and NEVER touch the
+        classic /mix endpoints."""
+        fx = _load("bitget_unified.json")
+        paths_called: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths_called.append(request.url.path)
+            path = request.url.path
+            if "/spot/account/assets" in path:
+                return httpx.Response(400, json=fx["spot_40085"])
+            if "/api/v3/account/assets" in path:
+                return httpx.Response(200, json=fx["v3_assets"])
+            return httpx.Response(404, json={"code": "404", "msg": "unexpected call"})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="https://api.bitget.com",
+        )
+        provider = BitgetProvider(http=client)
+        items = await provider.fetch_balances(
+            api_key="ak", api_secret="sk", passphrase="pp"
+        )
+        await client.aclose()
+
+        # Switched to v3; classic mix endpoints were NOT called.
+        assert any("/api/v3/account/assets" in p for p in paths_called)
+        assert not any("/mix/account/accounts" in p for p in paths_called)
+        # Real balances surfaced; the zero-balance coin is dropped.
+        got = {it.symbol: it.quantity for it in items}
+        assert set(got) == {"USDC", "USDT", "BTC", "BGB"}
+        assert got["USDC"] == Decimal("746.95565305")
+        assert got["BTC"] == Decimal("0.00327113")
+
+    @pytest.mark.asyncio
     async def test_futures_endpoint_failure_does_not_kill_spot(self):
         """If one /mix endpoint is rate-limited or 5xx, the rest of the
         result still surfaces — we don't lose the spot balances."""

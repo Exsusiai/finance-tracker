@@ -1,0 +1,34 @@
+{
+  "_meta": {
+    "scenario": "Bitget account upgraded to Unified Account (UTA). Classic v2 endpoints reject with code 40085; balances live on the v3 endpoint.",
+    "endpoints": [
+      "GET /api/v2/spot/account/assets — returns HTTP 400 + code 40085 (Unified Account mode)",
+      "GET /api/v3/account/assets — Unified Account consolidated assets (per-coin balance = available + locked)"
+    ],
+    "note": "Provider probes spot first; on 40085 it switches to v3 and must NOT call the classic /mix endpoints. Zero-balance coins are dropped."
+  },
+  "spot_40085": {
+    "code": "40085",
+    "msg": "You are in Unified Account mode, and the Classic Account API is not supported at this time",
+    "requestTime": 1700000000000,
+    "data": null
+  },
+  "v3_assets": {
+    "code": "00000",
+    "msg": "success",
+    "requestTime": 1700000000000,
+    "data": {
+      "accountEquity": "1478.44539184",
+      "usdtEquity": "1480.63942788",
+      "btcEquity": "0.02479",
+      "unrealisedPnl": "0",
+      "assets": [
+        {"coin": "USDC", "equity": "746.95565305", "usdValue": "746.70030482", "balance": "746.95565305", "available": "746.95565305", "debt": "0", "locked": "0"},
+        {"coin": "USDT", "equity": "536.94164805", "usdValue": "536.14599902", "balance": "536.94164805", "available": "536.94164805", "debt": "0", "locked": "0"},
+        {"coin": "BTC",  "equity": "0.00327113", "usdValue": "195.09935890", "balance": "0.00327113", "available": "0.00327113", "debt": "0", "locked": "0"},
+        {"coin": "BGB",  "equity": "0.30591001", "usdValue": "0.49972908", "balance": "0.30591001", "available": "0.30591001", "debt": "0", "locked": "0"},
+        {"coin": "ZERO", "equity": "0", "usdValue": "0", "balance": "0", "available": "0", "debt": "0", "locked": "0"}
+      ]
+    }
+  }
+}
