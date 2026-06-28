@@ -638,21 +638,46 @@ TR 无官方 API，使用社区逆向库 `pytr`（仅只读）。登录需两步
 
 ## 17. MCP Tools (非 HTTP, stdio)
 
-由 `mcp-server/` 进程暴露，Agent 可调用以下 tool（共 7 个，已 6 轮回归测试 9 bug 全修）：
+由 `mcp-server/` 进程暴露（stdio），Agent 可调用以下 tool（共 **21 个**：19 读 + 2 写）。
 
-| Tool 名                       | 功能                                              |
-|-------------------------------|---------------------------------------------------|
-| `get_total_assets`            | 总资产估值 + 按类别/币种细分                      |
-| `get_transactions`            | 查询交易（支持过滤条件 JSON）                     |
-| `add_transaction`             | Agent 代用户记一笔账                              |
-| `parse_bank_statement`        | 接收 PDF 字节流并触发解析+入库                    |
-| `get_cashflow`                | 月度现金流摘要                                    |
-| `get_asset_allocation`        | 资产配置饼图数据（按类别 / 币种）                 |
-| `search_transactions`         | 关键词搜索交易                                    |
+**读工具复用后端 async service / 序列化函数 / 共享 SQL 片段**（`compute_net_worth`、`_AMOUNT_BASE_EXPR`、`paired_dedup_predicate`、`_tx_to_out` 等），所以读数与 REST / Web **构造上必然一致**——没有手抄 SQL 会漂移（旧版 V6/V7/V8 反复修的就是这类问题）。`mcp-server/tests/test_mcp_read.py` 用同一临时库断言「MCP == 后端 service」做护栏。
 
-每个 tool 返回结构化 JSON（`{ ok: true, data }` 或 `{ ok: false, error }`），内部直接调用后端 service 层（无 HTTP 跨进程）。
+### 读工具（19）
 
-详见 `docx/MCP_TEST_REPORT.md`。
+| Tool 名                        | 功能                                                  |
+|--------------------------------|-------------------------------------------------------|
+| `get_net_worth`                | 单源净值：现金 + 投资，折目标币种（== `/portfolio/net-worth`） |
+| `get_asset_allocation`         | 资产分布：现金 + 各投资类别 + 百分比                   |
+| `list_accounts`                | 全部账户元数据 + 当前余额（含同步类账户的持仓估值）    |
+| `get_account`                  | 单账户详情（投资类账户附带 holdings）                  |
+| `list_holdings`                | 逐持仓：数量/成本/现价/市值/盈亏/链/is_active          |
+| `get_portfolio_value_history`  | 组合周度市值快照序列                                   |
+| `list_categories`              | 分类树（大类→子类）或扁平列表                          |
+| `list_transactions`            | 交易查询（多过滤 + cursor 分页），每行带分类           |
+| `get_transaction`              | 单笔完整明细（对手账户/FX/base_amount/拆分/LLM 理由）  |
+| `search_transactions`          | 关键词搜索交易                                         |
+| `list_inbox`                   | 待复核（pending）交易，含 LLM 建议                     |
+| `get_cashflow`                 | 月度现金流（收入/支出/转账/储蓄 + 分类）== `/cashflow/monthly` |
+| `get_cashflow_timeseries`      | 升序月度序列（收入/支出/储蓄/现金资产线）              |
+| `get_cashflow_by_category`     | 分类分布（单月 / 区间聚合）                            |
+| `list_statements`              | PDF 导入清单（银行/期间/状态/笔数）                    |
+| `get_statement`                | 单个导入详情（状态/失败原因）                          |
+| `list_categorization_rules`    | 分类规则（解释「为何这么分」）                         |
+| `list_kb_notes`                | 分类知识库条目                                         |
+| `get_market_data`              | 最新行情价 + FX 汇率（一切估值的基础）                 |
+
+### 写工具（2）
+
+| Tool 名                        | 功能                                                  |
+|--------------------------------|-------------------------------------------------------|
+| `add_transaction`             | Agent 代用户记一笔账（source=`mcp_agent`）             |
+| `parse_bank_statement`        | 接收 PDF 路径并触发解析 + 入库                         |
+
+每个 tool 返回 `{ success: true, data }` 或 `{ success: false, error }`。
+接线：项目根 `.mcp.json` 注册了该 server（`command` 指向 `mcp-server/run.sh`）。
+
+> 说明：写工具仍走独立的同步 `sqlite3` 路径（与后端 async 共享 WAL 库），本期未改；
+> 计划见 `docs/MCP_READ_PLAN.md`。旧 6 轮回归报告见 `docx/MCP_TEST_REPORT.md`。
 
 ---
 

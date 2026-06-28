@@ -6,7 +6,7 @@
 
 ## 当前状态
 
-✅ **已可用** — 5 家欧洲银行 PDF 解析（预览后入库）+ 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包）** + **券商同步（IBKR Flex / Trade Republic，EOD 持仓快照）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密/外币折算）+ 账户级「不计入总资产」开关 + 7 个 MCP tools。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈 + 券商同步 + Review V6/V7/V8 资金口径修正已合入；**365 个单测全过**。
+✅ **已可用** — 5 家欧洲银行 PDF 解析（预览后入库）+ 自动分类（含 LLM Gemini fallback）+ 跨账户转账识别 + 多币种切换 + **加密钱包同步（11 EVM L1+L2 + BTC + Solana + Tron）** + **CEX 接入（Binance / Bitget 含合约钱包）** + **券商同步（IBKR Flex / Trade Republic，EOD 持仓快照）** + 加密价格自动发现（CoinGecko）+ 总资产汇总（含加密/外币折算）+ 账户级「不计入总资产」开关 + 21 个 MCP tools（19 读 + 2 写，读工具复用后端 service 与 REST 口径一致）。Sprint 0–4 + UAT + P1-1 LLM 智能分类 + P1-4 加密钱包全栈 + 券商同步 + Review V6/V7/V8 资金口径修正 + MCP 完整读取改造已合入；**405 个单测全过**（backend 399 + MCP read 6）。
 
 详细进度：`PROGRESS.md` · 最近一日工作日志：`docx/WORKLOG_2026-05-07.md` · 剩余优先级：`docx/ROADMAP.md` · 完整需求：`docx/PRD.md`
 
@@ -43,7 +43,7 @@ cd frontend && npm install && npm run dev -- -p 3010
 | **🆕 加密钱包 / CEX 同步**（P1-4） | 一个钱包账户聚合多链多地址（EVM L1+L2 / BTC / Solana / Tron，全部走免费节点）；CEX 走只读 API key（Binance 现货；Bitget 现货 + USDT-M + USDC-M + COIN-M 合约钱包聚合）；同步后自动 CoinGecko 拉价 + 写 holdings；垃圾空投 token 过滤；账户级「不计入总资产」开关 |
 | **🆕 LLM 智能分类**（P1-1） | 三层管道：L1 关键词 → L2 Gemini（可联网 grounding，知识库 few-shot 注入）→ L3 inbox 人工兜底；用户备注「污染」机制让 PayPal+amount 复合规则下次必走 LLM；月度成本上限自动 abstain；Settings UI 全可调 |
 | **现金流分析** | 月度 income/expense/savings/transfer/other snapshot；transaction CRUD 后自动重算；记账页月份导航 ◀▶ + ←/→ 快捷键；分类视图层级化（一级类目 → 二级 → 明细 + 占比条） |
-| **Agent 接口** | MCP server 7 tools（6 轮回归 + V7 现金流 paired-transfer 去重对齐 REST）；Anthropic / OpenAI / 任何 stdio MCP 客户端都能接。注：MCP PDF 导入仍是简化镜像，外币 FX 折算 / 完整跨账户配对走 REST ingestion（见 ROADMAP P1-6） |
+| **Agent 接口** | MCP server 21 tools（19 读 + 2 写）；读工具复用后端 async service / 共享 SQL 片段，读数与 REST 构造一致（parity 测试护栏）。项目根 `.mcp.json` 已接线；Anthropic / OpenAI / 任何 stdio MCP 客户端都能接。注：写工具（add_transaction / parse_bank_statement）仍是同步镜像路径（见 `docs/MCP_READ_PLAN.md`） |
 
 ## 技术栈
 

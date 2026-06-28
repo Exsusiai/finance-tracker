@@ -1,20 +1,27 @@
-"""Finance Tracker MCP Server — tools for AI agents to query and manage personal finances."""
+"""Finance Tracker MCP Server — tools for AI agents to query and manage personal finances.
+
+Two tool families:
+  • READ  — registered from ``read_tools.py``; they reuse the backend's **async**
+            services / serialize helpers / shared SQL fragments, so MCP numbers
+            match the REST API & Web UI by construction (no hand-copied SQL).
+  • WRITE — ``add_transaction`` / ``parse_bank_statement`` below; they keep the
+            original **sync** ``sqlite3`` path (mirrors backend ingestion
+            invariants inline). Untouched by the read refactor.
+"""
 
 from __future__ import annotations
 
 import hashlib
-import io
 import json
-import os
+import sqlite3
 import sys
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 # ─── Inject backend into sys.path ───────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -22,26 +29,15 @@ _BACKEND_DIR = _PROJECT_ROOT / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-# Now we can import backend modules
 from app.core.config import get_settings  # noqa: E402
-from app.db.session import Base  # noqa: E402
-from app.models import (  # noqa: E402
-    Account,
-    Asset,
-    AssetHolding,
-    Category,
-    FxRate,
-    MarketPrice,
-    PdfImport,
-    Transaction,
-)
 
-# ─── Database setup (sync, for MCP stdio) ───────────────────────────────────
-import sqlite3  # noqa: E402
+from . import read_tools  # noqa: E402
 
 settings = get_settings()
 _DB_PATH = settings.db_path
 
+
+# ─── Sync DB helpers (WRITE path only) ──────────────────────────────────────
 
 def _get_conn() -> sqlite3.Connection:
     """Get a SQLite connection with pragmas."""
@@ -53,36 +49,15 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
-
-def _dec(val) -> str:
-    """Normalize Decimal/float/int to clean string."""
-    if val is None:
-        return "0"
-    d = Decimal(str(val))
-    n = d.normalize()
-    sign, digits, exponent = n.as_tuple()
-    if exponent >= 0:
-        return str(int(n))
-    return format(n, "f")
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# Sprint 1 FIX-4 (sync mirror of backend cashflow recompute SQL).
-# Mirrors `app.services.cashflow.engine._AMOUNT_BASE_EXPR` (Sprint 4 FIX-19,
-# review V3-P0-1 / V4-P0-2). Crucially: same-currency rows bypass FX,
-# foreign-currency rows fall through `base_amount` then `amount*fx_rate`,
-# and rows with NEITHER are NULL — excluded from SUM. The previous raw
-# fallback `COALESCE(..., amount)` silently mixed currencies into the
-# base-currency total.
-#
-# The %BASE% placeholder is substituted with the actual base_currency
-# string at format time (sqlite3 driver doesn't support named params
-# inside CASE-WHEN literals reliably, so we splice an already-validated
-# ISO 4217 code).
+# Sync mirror of backend cashflow recompute SQL (used by the WRITE tools after
+# inserts). Mirrors `app.services.cashflow.engine._AMOUNT_BASE_EXPR`: same-currency
+# rows bypass FX, foreign rows fall through base_amount → amount*fx_rate, rows
+# with neither are NULL (excluded from SUM). %BASE% is spliced with the validated
+# ISO-4217 base currency (sqlite3 driver can't bind inside CASE literals).
 _AMOUNT_BASE_EXPR_SYNC = (
     "CASE "
     "  WHEN currency = '%BASE%' THEN amount "
@@ -94,28 +69,14 @@ _AMOUNT_BASE_EXPR_SYNC = (
 
 
 def _recompute_snapshot_sql(base_currency: str) -> str:
-    """Build the recompute SQL with the base_currency spliced in.
-
-    base_currency is a 3-letter uppercase ISO code (validated at write
-    time by Settings); splicing is therefore safe.
-    """
+    """Build the recompute SQL with base_currency spliced in (validated ISO code)."""
     base = base_currency.upper().replace("'", "")
     expr = _AMOUNT_BASE_EXPR_SYNC.replace("%BASE%", base)
-    # V6-P1-4 (2026-05-20): exclude same-bank sub-account transfers (N26
-    # main → Saving Space etc.) from `transfer_total` so MCP matches the
-    # REST snapshot (cashflow/engine.py::_NOT_SUBACCOUNT). The clause
-    # treats NULL / invalid metadata as not-subaccount (three-valued
-    # logic via COALESCE).
     not_subaccount = (
         "COALESCE("
         "json_valid(metadata_json) AND "
         "json_extract(metadata_json, '$.subaccount') = 1, 0) = 0"
     )
-    # V8-P1-4: a transfer is ONE event stored as TWO type='transfer' legs;
-    # drop the second leg so the recomputed snapshot's transfer_total matches
-    # REST (cashflow.engine.paired_dedup_predicate) and MCP live get_cashflow.
-    # Previously this SQL only excluded subaccount, so MCP-written snapshots
-    # double-counted paired transfers even though the live query was correct.
     paired_dedup = (
         "NOT EXISTS (SELECT 1 FROM transactions p "
         "WHERE p.deleted_at IS NULL AND p.id < transactions.id "
@@ -150,13 +111,10 @@ def _recompute_snapshot_sql(base_currency: str) -> str:
 
 
 def _recompute_period_sync(conn, year: int, month: int) -> None:
-    """Sync mirror of backend recompute_period — used by MCP after inserts."""
+    """Sync mirror of backend recompute_period — used by WRITE tools after inserts."""
     now = _now_iso()
     sql = _recompute_snapshot_sql(settings.base_currency)
-    conn.execute(
-        sql,
-        (year, month, settings.base_currency, now, year, month),
-    )
+    conn.execute(sql, (year, month, settings.base_currency, now, year, month))
 
 
 def _fx_rate_lookup(conn, base: str, quote: str):
@@ -169,20 +127,12 @@ def _fx_rate_lookup(conn, base: str, quote: str):
 
 
 def _convert_fx(conn, amount: Decimal, src: str, base: str) -> Decimal | None:
-    """Convert `amount` from `src` currency → `base` currency.
+    """Convert ``amount`` from ``src`` → ``base`` (sync, WRITE path).
 
-    Strategy:
-      1. Same currency → identity
-      2. Direct rate (src → base) → amount * rate
-      3. Inverse rate (base → src) → amount / rate
-      4. Triangulate via CNY / USD / EUR pivot
-      Returns None when no path exists.
-
-    FIX V5-P0-1: USD-pegged stablecoins (USDT, USDC, DAI …) are aliased to
-    USD before any FX lookup. wallet_sync writes market_prices.currency='USDT'
-    for on-chain holdings; the fiat FX scheduler never emits USDT rows, so
-    without this alias every crypto holding priced in USDT would silently fail
-    conversion and be excluded from net-worth totals.
+    Same-currency identity → direct rate → inverse rate → triangulate via
+    CNY/USD/EUR. USD-pegged stablecoins are aliased to USD first (wallet_sync
+    writes market_prices.currency='USDT'; the fiat FX scheduler never emits USDT
+    rows). Returns None when no FX path exists.
     """
     _USD_PEGGED = {"USDT", "USDC", "DAI", "BUSD", "TUSD", "FRAX"}
     if src in _USD_PEGGED:
@@ -203,8 +153,6 @@ def _convert_fx(conn, amount: Decimal, src: str, base: str) -> Decimal | None:
         if r > 0:
             return amount / r
 
-    # CNY first because the DB anchors fx_rates with base=CNY (open.er-api source).
-    # USD/EUR as fallback pivots when CNY is itself one of (src, base).
     for pivot in ("CNY", "USD", "EUR"):
         if pivot in (src, base):
             continue
@@ -233,258 +181,19 @@ def _convert_fx(conn, amount: Decimal, src: str, base: str) -> Decimal | None:
 mcp = FastMCP(
     name="finance-tracker",
     instructions=(
-        "Personal finance management tools. Query assets, transactions, cash flow, "
-        "and parse bank statement PDFs. All amounts are strings preserving decimal precision. "
-        "Currency defaults to CNY unless specified."
+        "Personal finance management tools. Read tools expose the full picture — "
+        "accounts, balances, net worth, asset allocation, holdings, every "
+        "transaction and its category, cash flow, statements. Amounts are strings "
+        "preserving decimal precision; currency defaults to the configured base "
+        "(CNY) unless specified."
     ),
 )
 
-
-# ─── Tool 1: get_total_assets ───────────────────────────────────────────────
-
-@mcp.tool(
-    name="get_total_assets",
-    description="Query total asset valuation across all accounts and holdings. Returns balances by account, portfolio value by asset class and currency.",
-)
-async def get_total_assets(
-    currency: str | None = Field(
-        None,
-        description="Target currency for conversion (e.g. 'CNY', 'EUR'). Defaults to base_currency.",
-    ),
-) -> dict[str, Any]:
-    conn = _get_conn()
-    try:
-        base_currency = currency or settings.base_currency
-
-        # 1. Account balances — FIX V5-P1-2: only include accounts with
-        # include_in_total=1 and not soft-deleted, matching REST net_worth logic.
-        rows = conn.execute("""
-            SELECT v.account_id, v.account_name, v.currency, v.balance
-            FROM v_account_balance v
-            JOIN accounts ac ON ac.id = v.account_id
-            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL
-        """).fetchall()
-        accounts = [
-            {"account_id": r["account_id"], "account_name": r["account_name"],
-             "currency": r["currency"], "balance": _dec(r["balance"])}
-            for r in rows
-        ]
-
-        # 2. Portfolio holdings value — FIX V5-P1-2: filter include_in_total,
-        # deleted_at (account), and is_active (holding) to match REST net_worth.
-        holdings = conn.execute("""
-            SELECT ah.id, ah.quantity, ah.avg_cost, ah.cost_currency,
-                   a.id AS asset_id, a.symbol, a.name, a.asset_class, a.currency AS asset_currency,
-                   mp.price, mp.currency AS price_currency
-            FROM asset_holdings ah
-            JOIN assets a ON ah.asset_id = a.id
-            JOIN accounts ac ON ac.id = ah.account_id
-            LEFT JOIN (
-                SELECT asset_id, price, currency
-                FROM market_prices mp1
-                WHERE quoted_at = (SELECT MAX(quoted_at) FROM market_prices mp2 WHERE mp2.asset_id = mp1.asset_id)
-            ) mp ON mp.asset_id = a.id
-            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL AND ah.is_active = 1
-        """).fetchall()
-
-        total_portfolio = Decimal("0")
-        by_class: dict[str, Decimal] = {}
-        # Sprint 4 FIX-22 (review V3 §V3-P1-8): track original_value and
-        # base_value separately so callers can distinguish "100 EUR" from
-        # "780 CNY worth of EUR holdings".
-        by_currency: dict[str, dict] = {}
-
-        for h in holdings:
-            if h["price"] is None:
-                continue
-            original_value = Decimal(str(h["quantity"])) * Decimal(str(h["price"]))
-            value = original_value
-            price_cur = h["price_currency"]
-
-            # Convert to base currency if needed
-            if price_cur and price_cur != base_currency:
-                converted = _convert_fx(conn, value, price_cur, base_currency)
-                if converted is None:
-                    continue  # skip if no FX path
-                value = converted
-
-            total_portfolio += value
-            ac = h["asset_class"] or "other"
-            by_class[ac] = by_class.get(ac, Decimal("0")) + value
-            cur_key = price_cur or "unknown"
-            bucket = by_currency.setdefault(cur_key, {"original_value": Decimal("0"), "base_value": Decimal("0")})
-            bucket["original_value"] += original_value
-            bucket["base_value"] += value
-
-        # 3. Cash account balance total
-        # Sprint 4 FIX-22 (review V3 §V3-P1-8): when there's no FX path, the
-        # original currency amount is NOT comparable to base_currency. Don't mix
-        # it into total — track it separately and surface it in the response.
-        total_cash = Decimal("0")
-        fx_missing_cash: list[dict] = []
-        cash_by_currency: dict[str, dict] = {}
-        for a in accounts:
-            amt = Decimal(a["balance"])
-            cur = a["currency"]
-            converted = _convert_fx(conn, amt, cur, base_currency) if cur != base_currency else amt
-            cbucket = cash_by_currency.setdefault(cur, {"original_value": Decimal("0"), "base_value": Decimal("0")})
-            cbucket["original_value"] += amt
-            if converted is not None:
-                cbucket["base_value"] += converted
-                total_cash += converted
-            else:
-                fx_missing_cash.append({"currency": cur, "amount": str(amt), "account": a.get("account_name")})
-
-        total_assets = total_cash + total_portfolio
-
-        return {
-            "success": True,
-            "data": {
-                "total_assets": _dec(total_assets),
-                "base_currency": base_currency,
-                "as_of": _now_iso(),
-                "fx_missing_cash": fx_missing_cash,
-                "cash": {
-                    "total": _dec(total_cash),
-                    "by_currency": {
-                        k: {"original_value": _dec(v["original_value"]), "base_value": _dec(v["base_value"])}
-                        for k, v in cash_by_currency.items()
-                    },
-                    "accounts": accounts,
-                },
-                "portfolio": {
-                    "total": _dec(total_portfolio),
-                    "by_class": {k: _dec(v) for k, v in by_class.items()},
-                    "by_currency": {
-                        k: {"original_value": _dec(v["original_value"]), "base_value": _dec(v["base_value"])}
-                        for k, v in by_currency.items()
-                    },
-                },
-            },
-        }
-    finally:
-        conn.close()
+# Register the complete READ surface (async, backed by backend services).
+read_tools.register(mcp)
 
 
-# ─── Tool 2: get_transactions ──────────────────────────────────────────────
-
-@mcp.tool(
-    name="get_transactions",
-    description="Query transaction records with flexible filtering. Supports date range, account, category, type, amount range, and pagination.",
-)
-async def get_transactions(
-    account_id: int | None = Field(None, description="Filter by account ID"),
-    category_id: int | None = Field(None, description="Filter by category ID"),
-    type: str | None = Field(None, description="Filter by type: expense, income, transfer, adjustment"),
-    from_date: str | None = Field(None, description="Start date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"),
-    to_date: str | None = Field(None, description="End date (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"),
-    min_amount: float | None = Field(None, description="Minimum amount (absolute value)"),
-    max_amount: float | None = Field(None, description="Maximum amount (absolute value)"),
-    source: str | None = Field(None, description="Filter by source: manual, pdf_import, bank_api, mcp_agent"),
-    is_pending: bool | None = Field(None, description="Filter pending transactions only"),
-    limit: int = Field(50, description="Max results (1-200)", ge=1, le=200),
-    offset: int = Field(0, description="Skip N results", ge=0),
-) -> dict[str, Any]:
-    conn = _get_conn()
-    try:
-        conditions = ["t.deleted_at IS NULL"]
-        params: list[Any] = []
-
-        if account_id is not None:
-            conditions.append("t.account_id = ?")
-            params.append(account_id)
-        if category_id is not None:
-            conditions.append("t.category_id = ?")
-            params.append(category_id)
-        if type is not None:
-            conditions.append("t.type = ?")
-            params.append(type)
-        if from_date is not None:
-            conditions.append("t.occurred_at >= ?")
-            params.append(from_date)
-        if to_date is not None:
-            # If only date, append end-of-day
-            if len(to_date) == 10:
-                to_date += "T23:59:59Z"
-            conditions.append("t.occurred_at <= ?")
-            params.append(to_date)
-        if min_amount is not None:
-            conditions.append("ABS(t.amount) >= ?")
-            params.append(str(min_amount))
-        if max_amount is not None:
-            conditions.append("ABS(t.amount) <= ?")
-            params.append(str(max_amount))
-        if source is not None:
-            conditions.append("t.source = ?")
-            params.append(source)
-        if is_pending is not None:
-            conditions.append("t.is_pending = ?")
-            params.append(1 if is_pending else 0)
-
-        where = " AND ".join(conditions)
-
-        # Count
-        count_row = conn.execute(
-            f"SELECT COUNT(*) FROM transactions t WHERE {where}", params
-        ).fetchone()
-        total = count_row[0]
-
-        # Fetch
-        rows = conn.execute(f"""
-            SELECT t.id, t.account_id, a.name AS account_name,
-                   t.counter_account_id, t.category_id, c.name AS category_name,
-                   t.occurred_at, t.posted_at, t.amount, t.currency,
-                   t.fx_rate_to_base, t.base_amount, t.type, t.description,
-                   t.raw_description, t.counterparty, t.location, t.tags_json,
-                   t.source, t.is_pending, t.created_at, t.updated_at
-            FROM transactions t
-            LEFT JOIN accounts a ON t.account_id = a.id
-            LEFT JOIN categories c ON t.category_id = c.id
-            WHERE {where}
-            ORDER BY t.occurred_at DESC, t.id DESC
-            LIMIT ? OFFSET ?
-        """, params + [limit, offset]).fetchall()
-
-        transactions = []
-        for r in rows:
-            tags = []
-            if r["tags_json"]:
-                try:
-                    tags = json.loads(r["tags_json"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            transactions.append({
-                "id": r["id"],
-                "account_id": r["account_id"],
-                "account_name": r["account_name"],
-                "category_id": r["category_id"],
-                "category_name": r["category_name"],
-                "occurred_at": r["occurred_at"],
-                "amount": _dec(r["amount"]),
-                "currency": r["currency"],
-                "type": r["type"],
-                "description": r["description"],
-                "counterparty": r["counterparty"],
-                "tags": tags,
-                "source": r["source"],
-                "is_pending": bool(r["is_pending"]),
-            })
-
-        return {
-            "success": True,
-            "data": {
-                "transactions": transactions,
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-                "has_more": (offset + limit) < total,
-            },
-        }
-    finally:
-        conn.close()
-
-
-# ─── Tool 3: add_transaction ────────────────────────────────────────────────
+# ─── WRITE Tool: add_transaction ────────────────────────────────────────────
 
 @mcp.tool(
     name="add_transaction",
@@ -508,10 +217,7 @@ async def add_transaction(
         occurred = occurred_at or now
         tags_json = json.dumps(tags) if tags else None
 
-        # Sprint 1 FIX-4 / FIX-5 (review V1 §P1-5, §P1-4): apply the same
-        # invariants that the backend ingestion service enforces. MCP runs in a
-        # separate process on sync sqlite3, so we can't share the async pipeline
-        # — but we CAN share the rules.
+        # Apply the same invariants the backend ingestion service enforces.
         # 1) amount sign: non-adjustment rows are stored as ABS(amount).
         amount_decimal = Decimal(amount)
         if type != "adjustment" and amount_decimal < 0:
@@ -533,21 +239,16 @@ async def add_transaction(
                     ),
                 }
 
-        # Sprint 4 FIX-20 (review V3 §V3-P1-1): mirror ingestion Step 1.5 — fold
-        # foreign-currency rows to base_currency so cashflow doesn't have to
-        # fallback. Use the existing sync _convert_fx() helper.
+        # Fold foreign-currency rows to base_currency so cashflow doesn't fallback.
         fx_rate_to_base_val = None
         base_amount_val = None
         metadata_json_val = None
         if currency != settings.base_currency and amount_decimal != 0:
             converted = _convert_fx(conn, amount_decimal, currency, settings.base_currency)
             if converted is not None:
-                # Multiplier so amount_in_src * rate = amount_in_base
                 fx_rate_to_base_val = converted / amount_decimal
                 base_amount_val = converted
             else:
-                # No FX path — mark as fx_missing in metadata so cashflow /
-                # dashboards can flag it. Don't fail the insert.
                 metadata_json_val = json.dumps({
                     "fx_missing": True,
                     "fx_src": currency,
@@ -572,17 +273,14 @@ async def add_transaction(
         ))
         tx_id = cur.lastrowid
 
-        # 3) Refresh the cashflow snapshot for the affected month so dashboard
-        # reads stay in sync after MCP-driven inserts. Mirrors
-        # backend.app.services.cashflow.engine._RECOMPUTE_SQL.
+        # Refresh the cashflow snapshot for the affected month.
         if len(occurred) >= 7 and not is_pending:
             try:
                 year = int(occurred[0:4])
                 month = int(occurred[5:7])
                 _recompute_period_sync(conn, year, month)
-            except (ValueError, sqlite3.Error) as e:
-                # Snapshot refresh is best-effort; the row is already inserted.
-                pass
+            except (ValueError, sqlite3.Error):
+                pass  # snapshot refresh is best-effort; the row is already inserted
 
         conn.commit()
 
@@ -609,7 +307,7 @@ async def add_transaction(
         conn.close()
 
 
-# ─── Tool 4: parse_bank_statement ───────────────────────────────────────────
+# ─── WRITE Tool: parse_bank_statement ───────────────────────────────────────
 
 @mcp.tool(
     name="parse_bank_statement",
@@ -625,7 +323,6 @@ async def parse_bank_statement(
 ) -> dict[str, Any]:
     conn = _get_conn()
     try:
-        # Read file
         path = Path(file_path)
         if not path.exists():
             return {"success": False, "error": f"File not found: {file_path}"}
@@ -634,7 +331,6 @@ async def parse_bank_statement(
         if not content:
             return {"success": False, "error": "Empty file"}
 
-        # Sprint 4 FIX-20 (V3-P1-1): mirror REST upload guards (Sprint 2 FIX-10).
         MAX_PDF_SIZE_MB = 10
         if len(content) > MAX_PDF_SIZE_MB * 1024 * 1024:
             return {
@@ -647,8 +343,7 @@ async def parse_bank_statement(
                 "error": "Uploaded file is not a valid PDF (missing %PDF- magic bytes)",
             }
 
-        # Resolve account_id: if not provided, auto-pick when there's exactly one
-        # active account; otherwise require the caller to choose explicitly.
+        # Resolve account_id: auto-pick when there's exactly one active account.
         if not account_id:
             active = conn.execute(
                 "SELECT id, name, type, currency FROM accounts "
@@ -671,14 +366,12 @@ async def parse_bank_statement(
 
         file_hash = hashlib.sha256(content).hexdigest()
 
-        # Check duplicate
         existing = conn.execute(
             "SELECT id FROM pdf_imports WHERE file_hash = ?", (file_hash,)
         ).fetchone()
         if existing:
             return {"success": False, "error": f"PDF already imported (import_id={existing['id']})"}
 
-        # Store PDF
         storage_dir = settings.pdf_storage_dir
         storage_dir.mkdir(parents=True, exist_ok=True)
         storage_path = storage_dir / f"{file_hash}.pdf"
@@ -687,7 +380,6 @@ async def parse_bank_statement(
 
         now = _now_iso()
 
-        # Create import record (transactions_count is NOT NULL with no default → must include)
         cur = conn.execute("""
             INSERT INTO pdf_imports
                 (filename, file_hash, file_size, storage_path, account_id,
@@ -696,9 +388,7 @@ async def parse_bank_statement(
         """, (path.name, file_hash, len(content), str(storage_path), account_id, now, now))
         import_id = cur.lastrowid
 
-        # Parse using the canonical backend engine (no more drift between MCP and HTTP paths).
-        # `parse_pdf_statement` is async; this MCP tool already runs inside FastMCP's event
-        # loop so we just `await` it (NOT asyncio.run, which would deadlock).
+        # Parse using the canonical backend engine (async; await inside FastMCP loop).
         try:
             from app.services.pdf_parser.engine import parse_pdf_statement as _backend_parse
 
@@ -715,21 +405,15 @@ async def parse_bank_statement(
                 conn.commit()
                 return {"success": False, "error": parse_result["error"], "import_id": import_id}
 
-            # Sprint 3 FIX-15 (review V2 §V2-P0-3, closes V1 P1-3/5 partial):
-            # mirror the REST ingestion invariants so MCP-driven PDF imports
-            # produce the SAME shape of data:
-            #   1) preserve parser metadata_json (subaccount, cross_bank_hint…)
-            #   2) ABS(amount) for non-adjustment rows
-            #   3) auto-categorise via rules; rule hit → is_pending=False
-            #   4) pre-mark transfer rows as confirmed (no inbox)
-            #   5) recompute every affected period AFTER all rows are inserted
+            # Mirror the REST ingestion invariants so MCP-driven imports produce
+            # the SAME shape of data (metadata, ABS amount, auto-categorise,
+            # pre-confirm transfers, recompute affected periods).
             tx_ids = []
             affected_periods: set[tuple[int, int]] = set()
-            kind_categories = {  # Snapshot of category kinds for kind-guard.
+            kind_categories = {
                 row["id"]: row["kind"]
                 for row in conn.execute("SELECT id, kind FROM categories").fetchall()
             }
-            # Load active categorization rules once (priority desc).
             rules = conn.execute(
                 "SELECT id, pattern, pattern_type, field, category_id, priority "
                 "FROM categorization_rules WHERE enabled = 1 "
@@ -758,11 +442,9 @@ async def parse_bank_statement(
                 if pt == "starts_with":
                     return v.startswith(p.lower())
                 if pt == "regex":
-                    # Sprint 4 FIX-20 (V3-P1-1): mirror backend _safe_regex_search
-                    # ReDoS protection. Run inside a thread pool with a 1-second
-                    # timeout so a catastrophic-backtracking pattern can't hang MCP.
-                    import re as _re
+                    # Mirror backend _safe_regex_search ReDoS protection (1s timeout).
                     import concurrent.futures
+                    import re as _re
                     try:
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                             fut = ex.submit(_re.search, p, value, _re.IGNORECASE)
@@ -772,13 +454,11 @@ async def parse_bank_statement(
                 return False
 
             for tx_data in transactions:
-                # 2) amount sign normalisation
                 raw_amt = Decimal(str(tx_data.get("amount", 0)))
                 tx_type = tx_data.get("type", "expense")
                 if tx_type != "adjustment" and raw_amt < 0:
                     raw_amt = -raw_amt
 
-                # 3+4) auto-categorise + pre-confirm transfer / matched rows
                 category_id = tx_data.get("category_id")
                 is_pending = 0 if auto_confirm else 1
                 if tx_type == "transfer":
@@ -787,7 +467,7 @@ async def parse_bank_statement(
                     for rule in rules:
                         rule_cat_kind = kind_categories.get(rule["category_id"])
                         if rule_cat_kind != tx_type:
-                            continue  # FIX-14 kind guard mirrored
+                            continue
                         if _match(rule, _rule_field(tx_data, rule["field"])):
                             category_id = rule["category_id"]
                             is_pending = 0
@@ -811,14 +491,12 @@ async def parse_bank_statement(
                     category_id,
                     import_id,
                     tx_data.get("external_id"),
-                    tx_data.get("metadata_json"),  # 1) preserve parser metadata
+                    tx_data.get("metadata_json"),
                     is_pending,
                     now, now,
                 ))
                 tx_ids.append(tx_cur.lastrowid)
 
-                # Collect period for snapshot recompute (only confirmed rows
-                # contribute to cashflow).
                 occ = tx_data.get("occurred_at", now)
                 if not is_pending and len(occ) >= 7:
                     try:
@@ -826,7 +504,6 @@ async def parse_bank_statement(
                     except ValueError:
                         pass
 
-            # Update import record
             conn.execute("""
                 UPDATE pdf_imports SET
                     detected_bank = ?, parser_version = '0.1.0',
@@ -837,9 +514,8 @@ async def parse_bank_statement(
             """, (detected_bank, statement_period, raw_text[:10000],
                   len(transactions), now, import_id))
 
-            # Sprint 4 FIX-20 (V3-P1-1): mirror transfer_matcher.detect_same_account_pairs
-            # at sync level — pair +X/−X rows in the same account within ±3 days as
-            # in-bank sub-account moves so they don't double-count in cashflow.
+            # Pair +X/−X rows in the same account within ±3 days as in-bank moves
+            # (mirror transfer_matcher.detect_same_account_pairs at sync level).
             fresh_rows = conn.execute("""
                 SELECT id, occurred_at, amount, type, description, metadata_json
                 FROM transactions WHERE pdf_import_id = ?
@@ -864,7 +540,7 @@ async def parse_bank_statement(
                         if b["id"] in already_paired:
                             continue
                         if a["type"] == b["type"]:
-                            continue  # need one income + one expense
+                            continue
                         try:
                             d_a = _date.fromisoformat(a["occurred_at"][:10])
                             d_b = _date.fromisoformat(b["occurred_at"][:10])
@@ -890,12 +566,10 @@ async def parse_bank_statement(
                         already_paired.update({a["id"], b["id"]})
                         break
 
-            # 5) recompute cashflow snapshots for every month touched.
             for (year, month) in affected_periods:
                 try:
                     _recompute_period_sync(conn, year, month)
                 except sqlite3.Error:
-                    # Snapshot refresh is best-effort; rows are already in.
                     pass
 
             conn.commit()
@@ -909,7 +583,7 @@ async def parse_bank_statement(
                     "detected_bank": detected_bank,
                     "statement_period": statement_period,
                     "transactions_count": len(transactions),
-                    "transactions": transactions[:20],  # Preview first 20
+                    "transactions": transactions[:20],
                     "auto_confirmed": auto_confirm,
                     "all_confirmed": auto_confirm,
                 },
@@ -931,338 +605,6 @@ async def parse_bank_statement(
 
     except Exception as e:
         return {"success": False, "error": str(e)}
-    finally:
-        conn.close()
-
-
-
-@mcp.tool(
-    name="get_cashflow",
-    description="Query monthly cash flow summary — income, expense, savings, and per-category breakdown.",
-)
-async def get_cashflow(
-    from_period: str | None = Field(None, description="Start period (YYYY-MM)"),
-    to_period: str | None = Field(None, description="End period (YYYY-MM)"),
-    limit: int = Field(12, description="Max months to return (1-60)", ge=1, le=60),
-) -> dict[str, Any]:
-    conn = _get_conn()
-    try:
-        # FIX-2/3 + V4-P0-2: same CASE-WHEN-NULL formula as backend so MCP
-        # and REST agree exactly. Foreign-currency rows without FX are NULL
-        # and excluded — the previous COALESCE(...amount) raw fallback
-        # silently mixed currencies into the base-currency total.
-        base = settings.base_currency.upper().replace("'", "")
-        expr = _AMOUNT_BASE_EXPR_SYNC.replace("%BASE%", base)
-        # V6-P1-4 (2026-05-20): exclude sub-account transfers from
-        # `transfer` so MCP cashflow matches REST exactly. Internal
-        # moves (N26 main ↔ Saving Space) are noise.
-        not_subaccount = (
-            "COALESCE(json_valid(metadata_json) AND "
-            "json_extract(metadata_json, '$.subaccount') = 1, 0) = 0"
-        )
-        # V7-P1-3: a transfer is ONE event recorded as TWO type='transfer'
-        # legs; drop the second leg (live partner with a smaller id) so MCP
-        # transfer volume matches the REST/snapshot numbers exactly. Mirrors
-        # cashflow.engine.paired_dedup_predicate (kept inline — MCP is a
-        # separate sync sqlite3 process).
-        paired_dedup = (
-            "NOT EXISTS (SELECT 1 FROM transactions p "
-            "WHERE p.deleted_at IS NULL AND p.id < {tbl}.id "
-            "AND {tbl}.metadata_json IS NOT NULL AND json_valid({tbl}.metadata_json) "
-            "AND p.id = json_extract({tbl}.metadata_json, '$.paired_with_tx_id'))"
-        )
-        rows = conn.execute(f"""
-            SELECT
-                substr(occurred_at, 1, 7) AS period,
-                SUM(CASE WHEN type = 'income'  THEN ABS({expr}) ELSE 0 END) AS income,
-                SUM(CASE WHEN type = 'expense' THEN ABS({expr}) ELSE 0 END) AS expense,
-                SUM(CASE WHEN type = 'transfer' AND {not_subaccount}
-                         THEN ABS({expr}) ELSE 0 END) AS transfer,
-                SUM(CASE WHEN type = 'income'  THEN  ABS({expr})
-                         WHEN type = 'expense' THEN -ABS({expr})
-                         ELSE 0 END) AS savings
-            FROM transactions
-            WHERE deleted_at IS NULL AND is_pending = 0
-              AND (? IS NULL OR substr(occurred_at, 1, 7) >= ?)
-              AND (? IS NULL OR substr(occurred_at, 1, 7) <= ?)
-              AND {paired_dedup.format(tbl="transactions")}
-            GROUP BY period
-            ORDER BY period DESC
-            LIMIT ?
-        """, (from_period, from_period, to_period, to_period, limit)).fetchall()
-
-        months = []
-        for r in rows:
-            period = r["period"]
-            # Per-category breakdown (folded to BASE_CURRENCY).
-            # FIX V5-P1-3: use the same CASE-WHEN-NULL expression as the main
-            # totals so foreign-currency rows without an FX path are excluded
-            # (NULL) rather than silently counted at raw amount via the old
-            # COALESCE(..., t.amount) fallback.
-            cats = conn.execute(f"""
-                SELECT
-                    c.name,
-                    c.kind,
-                    SUM(ABS({expr})) AS total,
-                    COUNT(*) AS cnt
-                FROM transactions t
-                LEFT JOIN categories c ON t.category_id = c.id
-                WHERE t.deleted_at IS NULL AND t.is_pending = 0
-                  AND substr(t.occurred_at, 1, 7) = ? AND t.category_id IS NOT NULL
-                  AND {paired_dedup.format(tbl="t")}
-                GROUP BY t.category_id
-                ORDER BY total DESC
-            """, (period,)).fetchall()
-
-            by_category = {c["name"]: _dec(c["total"]) for c in cats if c["name"]}
-
-            months.append({
-                "period": period,
-                "income": _dec(r["income"]),
-                "expense": _dec(r["expense"]),
-                "transfer": _dec(r["transfer"]),
-                "savings": _dec(r["savings"]),
-                "by_category": by_category,
-            })
-
-        # Summary stats
-        total_income = sum(Decimal(m["income"]) for m in months)
-        total_expense = sum(Decimal(m["expense"]) for m in months)
-        avg_monthly_expense = total_expense / len(months) if months else Decimal("0")
-
-        return {
-            "success": True,
-            "data": {
-                "months": months,
-                "summary": {
-                    "total_income": _dec(total_income),
-                    "total_expense": _dec(total_expense),
-                    "net_savings": _dec(total_income - total_expense),
-                    "avg_monthly_expense": _dec(avg_monthly_expense),
-                    "months_count": len(months),
-                },
-            },
-        }
-    finally:
-        conn.close()
-
-
-# ─── Tool 6: get_asset_allocation ───────────────────────────────────────────
-
-@mcp.tool(
-    name="get_asset_allocation",
-    description="Query asset allocation breakdown — by asset class (cash, stocks, crypto, gold, etc.) and by currency.",
-)
-async def get_asset_allocation(
-    base_currency: str | None = Field(None, description="Convert all values to this currency. Defaults to base_currency."),
-) -> dict[str, Any]:
-    conn = _get_conn()
-    try:
-        bc = base_currency or settings.base_currency
-
-        # FIX V5-P1-2: filter include_in_total, deleted_at, is_active so
-        # allocation totals match REST /portfolio/net-worth.
-        holdings = conn.execute("""
-            SELECT ah.id, ah.quantity, ah.avg_cost, ah.cost_currency,
-                   a.id AS asset_id, a.symbol, a.name, a.asset_class,
-                   a.currency AS asset_currency,
-                   mp.price, mp.currency AS price_currency
-            FROM asset_holdings ah
-            JOIN assets a ON ah.asset_id = a.id
-            JOIN accounts ac ON ac.id = ah.account_id
-            LEFT JOIN (
-                SELECT asset_id, price, currency
-                FROM market_prices mp1
-                WHERE quoted_at = (SELECT MAX(quoted_at) FROM market_prices mp2 WHERE mp2.asset_id = mp1.asset_id)
-            ) mp ON mp.asset_id = a.id
-            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL AND ah.is_active = 1
-        """).fetchall()
-
-        total_value = Decimal("0")
-        by_class: dict[str, list[dict]] = {}
-        # Sprint 4 FIX-22 (review V3 §V3-P1-8): track original and base values
-        # separately so callers can distinguish currency amounts from converted values.
-        by_currency: dict[str, dict] = {}
-
-        for h in holdings:
-            if h["price"] is None:
-                continue
-
-            original_value = Decimal(str(h["quantity"])) * Decimal(str(h["price"]))
-            value = original_value
-            price_cur = h["price_currency"] or h["asset_currency"]
-
-            # FX conversion
-            if price_cur and price_cur != bc:
-                converted = _convert_fx(conn, value, price_cur, bc)
-                if converted is None:
-                    continue
-                value = converted
-
-            total_value += value
-            ac = h["asset_class"] or "other"
-
-            if ac not in by_class:
-                by_class[ac] = []
-            by_class[ac].append({
-                "symbol": h["symbol"],
-                "name": h["name"],
-                "quantity": _dec(h["quantity"]),
-                "price": _dec(h["price"]),
-                "price_currency": price_cur,
-                "value": _dec(value),
-                "avg_cost": _dec(h["avg_cost"]) if h["avg_cost"] else None,
-            })
-
-            cur_key = price_cur or "unknown"
-            alloc_bucket = by_currency.setdefault(cur_key, {"original_value": Decimal("0"), "base_value": Decimal("0")})
-            alloc_bucket["original_value"] += original_value
-            alloc_bucket["base_value"] += value
-
-        # Calculate percentages
-        class_summary = {}
-        for ac, items in by_class.items():
-            class_total = sum(Decimal(i["value"]) for i in items)
-            pct = (class_total / total_value * 100) if total_value > 0 else Decimal("0")
-            class_summary[ac] = {
-                "total_value": _dec(class_total),
-                "percentage": f"{float(pct):.1f}%",
-                "count": len(items),
-                "assets": items,
-            }
-
-        # Cash from accounts — FIX V5-P1-2: only include_in_total + not deleted.
-        cash_rows = conn.execute("""
-            SELECT v.currency, SUM(v.balance) AS total
-            FROM v_account_balance v
-            JOIN accounts ac ON ac.id = v.account_id
-            WHERE ac.include_in_total = 1 AND ac.deleted_at IS NULL
-            GROUP BY v.currency
-        """).fetchall()
-        cash_total = Decimal("0")
-        cash_by_cur = {}
-        for cr in cash_rows:
-            raw_amt = Decimal(str(cr["total"]))
-            cur = cr["currency"]
-            converted = _convert_fx(conn, raw_amt, cur, bc)
-            if converted is None:
-                continue
-            cash_total += converted
-            cash_by_cur[cur] = _dec(raw_amt)
-
-        grand_total = total_value + cash_total
-
-        return {
-            "success": True,
-            "data": {
-                "base_currency": bc,
-                "grand_total": _dec(grand_total),
-                "as_of": _now_iso(),
-                "cash": {
-                    "total": _dec(cash_total),
-                    "percentage": f"{float(cash_total / grand_total * 100):.1f}%" if grand_total > 0 else "0%",
-                    "by_currency": cash_by_cur,
-                },
-                "investments": {
-                    "total": _dec(total_value),
-                    "percentage": f"{float(total_value / grand_total * 100):.1f}%" if grand_total > 0 else "0%",
-                    "by_class": class_summary,
-                    "by_currency": {
-                        k: {"original_value": _dec(v["original_value"]), "base_value": _dec(v["base_value"])}
-                        for k, v in by_currency.items()
-                    },
-                },
-            },
-        }
-    finally:
-        conn.close()
-
-
-# ─── Tool 7: search_transactions ────────────────────────────────────────────
-
-@mcp.tool(
-    name="search_transactions",
-    description="Full-text search across transactions. Searches description, counterparty, and raw_description fields.",
-)
-async def search_transactions(
-    query: str = Field(..., description="Search query text (case-insensitive)"),
-    account_id: int | None = Field(None, description="Limit search to specific account"),
-    from_date: str | None = Field(None, description="Start date filter (YYYY-MM-DD)"),
-    to_date: str | None = Field(None, description="End date filter (YYYY-MM-DD)"),
-    type: str | None = Field(None, description="Filter: expense, income, transfer"),
-    limit: int = Field(20, description="Max results (1-100)", ge=1, le=100),
-) -> dict[str, Any]:
-    conn = _get_conn()
-    try:
-        pattern = f"%{query}%"
-        conditions = ["t.deleted_at IS NULL"]
-        params: list[Any] = []
-
-        # Search across text fields
-        conditions.append("(t.description LIKE ? OR t.counterparty LIKE ? OR t.raw_description LIKE ?)")
-        params.extend([pattern, pattern, pattern])
-
-        if account_id is not None:
-            conditions.append("t.account_id = ?")
-            params.append(account_id)
-        if from_date is not None:
-            conditions.append("t.occurred_at >= ?")
-            params.append(from_date)
-        if to_date is not None:
-            if len(to_date) == 10:
-                to_date += "T23:59:59Z"
-            conditions.append("t.occurred_at <= ?")
-            params.append(to_date)
-        if type is not None:
-            conditions.append("t.type = ?")
-            params.append(type)
-
-        where = " AND ".join(conditions)
-
-        rows = conn.execute(f"""
-            SELECT t.id, t.account_id, a.name AS account_name,
-                   t.category_id, c.name AS category_name,
-                   t.occurred_at, t.amount, t.currency, t.type,
-                   t.description, t.counterparty, t.source, t.is_pending
-            FROM transactions t
-            LEFT JOIN accounts a ON t.account_id = a.id
-            LEFT JOIN categories c ON t.category_id = c.id
-            WHERE {where}
-            ORDER BY t.occurred_at DESC, t.id DESC
-            LIMIT ?
-        """, params + [limit]).fetchall()
-
-        transactions = []
-        for r in rows:
-            transactions.append({
-                "id": r["id"],
-                "account_id": r["account_id"],
-                "account_name": r["account_name"],
-                "category_name": r["category_name"],
-                "occurred_at": r["occurred_at"],
-                "amount": _dec(r["amount"]),
-                "currency": r["currency"],
-                "type": r["type"],
-                "description": r["description"],
-                "counterparty": r["counterparty"],
-                "source": r["source"],
-                "is_pending": bool(r["is_pending"]),
-            })
-
-        # Aggregate stats
-        total_income = sum(Decimal(t["amount"]) for t in transactions if t["type"] == "income")
-        total_expense = sum(Decimal(t["amount"]) for t in transactions if t["type"] == "expense")
-
-        return {
-            "success": True,
-            "data": {
-                "query": query,
-                "count": len(transactions),
-                "total_income": _dec(total_income),
-                "total_expense": _dec(total_expense),
-                "transactions": transactions,
-            },
-        }
     finally:
         conn.close()
 
