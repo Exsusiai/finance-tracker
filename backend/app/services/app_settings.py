@@ -26,6 +26,11 @@ logger = structlog.get_logger(__name__)
 
 _DEFAULTS: dict[str, str] = {
     "llm_enabled": "false",
+    # When false (default), importing a PDF/bank statement runs ONLY the L1
+    # keyword matcher; L2 LLM classification is NOT auto-triggered — the user
+    # kicks it off manually via the "AI 智能处理" button on the inbox. When
+    # true, the old behaviour returns (L2 auto-dispatched after each import).
+    "llm_auto_classify": "false",
     "llm_provider": "gemini",
     # flash-lite has the widest free-tier quota; flash/2.0-flash exhaust fast.
     "llm_model": "gemini-2.5-flash-lite",
@@ -42,6 +47,7 @@ _DEFAULTS: dict[str, str] = {
 @dataclass(frozen=True)
 class LLMSettings:
     enabled: bool
+    auto_classify: bool
     provider: str
     model: str
     monthly_usd_budget: float
@@ -64,6 +70,7 @@ async def _read_raw(db: AsyncSession, key: str, default: str) -> str:
 
 async def get_llm_settings(db: AsyncSession) -> LLMSettings:
     enabled = _to_bool(await _read_raw(db, "llm_enabled", _DEFAULTS["llm_enabled"]))
+    auto_classify = _to_bool(await _read_raw(db, "llm_auto_classify", _DEFAULTS["llm_auto_classify"]))
     provider = await _read_raw(db, "llm_provider", _DEFAULTS["llm_provider"])
     model = await _read_raw(db, "llm_model", _DEFAULTS["llm_model"])
     budget = float(await _read_raw(db, "llm_monthly_usd_budget", _DEFAULTS["llm_monthly_usd_budget"]))
@@ -73,6 +80,7 @@ async def get_llm_settings(db: AsyncSession) -> LLMSettings:
     interval = float(await _read_raw(db, "llm_min_interval_sec", _DEFAULTS["llm_min_interval_sec"]))
     return LLMSettings(
         enabled=enabled,
+        auto_classify=auto_classify,
         provider=provider,
         model=model,
         monthly_usd_budget=budget,

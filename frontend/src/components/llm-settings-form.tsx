@@ -57,6 +57,7 @@ export function LLMSettingsForm() {
     try {
       await updateLLMSettings({
         enabled: draft.enabled,
+        auto_classify: draft.auto_classify,
         model: draft.model,
         monthly_usd_budget: draft.monthly_usd_budget,
         confidence_threshold: draft.confidence_threshold,
@@ -218,6 +219,29 @@ export function LLMSettingsForm() {
           <span
             className={`h-4 w-4 transform rounded-full bg-white shadow-sm transition ${
               draft.enabled ? "translate-x-6" : "translate-x-1"
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* auto-classify toggle */}
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <label className="text-sm font-medium">导入后自动 AI 分类</label>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            关闭（默认）时，导入只做关键词匹配；AI 分类改为在「待确认」页手动点「✨ AI 智能处理」触发。开启则每次导入后自动调用 AI。
+          </p>
+        </div>
+        <button
+          onClick={() => setDraft({ ...draft, auto_classify: !draft.auto_classify })}
+          disabled={!draft.enabled}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition disabled:opacity-50 ${
+            draft.auto_classify ? "bg-primary" : "bg-input"
+          }`}
+        >
+          <span
+            className={`h-4 w-4 transform rounded-full bg-white shadow-sm transition ${
+              draft.auto_classify ? "translate-x-6" : "translate-x-1"
             }`}
           />
         </button>

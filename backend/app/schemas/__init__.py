@@ -719,6 +719,8 @@ class NoteOut(BaseModel):
 
 class LLMSettingsOut(BaseModel):
     enabled: bool
+    # Auto-trigger L2 LLM after each import. False = manual-only (inbox button).
+    auto_classify: bool
     provider: str
     model: str
     monthly_usd_budget: float
@@ -734,6 +736,7 @@ class LLMSettingsOut(BaseModel):
 
 class LLMSettingsUpdate(BaseModel):
     enabled: bool | None = None
+    auto_classify: bool | None = None
     model: str | None = None
     monthly_usd_budget: float | None = Field(default=None, ge=0)
     confidence_threshold: float | None = Field(default=None, ge=0, le=1)

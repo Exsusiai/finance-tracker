@@ -125,6 +125,10 @@ async def test_enqueue_fires_after_commit(db: AsyncSession, monkeypatch):
     row is durable for the worker's independent session.
     """
     captured: list[int] = []
+    # Auto-dispatch is opt-in (llm_auto_classify); enable it so these tests
+    # exercise the after-commit enqueue mechanics they were written for.
+    from app.services import app_settings as _aps
+    await _aps.set_setting(db, "llm_auto_classify", True)
     monkeypatch.setattr(
         "app.services.llm.queue.enqueue",
         lambda ids: (captured.extend(ids), len(ids))[1],
@@ -148,6 +152,29 @@ async def test_enqueue_fires_after_commit(db: AsyncSession, monkeypatch):
         assert found is not None and found.description == "Coffee shop"
 
 
+# ─── test_no_auto_dispatch_by_default ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_no_auto_dispatch_by_default(db: AsyncSession, monkeypatch):
+    """Default (llm_auto_classify off): an unmatched import row is NOT enqueued;
+    it waits in the inbox for the manual 'AI 智能处理' trigger. Only L1 ran."""
+    captured: list[int] = []
+    monkeypatch.setattr(
+        "app.services.llm.queue.enqueue",
+        lambda ids: (captured.extend(ids), len(ids))[1],
+    )
+
+    tx = _coffee_tx()
+    db.add(tx)
+    result = await ingest_transactions(db, [tx], auto_pair=False)
+    await db.commit()
+
+    assert result.llm_dispatched == 0, "L2 must not auto-dispatch when off"
+    assert captured == [], "row was enqueued despite auto-classify being off"
+    assert tx.is_pending is True, "unmatched row should stay in the inbox"
+
+
 # ─── test_rollback_enqueues_nothing ──────────────────────────────────────────
 
 
@@ -155,6 +182,10 @@ async def test_enqueue_fires_after_commit(db: AsyncSession, monkeypatch):
 async def test_rollback_enqueues_nothing(db: AsyncSession, monkeypatch):
     """A rollback after ingestion must enqueue nothing (no orphan classify)."""
     captured: list[int] = []
+    # Auto-dispatch is opt-in (llm_auto_classify); enable it so these tests
+    # exercise the after-commit enqueue mechanics they were written for.
+    from app.services import app_settings as _aps
+    await _aps.set_setting(db, "llm_auto_classify", True)
     monkeypatch.setattr(
         "app.services.llm.queue.enqueue",
         lambda ids: (captured.extend(ids), len(ids))[1],
@@ -174,6 +205,10 @@ async def test_rollback_then_commit_enqueues_nothing(db: AsyncSession, monkeypat
     later reused to commit other work, the rolled-back tx ids must NOT be
     enqueued (the after_rollback hook cancels them)."""
     captured: list[int] = []
+    # Auto-dispatch is opt-in (llm_auto_classify); enable it so these tests
+    # exercise the after-commit enqueue mechanics they were written for.
+    from app.services import app_settings as _aps
+    await _aps.set_setting(db, "llm_auto_classify", True)
     monkeypatch.setattr(
         "app.services.llm.queue.enqueue",
         lambda ids: (captured.extend(ids), len(ids))[1],

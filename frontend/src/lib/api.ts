@@ -1140,6 +1140,8 @@ export async function deleteCategorizationNote(
 
 export interface LLMSettingsOut {
   enabled: boolean;
+  /** Auto-trigger L2 LLM after each import. False = manual-only (inbox button). */
+  auto_classify: boolean;
   provider: string;
   model: string;
   monthly_usd_budget: number;
@@ -1154,6 +1156,7 @@ export interface LLMSettingsOut {
 
 export interface LLMSettingsUpdateInput {
   enabled?: boolean;
+  auto_classify?: boolean;
   model?: string;
   monthly_usd_budget?: number;
   confidence_threshold?: number;
@@ -1196,6 +1199,16 @@ export interface LLMQueueStatus {
 
 export async function fetchLLMQueue(): Promise<LLMQueueStatus> {
   return request(`/api/v1/llm/queue`);
+}
+
+export interface ClassifyInboxResult {
+  queued: number;      // newly enqueued (deduped against in-flight)
+  eligible?: number;   // total pending rows eligible for LLM
+}
+
+/** Manually run L2 LLM classification over all pending inbox items. */
+export async function classifyInbox(): Promise<ClassifyInboxResult> {
+  return request(`/api/v1/llm/classify-inbox`, { method: "POST" });
 }
 
 // ─── Wallet sync (P1-4) ─────────────────────────────────────────────────────

@@ -35,6 +35,7 @@ async def _build_settings_out(db: AsyncSession) -> LLMSettingsOut:
     api_key_stale = bool(enc) and not can_decrypt(enc)
     return LLMSettingsOut(
         enabled=runtime.enabled,
+        auto_classify=runtime.auto_classify,
         provider=runtime.provider,
         model=runtime.model,
         monthly_usd_budget=runtime.monthly_usd_budget,
@@ -71,6 +72,7 @@ async def update_llm_settings(
 
     mapping = {
         "enabled": "llm_enabled",
+        "auto_classify": "llm_auto_classify",
         "model": "llm_model",
         "monthly_usd_budget": "llm_monthly_usd_budget",
         "confidence_threshold": "llm_confidence_threshold",
@@ -88,6 +90,43 @@ async def get_llm_queue(_token: _auth):
     """Live classification-queue depth so the UI can show "AI 处理中 · 剩 N 笔"."""
     from app.services.llm import queue as llm_queue
     return ApiSuccess(data=llm_queue.status())
+
+
+@router.post("/classify-inbox", response_model=ApiSuccess[dict])
+async def classify_inbox(_token: _auth, db: AsyncSession = Depends(get_db)):
+    """Manually run L2 LLM classification over ALL pending inbox items.
+
+    Auto-triggering after import is off by default (llm_auto_classify); this is
+    the user-initiated entry point (the "AI 智能处理" button). Eligible rows
+    (pending, income/expense) are enqueued onto the same rate-limited worker;
+    suggestions land in the inbox as they're processed. Enqueue is deduped, so
+    clicking twice won't double-queue rows already in flight.
+    """
+    from sqlalchemy import select
+
+    from app.core.errors import InvalidInputError
+    from app.models import Transaction
+    from app.services.llm import queue as llm_queue
+
+    runtime = await app_settings_svc.get_llm_settings(db)
+    if not runtime.enabled:
+        raise InvalidInputError("智能分类未启用，请先在设置中开启「LLM 智能分类」。")
+    if not await app_settings_svc.get_gemini_api_key(db):
+        raise InvalidInputError("未配置 Gemini API Key，请先在设置中填写。")
+
+    ids = [
+        r for (r,) in (await db.execute(
+            select(Transaction.id).where(
+                Transaction.is_pending.is_(True),
+                Transaction.deleted_at.is_(None),
+                Transaction.type.in_(("income", "expense")),
+            )
+        )).all()
+    ]
+    if not ids:
+        return ApiSuccess(data={"queued": 0, "eligible": 0})
+    queued = llm_queue.enqueue(ids)
+    return ApiSuccess(data={"queued": queued, "eligible": len(ids)})
 
 
 @router.get("/cost", response_model=ApiSuccess[LLMCostOut])

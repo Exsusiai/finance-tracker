@@ -1,12 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import useSWR, { mutate as swrMutate } from "swr";
 import { useInbox, useCategories, invalidateTransactionGraph } from "@/lib/hooks";
 import {
   ApiError,
   type ApplyScope,
+  classifyInbox,
   confirmInboxItem,
+  fetchLLMQueue,
   type CategoryOut,
+  type LLMQueueStatus,
   type TransactionOut,
 } from "@/lib/api";
 import { CategoryScopeDialog } from "@/components/category-scope-dialog";
@@ -29,6 +33,40 @@ export function InboxPanel() {
   const { data: items, isLoading, mutate: refreshInbox } = useInbox(200);
   const { data: categories } = useCategories();
   const [transferTx, setTransferTx] = useState<TransactionOut | null>(null);
+  const [aiSubmitting, setAiSubmitting] = useState(false);
+  const [aiMsg, setAiMsg] = useState<string | null>(null);
+
+  // Share the queue key with LlmQueueIndicator; when a manual AI run drains,
+  // re-fetch the inbox so the freshly-attached ✨ suggestions show up.
+  const { data: queue } = useSWR<LLMQueueStatus>("llm-queue", fetchLLMQueue, {
+    refreshInterval: (q) => (q && q.outstanding > 0 ? 3000 : 30000),
+  });
+  const prevOutstanding = useRef(0);
+  useEffect(() => {
+    const out = queue?.outstanding ?? 0;
+    if (prevOutstanding.current > 0 && out === 0) refreshInbox();
+    prevOutstanding.current = out;
+  }, [queue?.outstanding, refreshInbox]);
+
+  const handleAiProcess = async () => {
+    setAiMsg(null);
+    setAiSubmitting(true);
+    try {
+      const res = await classifyInbox();
+      if ((res.eligible ?? 0) === 0) {
+        setAiMsg("没有可处理的待确认交易");
+      } else if (res.queued === 0) {
+        setAiMsg("这些交易已在 AI 处理队列中");
+      } else {
+        setAiMsg(`已提交 ${res.queued} 笔到 AI 智能处理`);
+      }
+      swrMutate("llm-queue"); // surface the progress banner immediately
+    } catch (e) {
+      setAiMsg(e instanceof ApiError ? e.message : "AI 处理触发失败");
+    } finally {
+      setAiSubmitting(false);
+    }
+  };
 
   // Use the canonical graph-wide invalidator. The previous hand-rolled
   // predicate left out transfer-suggestions / transfer-unpaired / accounts /
@@ -67,13 +105,24 @@ export function InboxPanel() {
   return (
     <div className="space-y-3">
       <LlmQueueIndicator />
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           <span className="font-medium text-foreground">{items.length}</span> 笔待确认交易
           <span className="ml-2 text-xs">
             ｜ 已自动建议分类的可一键确认；改选其他分类会让系统记住下次自动归并
           </span>
         </p>
+        <div className="flex items-center gap-2 shrink-0">
+          {aiMsg && <span className="text-xs text-muted-foreground">{aiMsg}</span>}
+          <button
+            onClick={handleAiProcess}
+            disabled={aiSubmitting}
+            title="调用 AI（LLM）为所有待确认交易智能推荐分类（不会自动确认，仍需你审阅）"
+            className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3.5 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+          >
+            {aiSubmitting ? "提交中…" : "✨ AI 智能处理"}
+          </button>
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-card overflow-hidden">

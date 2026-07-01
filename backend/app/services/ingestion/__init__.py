@@ -192,9 +192,16 @@ async def ingest_transactions(
     # transaction and defer the enqueue to a one-shot after_commit hook. The
     # rows are queued only once the caller's commit lands; a rollback fires
     # nothing, so the queue never points at rows that don't exist.
+    # Only auto-dispatch L2 when the user opted into it (llm_auto_classify).
+    # Default is OFF: unmatched rows just wait in the inbox until the user
+    # clicks "AI 智能处理" (POST /llm/classify-inbox). L1 keyword matching
+    # above always runs regardless.
     if llm_target_txs:
+        from app.services import app_settings as _aps
+
+        auto_classify = (await _aps.get_llm_settings(db)).auto_classify
         ids_to_classify = [tx.id for tx in llm_target_txs if tx.id is not None]
-        if ids_to_classify:
+        if auto_classify and ids_to_classify:
             _enqueue_llm_after_commit(db, ids_to_classify)
             result.llm_dispatched += len(ids_to_classify)
 
