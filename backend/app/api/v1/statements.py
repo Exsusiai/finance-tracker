@@ -260,6 +260,26 @@ def _tx_to_out(t: Transaction) -> TransactionOut:
     )
 
 
+def _stored_bank_format(pdf_import: PdfImport) -> str | None:
+    """The user's manual `bank_format` override chosen at upload, persisted in
+    metadata_json. Every re-parse (commit / preview / assign / confirm) must
+    reuse it so a manual selection stays authoritative instead of silently
+    re-running auto-detection. Returns None when left on auto.
+
+    2026-07 fix: an N26 statement uploaded with bank_format='n26' previewed
+    correctly, but commit re-parsed WITHOUT the override → auto-detected Revolut
+    → 0 tx imported under the wrong bank.
+    """
+    if not pdf_import.metadata_json:
+        return None
+    try:
+        meta = json.loads(pdf_import.metadata_json)
+    except (ValueError, TypeError):
+        return None
+    val = meta.get("bank_format")
+    return val or None
+
+
 @router.post("/upload", response_model=ApiSuccess[PdfImportOut])
 async def upload_pdf(
     _token: _auth,
@@ -305,6 +325,12 @@ async def upload_pdf(
     storage_path = storage_dir / f"{file_hash}.pdf"
     await asyncio.to_thread(storage_path.write_bytes, content)
 
+    # Persist the manual bank-format override so re-parses (commit / preview /
+    # assign / confirm) stay faithful to it — auto-detection is only used when
+    # the user left it on auto.
+    _fmt = (bank_format or "").strip().lower()
+    _fmt_meta = json.dumps({"bank_format": _fmt}) if _fmt and _fmt != "auto" else None
+
     # Create import record
     pdf_import = PdfImport(
         filename=file.filename or "unknown.pdf",
@@ -313,6 +339,7 @@ async def upload_pdf(
         storage_path=str(storage_path),
         account_id=account_id,
         status="pending",
+        metadata_json=_fmt_meta,
     )
     db.add(pdf_import)
     await db.flush()
@@ -462,6 +489,7 @@ async def get_statement(
             subaccount_names = await _load_subaccount_names(db, pdf_import.account_id)
             result = await parse_pdf_statement(
                 db, pdf_import, content, subaccount_names=subaccount_names,
+                force_bank=_stored_bank_format(pdf_import),
             )
             return ApiSuccess(
                 data=_pdf_to_out(
@@ -544,6 +572,7 @@ async def commit_statement(
     try:
         result = await parse_pdf_statement(
             db, pdf_import, content, subaccount_names=subaccount_names,
+            force_bank=_stored_bank_format(pdf_import),
         )
         pdf_import.detected_bank = result.get("detected_bank")
         pdf_import.parser_version = result.get("parser_version")
@@ -642,6 +671,7 @@ async def assign_account_to_statement(
     try:
         result = await parse_pdf_statement(
             db, pdf_import, content, subaccount_names=subaccount_names,
+            force_bank=_stored_bank_format(pdf_import),
         )
         pdf_import.detected_bank = result.get("detected_bank")
         pdf_import.parser_version = result.get("parser_version")
@@ -813,6 +843,7 @@ async def reparse_statement(
 
         result = await parse_pdf_statement(
             db, pdf_import, content, subaccount_names=subaccount_names,
+            force_bank=_stored_bank_format(pdf_import),
         )
         pdf_import.detected_bank = result.get("detected_bank")
         pdf_import.parser_version = result.get("parser_version")

@@ -177,39 +177,60 @@ def _empty_result(error: str | None = None) -> dict[str, Any]:
 # Use ONLY bank-issued identifiers (BIC, official domain, exact card-product
 # title, registered legal name). Plain bank names are too greedy — e.g. an N26
 # statement may carry "AMERICAN EXPRESS" in a SEPA-rejection memo.
-_BANK_MARKERS: list[tuple[str, str]] = [
+# Primary markers: strings the ISSUER prints to identify itself — statement
+# title / company name / domain. A *counterparty* never prints these: a
+# transfer line only carries the counterparty's BIC, not the issuer's statement
+# title or company domain. Detection tries these first (earliest position).
+_ISSUER_MARKERS: list[tuple[str, str]] = [
     ("amex_de",  "americanexpress.de"),
     ("amex_de",  "american express gold card"),
-    ("n26",      "ntsbdeb1"),                  # N26 BIC
-    ("revolut",  "revolut bank uab"),
-    ("revolut",  "revodeb2"),                  # Revolut Germany BIC
-    ("tfbank",   "tfbank.de"),
-    ("tfbank",   "tf bank ab"),
-    ("advanzia", "advanzia bank s.a"),
+    ("n26",      "bank statement nr"),          # N26 statement title (header, always pos 0)
+    ("revolut",  "revolut bank uab"),           # Revolut issuer company (header)
+    ("tfbank",   "tfbank.de"),                  # issuer domain (not the "TF Bank AB" name a counterparty prints)
     ("advanzia", "hilton honors kreditkarte"),
+    ("advanzia", "advanzia bank s.a"),
+]
+
+# Fallback: bare BICs. AMBIGUOUS — a BIC appears both as the issuer's own BIC
+# (header/footer) AND as a *counterparty* BIC inside "Outgoing Transfers" lines
+# (an N26 statement paying into a Revolut account carries `revodeb2` in the
+# body, often BEFORE N26's own `ntsbdeb1`). So these are consulted ONLY when no
+# issuer marker matched — a counterparty BIC can never override a real issuer.
+# (2026-07 fix: N26 June statement mis-detected as Revolut because the earliest
+# marker was a counterparty `revodeb2`, not N26's own footer BIC.)
+_BIC_FALLBACK_MARKERS: list[tuple[str, str]] = [
+    ("n26",      "ntsbdeb1"),                   # N26 BIC
+    ("revolut",  "revodeb2"),                   # Revolut Germany BIC
+    ("tfbank",   "tf bank ab"),                 # TF Bank company name (counterparty-shared)
 ]
 
 
-def _detect_bank(text: str) -> str | None:
-    """Detect the issuing bank by EARLIEST marker position.
-
-    The issuing bank identifies itself in the statement header (top of the
-    document); a *counterparty* bank only appears inside transaction lines
-    (further down the body). Picking the bank whose marker appears earliest
-    therefore selects the issuer, not a counterparty — fixing the case where
-    e.g. an N26 statement with a transfer to Revolut contains Revolut's BIC
-    `revodeb2` in a body line and used to mis-detect as Revolut (and vice
-    versa). Ties / no-match → None.
-    """
-    text_lower = text.lower()
+def _earliest_marker(text_lower: str, markers: list[tuple[str, str]]) -> str | None:
+    """Return the bank whose marker appears earliest in `text_lower`, or None."""
     best_bank: str | None = None
     best_pos = len(text_lower) + 1
-    for bank, marker in _BANK_MARKERS:
+    for bank, marker in markers:
         pos = text_lower.find(marker)
         if pos != -1 and pos < best_pos:
             best_pos = pos
             best_bank = bank
     return best_bank
+
+
+def _detect_bank(text: str) -> str | None:
+    """Detect the issuing bank: issuer self-identification first, BIC as fallback.
+
+    Two tiers, because a bank's BIC is ambiguous — it identifies the issuer in
+    the header AND a counterparty in transfer lines. Tier 1 uses issuer-only
+    markers (statement title / company / domain) that a counterparty never
+    prints; only if none match does Tier 2 fall back to bare BICs. This fixes
+    the N26↔Revolut cross mis-detection where an N26 statement's transfer to a
+    Revolut account put `revodeb2` earlier than N26's own footer BIC. No-match → None.
+    """
+    text_lower = text.lower()
+    return _earliest_marker(text_lower, _ISSUER_MARKERS) or _earliest_marker(
+        text_lower, _BIC_FALLBACK_MARKERS
+    )
 
 
 def _detect_period(text: str) -> str | None:

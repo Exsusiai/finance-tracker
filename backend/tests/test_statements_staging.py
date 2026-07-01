@@ -160,3 +160,64 @@ class TestStagingFlow:
         r = await client.post(f"/api/v1/statements/{up['id']}/commit")
         assert r.status_code >= 400
         assert await _count_txs() == 0
+
+
+class TestBankFormatOverridePersisted:
+    """Regression (2026-07): a manual bank_format override must survive to commit.
+
+    Upload with ?bank_format=n26 previewed correctly, but commit re-parsed
+    WITHOUT the override → auto-detected the wrong bank (Revolut) → 0 tx imported
+    under the wrong account. The override is now persisted (metadata_json) and
+    passed as force_bank on every re-parse, including commit.
+    """
+
+    async def test_manual_bank_format_honored_through_commit(self, client, monkeypatch):
+        acc_id = await _make_account()
+        seen: list[str | None] = []
+
+        async def _recording_parse(db, pdf_import, content, **kwargs):
+            seen.append(kwargs.get("force_bank"))
+            return dict(_FAKE_PARSE)
+
+        monkeypatch.setattr(
+            "app.services.pdf_parser.engine.parse_pdf_statement", _recording_parse
+        )
+
+        files = {"file": ("n26.pdf", b"%PDF-1.4 fake", "application/pdf")}
+        up = (await client.post(
+            "/api/v1/statements/upload?bank_format=n26", files=files
+        )).json()["data"]
+
+        # The choice is persisted on the import record.
+        async with _Session() as s:
+            rec = (await s.execute(
+                select(PdfImport).where(PdfImport.id == up["id"])
+            )).scalar_one()
+        assert rec.metadata_json and "n26" in rec.metadata_json
+
+        await client.post(f"/api/v1/statements/{up['id']}/commit?account_id={acc_id}")
+
+        # BOTH the upload parse and the commit re-parse received the override.
+        assert seen == ["n26", "n26"], seen
+
+    async def test_auto_leaves_no_override(self, client, monkeypatch):
+        acc_id = await _make_account()
+        seen: list[str | None] = []
+
+        async def _recording_parse(db, pdf_import, content, **kwargs):
+            seen.append(kwargs.get("force_bank"))
+            return dict(_FAKE_PARSE)
+
+        monkeypatch.setattr(
+            "app.services.pdf_parser.engine.parse_pdf_statement", _recording_parse
+        )
+        files = {"file": ("n26.pdf", b"%PDF-1.4 fake", "application/pdf")}
+        # No bank_format (auto) → nothing persisted → force_bank stays None.
+        up = (await client.post("/api/v1/statements/upload", files=files)).json()["data"]
+        async with _Session() as s:
+            rec = (await s.execute(
+                select(PdfImport).where(PdfImport.id == up["id"])
+            )).scalar_one()
+        assert rec.metadata_json is None
+        await client.post(f"/api/v1/statements/{up['id']}/commit?account_id={acc_id}")
+        assert seen == [None, None], seen

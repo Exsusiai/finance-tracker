@@ -129,6 +129,31 @@ def test_detector_ignores_counterparty_bank_in_body() -> None:
     assert _detect_bank(revolut_stmt) == "revolut"
 
 
+def test_n26_title_beats_earlier_counterparty_revolut_bic() -> None:
+    """Regression (2026-07): N26 June statement mis-detected as Revolut → 0 tx.
+
+    The user's N26 statement sends money to a Revolut account, so the
+    counterparty BIC `REVODEB2` appears in a transfer line (pos ~150) BEFORE
+    N26's own footer BIC `NTSBDEB1` (pos ~450). The old earliest-BIC heuristic
+    picked Revolut. N26's statement title 'Bank Statement Nr.' (pos 0) is an
+    issuer-only marker and must win over any counterparty BIC.
+    """
+    from app.services.pdf_parser.engine import _detect_bank
+
+    n26_june = (
+        "Bank Statement Nr. 06/2026\n"
+        "01.06.2026 until 30.06.2026\n"
+        "Jingsheng Chen 02.06.2026 -100,00€\n"
+        "Outgoing Transfers\n"
+        "IBAN: DE67100101782736811097 • BIC: REVODEB2XXX\n"
+        "Sent from N26\n" + "x" * 300 + "\n"
+        "IBAN: DE67100110012623191530 • BIC: NTSBDEB1XXX Nr. 06/2026\n"
+        "N26 Bank AG\n"
+    )
+    assert n26_june.lower().find("revodeb2") < n26_june.lower().find("ntsbdeb1")
+    assert _detect_bank(n26_june) == "n26"
+
+
 @pytest.mark.parametrize("bank,filename", list(EUROPEAN_BANK_FILES.items()))
 def test_real_pdf_round_trip(bank: str, filename: str) -> None:
     """If reference PDFs are available locally, parsing them should yield rows."""
