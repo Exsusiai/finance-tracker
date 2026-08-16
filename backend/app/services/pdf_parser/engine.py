@@ -606,9 +606,21 @@ def _parse_amex_de(text: str) -> list[dict]:
             continue
         if amount == 0:
             continue
+        # The row's tail = lines between this row and the next matched row. It
+        # carries the foreign-amount / exchange-rate detail AND — crucially —
+        # the `GUTSCHRIFT` (credit/refund) label, which AMEX prints on the
+        # foreign-amount line, NOT in the transaction description. A refund of
+        # an Alipay/foreign charge shows as two identical `... 8,86` rows (the
+        # charge + its refund); only the refund's tail says `GUTSCHRIFT`. Without
+        # scanning the tail, both rows classify as expense → the refund is
+        # double-counted as a second spend instead of cancelling the charge.
+        tail_start = m.end()
+        tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        tail = text[tail_start:tail_end]
         is_credit = (
             "GUTSCHRIFT" in desc.upper()
             or "ZAHLUNG/ÜBERWEISUNG ERHALTEN" in desc.upper()
+            or "GUTSCHRIFT" in tail.upper()
         )
         tx_type = "income" if is_credit else "expense"
         dd, mm = d_book.split(".")
@@ -621,8 +633,6 @@ def _parse_amex_de(text: str) -> list[dict]:
             date_iso=date_iso, amount=amount, tx_type=tx_type,
             description=desc, counterparty="AMEX-DE", seq=seq,
         )
-        tail_start = m.end()
-        tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         _attach_iban_to_tx(tx, _extract_iban_in_window(text, tail_start, tail_end))
         txs.append(tx)
     return txs

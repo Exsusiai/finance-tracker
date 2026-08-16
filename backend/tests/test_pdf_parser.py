@@ -154,6 +154,41 @@ def test_n26_title_beats_earlier_counterparty_revolut_bic() -> None:
     assert _detect_bank(n26_june) == "n26"
 
 
+def test_amex_refund_gutschrift_in_tail_is_income() -> None:
+    """Regression (2026-07): AMEX refund (GUTSCHRIFT) double-counted as expense.
+
+    AMEX prints the `GUTSCHRIFT` (credit/refund) label on the foreign-amount
+    line that FOLLOWS the transaction row, not in the description. A refunded
+    foreign charge appears as two identical `... 8,86` rows — the charge and its
+    refund — and only the refund's tail says GUTSCHRIFT. The old `is_credit`
+    check looked only at the row description, so BOTH rows became expense and
+    the refund inflated spending instead of cancelling the charge. Detection
+    must scan the row's tail window for the label.
+    """
+    from app.services.pdf_parser.engine import _parse_amex_de
+
+    text = (
+        "Datum 08.07.26\n"
+        "Umsatz vom Buchungsdatum Details Betrag in Fremdwährung Betrag EUR\n"
+        "14.06 14.06 Alipay* Shanghai 8,86\n"
+        "68.00 GUTSCHRIFT\n"
+        "Chinesischer Renminbi\n"
+        "Referenzwechselkurs 7.8250 +Entgelt in EUR 0,17\n"
+        "14.06 14.06 Alipay* Shanghai 8,86\n"
+        "68.00\n"
+        "Chinesischer Renminbi\n"
+        "15.06 15.06 REWE MARKT BERLIN 21,01\n"
+    )
+    txs = _parse_amex_de(text)
+    alipay = [t for t in txs if "Alipay" in t["description"]]
+    assert len(alipay) == 2, alipay
+    kinds = sorted(t["type"] for t in alipay)
+    assert kinds == ["expense", "income"], f"refund not split: {kinds}"
+    # A plain expense row (no GUTSCHRIFT in its tail) stays expense.
+    rewe = [t for t in txs if "REWE" in t["description"]]
+    assert rewe and rewe[0]["type"] == "expense"
+
+
 @pytest.mark.parametrize("bank,filename", list(EUROPEAN_BANK_FILES.items()))
 def test_real_pdf_round_trip(bank: str, filename: str) -> None:
     """If reference PDFs are available locally, parsing them should yield rows."""
