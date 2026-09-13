@@ -122,6 +122,28 @@ async def step_clear_orphan_pointers(ctx: RefreshContext) -> None:
         )).scalars().all()
     }
 
+    async def _pointer_is_symmetric(row_id: int, target_id: int | None) -> bool:
+        """True when `target_id` is a live row that points back at `row_id`.
+
+        Pairing is symmetric by construction (`pair_transactions` writes both
+        sides). A one-way pointer is corruption, not a pair — the old check
+        only asked "is the target alive?", so a bogus pointer at an unrelated
+        live row (January €100 wired onto a July €1500 transfer, written by the
+        pre-fix backfill) survived every refresh and hid the row from the
+        未配对 panel forever.
+        """
+        if target_id is None:
+            return False
+        target = (await ctx.db.execute(
+            select(Transaction).where(
+                Transaction.id == target_id,
+                Transaction.deleted_at.is_(None),
+            )
+        )).scalars().first()
+        if target is None:
+            return False
+        return _safe_meta(target.metadata_json).get("paired_with_tx_id") == row_id
+
     pointer_rows = (await ctx.db.execute(
         select(Transaction).where(
             Transaction.deleted_at.is_(None),
@@ -132,65 +154,64 @@ async def step_clear_orphan_pointers(ctx: RefreshContext) -> None:
         meta = _safe_meta(r.metadata_json)
         paired_id = meta.get("paired_with_tx_id")
 
-        # Path A: explicit pointer present → just verify alive.
+        # Path A: pointer present → keep it only when it's a real, symmetric
+        # pair. An asymmetric pointer is dropped and re-resolved via Path B.
+        if paired_id is not None and await _pointer_is_symmetric(r.id, paired_id):
+            continue
         if paired_id is not None:
-            counterpart_alive = (await ctx.db.execute(
-                select(Transaction.id).where(
-                    Transaction.id == paired_id,
-                    Transaction.deleted_at.is_(None),
-                )
-            )).scalar_one_or_none() is not None
-            if counterpart_alive:
-                continue
-        else:
-            # Intentional single-leg into a snapshot account: no mate row
-            # exists by design. Migrate to the modern representation
-            # (counter_account_hint, which the 未配对 panel excludes)
-            # instead of clearing — clearing stranded the row forever.
-            if acct_type_by_id.get(r.counter_account_id) in _SNAPSHOT_TYPES:
-                meta["counter_account_hint"] = r.counter_account_id
-                r.counter_account_id = None
-                r.metadata_json = _dump_meta(meta)
-                continue
+            # Asymmetric → corruption. Drop it and re-resolve below.
+            meta.pop("paired_with_tx_id", None)
+            r.metadata_json = _dump_meta(meta)
 
-            # Path B: pointer missing but counter_account_id set. Look in
-            # the counter account for the row that is actually our paired
-            # counterpart, written without the back-pointer (legacy
-            # pair_transactions). It must LOOK like our counterpart: same
-            # amount, within the matcher's date window, and not already
-            # pointing at someone else. The previous unvalidated LIMIT 1
-            # lookup grabbed arbitrary rows (a January €100 leg was wired
-            # as the "mate" of a July €1500 transfer).
-            mate_rows = (await ctx.db.execute(
-                select(Transaction).where(
-                    Transaction.account_id == r.counter_account_id,
-                    Transaction.counter_account_id == r.account_id,
-                    Transaction.deleted_at.is_(None),
-                    Transaction.id != r.id,
-                    Transaction.amount == r.amount,
-                )
-            )).scalars().all()
-            mate = None
-            for m in mate_rows:
-                try:
-                    if abs((_date_only(m.occurred_at) - _date_only(r.occurred_at)).days) > WINDOW_DAYS:
-                        continue
-                except (ValueError, TypeError):
+        # Intentional single-leg into a snapshot account: no mate row
+        # exists by design. Migrate to the modern representation
+        # (counter_account_hint, which the 未配对 panel excludes)
+        # instead of clearing — clearing stranded the row forever.
+        if acct_type_by_id.get(r.counter_account_id) in _SNAPSHOT_TYPES:
+            meta["counter_account_hint"] = r.counter_account_id
+            r.counter_account_id = None
+            r.metadata_json = _dump_meta(meta)
+            continue
+
+        # Path B: no usable pointer but counter_account_id set. Find the row
+        # that is actually our paired counterpart, written without the
+        # back-pointer (legacy pair_transactions). It must LOOK like our
+        # counterpart: same amount, within the matcher's date window, and not
+        # already validly paired to someone else. The previous unvalidated
+        # LIMIT 1 lookup grabbed arbitrary rows (a January €100 leg was wired
+        # as the "mate" of a July €1500 transfer).
+        mate_rows = (await ctx.db.execute(
+            select(Transaction).where(
+                Transaction.account_id == r.counter_account_id,
+                Transaction.counter_account_id == r.account_id,
+                Transaction.deleted_at.is_(None),
+                Transaction.id != r.id,
+                Transaction.amount == r.amount,
+            )
+        )).scalars().all()
+        mate = None
+        for m in mate_rows:
+            try:
+                if abs((_date_only(m.occurred_at) - _date_only(r.occurred_at)).days) > WINDOW_DAYS:
                     continue
-                m_pw = _safe_meta(m.metadata_json).get("paired_with_tx_id")
-                if m_pw not in (None, r.id):
-                    continue  # already someone else's counterpart
-                mate = m
-                break
-            if mate is not None:
-                meta["paired_with_tx_id"] = mate.id
-                r.metadata_json = _dump_meta(meta)
-                # Also patch the mate's metadata if its pointer is missing
-                mate_meta = _safe_meta(mate.metadata_json)
-                if mate_meta.get("paired_with_tx_id") is None:
-                    mate_meta["paired_with_tx_id"] = r.id
-                    mate.metadata_json = _dump_meta(mate_meta)
+            except (ValueError, TypeError):
                 continue
+            m_pw = _safe_meta(m.metadata_json).get("paired_with_tx_id")
+            # "Taken" only counts when that claim is itself a valid symmetric
+            # pair. Two legs that BOTH carry corrupt pointers would otherwise
+            # each treat the other as taken and never re-pair.
+            if m_pw is not None and m_pw != r.id and await _pointer_is_symmetric(m.id, m_pw):
+                continue
+            mate = m
+            break
+        if mate is not None:
+            meta["paired_with_tx_id"] = mate.id
+            r.metadata_json = _dump_meta(meta)
+            # Point the mate back at us (overwrite a corrupt claim).
+            mate_meta = _safe_meta(mate.metadata_json)
+            mate_meta["paired_with_tx_id"] = r.id
+            mate.metadata_json = _dump_meta(mate_meta)
+            continue
 
         # Genuine orphan — clear the stale pointer
         r.counter_account_id = None

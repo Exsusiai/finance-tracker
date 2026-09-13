@@ -532,3 +532,63 @@ class TestOrphanCleanupGuards:
         assert tx.counter_account_id == dst.id
         meta = json.loads(tx.metadata_json)
         assert meta.get("transfer_direction") == "out"  # recorded direction kept
+
+
+class TestAsymmetricPointerHealing:
+    """A `paired_with_tx_id` that isn't mutual is corruption, not a pair.
+
+    The pre-fix Path A only asked "is the target alive?", so a bogus pointer
+    at an unrelated live row survived forever AND hid the row from the 未配对
+    panel. Worse, when BOTH legs carried corrupt pointers each treated the
+    other as "already taken" and they could never re-pair.
+    """
+
+    async def test_asymmetric_pointer_dropped_and_repaired(self, db: AsyncSession):
+        from app.services.refresh_matching import RefreshContext, step_clear_orphan_pointers
+
+        a = await _make_account(db, "HealA")
+        b = await _make_account(db, "HealB")
+        # Unrelated live rows the corrupt pointers aim at.
+        decoy1 = await _make_tx(db, a, "100", "transfer", "2026-01-14T00:00:00Z")
+        decoy2 = await _make_tx(db, b, "100", "transfer", "2026-01-15T00:00:00Z")
+        # The real pair — both legs carry corrupt pointers at the decoys.
+        left = await _make_tx(
+            db, a, "600", "transfer", "2026-08-12T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "out",
+                                      "paired_with_tx_id": decoy2.id}),
+        )
+        left.counter_account_id = b.id
+        right = await _make_tx(
+            db, b, "600", "transfer", "2026-08-12T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "in",
+                                      "paired_with_tx_id": decoy1.id}),
+        )
+        right.counter_account_id = a.id
+        await db.flush()
+
+        ctx = RefreshContext(db=db)
+        await step_clear_orphan_pointers(ctx)
+
+        assert json.loads(left.metadata_json).get("paired_with_tx_id") == right.id
+        assert json.loads(right.metadata_json).get("paired_with_tx_id") == left.id
+        assert left.counter_account_id == b.id and right.counter_account_id == a.id
+        assert ctx.summary["orphan_pointers_cleared"] == 0, "a real pair must not be torn apart"
+
+    async def test_valid_symmetric_pair_untouched(self, db: AsyncSession):
+        from app.services.refresh_matching import RefreshContext, step_clear_orphan_pointers
+
+        a = await _make_account(db, "KeepA")
+        b = await _make_account(db, "KeepB")
+        left = await _make_tx(db, a, "250", "transfer", "2026-05-02T00:00:00Z")
+        right = await _make_tx(db, b, "250", "transfer", "2026-05-02T00:00:00Z")
+        left.counter_account_id, right.counter_account_id = b.id, a.id
+        left.metadata_json = json.dumps({"transfer_direction": "out", "paired_with_tx_id": right.id})
+        right.metadata_json = json.dumps({"transfer_direction": "in", "paired_with_tx_id": left.id})
+        await db.flush()
+
+        ctx = RefreshContext(db=db)
+        await step_clear_orphan_pointers(ctx)
+
+        assert json.loads(left.metadata_json)["paired_with_tx_id"] == right.id
+        assert json.loads(right.metadata_json)["paired_with_tx_id"] == left.id
+        assert ctx.summary["orphan_pointers_cleared"] == 0
