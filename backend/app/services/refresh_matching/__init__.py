@@ -37,6 +37,8 @@ from app.services.transfer_matcher import (
     pair_transactions,
 )
 from app.services.transfer_matcher.engine import (
+    WINDOW_DAYS,
+    _date_only,
     _merge_meta,
     _resolve_transfer_category,
 )
@@ -106,6 +108,20 @@ async def step_clear_orphan_pointers(ctx: RefreshContext) -> None:
     didn't write it, which made every refresh-matching unpair confirmed
     candidate pairs.
     """
+    # Snapshot-balance account types hold NO transaction rows by design —
+    # a bank→broker/crypto/exchange transfer is intentionally single-leg
+    # (the destination's next sync reflects the money). Such rows can never
+    # have a mate, so treating them as orphans destroyed legitimate binds
+    # on every refresh (2026-09 regression: IBKR deposits resurfaced as
+    # 未配对 after months of being settled).
+    _SNAPSHOT_TYPES = frozenset({"brokerage", "crypto_wallet", "exchange"})
+    acct_type_by_id: dict[int, str] = {
+        a.id: a.type
+        for a in (await ctx.db.execute(
+            select(Account).where(Account.deleted_at.is_(None))
+        )).scalars().all()
+    }
+
     pointer_rows = (await ctx.db.execute(
         select(Transaction).where(
             Transaction.deleted_at.is_(None),
@@ -127,19 +143,45 @@ async def step_clear_orphan_pointers(ctx: RefreshContext) -> None:
             if counterpart_alive:
                 continue
         else:
+            # Intentional single-leg into a snapshot account: no mate row
+            # exists by design. Migrate to the modern representation
+            # (counter_account_hint, which the 未配对 panel excludes)
+            # instead of clearing — clearing stranded the row forever.
+            if acct_type_by_id.get(r.counter_account_id) in _SNAPSHOT_TYPES:
+                meta["counter_account_hint"] = r.counter_account_id
+                r.counter_account_id = None
+                r.metadata_json = _dump_meta(meta)
+                continue
+
             # Path B: pointer missing but counter_account_id set. Look in
-            # the counter account for a row that mutually points back at us
-            # (counter_account_id == our account_id) — that's our paired
-            # counterpart written without the back-pointer (legacy
-            # pair_transactions). Backfill the pointer instead of clearing.
-            mate = (await ctx.db.execute(
+            # the counter account for the row that is actually our paired
+            # counterpart, written without the back-pointer (legacy
+            # pair_transactions). It must LOOK like our counterpart: same
+            # amount, within the matcher's date window, and not already
+            # pointing at someone else. The previous unvalidated LIMIT 1
+            # lookup grabbed arbitrary rows (a January €100 leg was wired
+            # as the "mate" of a July €1500 transfer).
+            mate_rows = (await ctx.db.execute(
                 select(Transaction).where(
                     Transaction.account_id == r.counter_account_id,
                     Transaction.counter_account_id == r.account_id,
                     Transaction.deleted_at.is_(None),
                     Transaction.id != r.id,
-                ).limit(1)
-            )).scalars().first()
+                    Transaction.amount == r.amount,
+                )
+            )).scalars().all()
+            mate = None
+            for m in mate_rows:
+                try:
+                    if abs((_date_only(m.occurred_at) - _date_only(r.occurred_at)).days) > WINDOW_DAYS:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                m_pw = _safe_meta(m.metadata_json).get("paired_with_tx_id")
+                if m_pw not in (None, r.id):
+                    continue  # already someone else's counterpart
+                mate = m
+                break
             if mate is not None:
                 meta["paired_with_tx_id"] = mate.id
                 r.metadata_json = _dump_meta(meta)

@@ -433,3 +433,102 @@ async def test_refresh_matching_llm_dispatch_no_import_error(db: AsyncSession, m
 
 
 pytestmark = pytest.mark.asyncio
+
+
+# ─── 2026-09 regression: orphan-cleanup guards ──────────────────────────
+#
+# The refresh run surfaced "settled" June/July transfers as unpaired:
+#   1. single-leg binds to snapshot accounts (IBKR) were cleared as orphans
+#      (no mate row exists BY DESIGN), then stranded forever;
+#   2. the Path-B pointer backfill picked an arbitrary mate (LIMIT 1, no
+#      amount/date check) — a January €100 leg got wired to a July €1500 row.
+
+
+class TestOrphanCleanupGuards:
+    async def test_snapshot_single_leg_migrated_to_hint_not_cleared(self, db: AsyncSession):
+        from app.services.refresh_matching import RefreshContext, step_clear_orphan_pointers
+
+        bank = await _make_account(db, "BankSnap")
+        broker = Account(
+            name="IBKR-T", type="brokerage", currency="EUR",
+            initial_balance=Decimal("0"), is_active=True,
+            created_at=_utcnow(), updated_at=_utcnow(),
+        )
+        db.add(broker)
+        await db.flush()
+        tx = await _make_tx(
+            db, bank, "1380", "transfer", "2026-06-07T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "out"}),
+        )
+        tx.counter_account_id = broker.id
+        await db.flush()
+
+        ctx = RefreshContext(db=db)
+        await step_clear_orphan_pointers(ctx)
+
+        meta = json.loads(tx.metadata_json)
+        assert tx.counter_account_id is None
+        assert meta.get("counter_account_hint") == broker.id, (
+            "single-leg snapshot bind must migrate to counter_account_hint, not vanish"
+        )
+        assert ctx.summary["orphan_pointers_cleared"] == 0
+
+    async def test_backfill_requires_amount_and_date_match(self, db: AsyncSession):
+        from app.services.refresh_matching import RefreshContext, step_clear_orphan_pointers
+
+        a = await _make_account(db, "BankPB-A")
+        b = await _make_account(db, "BankPB-B")
+        r = await _make_tx(
+            db, a, "1500", "transfer", "2026-07-22T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "out"}),
+        )
+        r.counter_account_id = b.id
+        # Wrong-mate temptation: mutual pointer shape but Jan €100.
+        wrong = await _make_tx(
+            db, b, "100", "transfer", "2026-01-14T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "in"}),
+        )
+        wrong.counter_account_id = a.id
+        right = await _make_tx(
+            db, b, "1500", "transfer", "2026-07-22T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "in"}),
+        )
+        right.counter_account_id = a.id
+        await db.flush()
+
+        ctx = RefreshContext(db=db)
+        await step_clear_orphan_pointers(ctx)
+
+        meta_r = json.loads(r.metadata_json)
+        assert meta_r.get("paired_with_tx_id") == right.id, (
+            f"backfill picked {meta_r.get('paired_with_tx_id')}, wanted {right.id} "
+            "(amount+date-matched mate)"
+        )
+        meta_right = json.loads(right.metadata_json)
+        assert meta_right.get("paired_with_tx_id") == r.id
+
+    async def test_stranded_transfer_rebound_by_iban(self, db: AsyncSession):
+        from app.services.transfer_matcher import detect_single_leg_iban
+
+        src = await _make_account(db, "BankIB-src")
+        dst = Account(
+            name="BankIB-dst", type="bank", currency="EUR",
+            initial_balance=Decimal("0"), is_active=True,
+            iban="DE99500105171234567890",
+            created_at=_utcnow(), updated_at=_utcnow(),
+        )
+        db.add(dst)
+        await db.flush()
+        # Stranded row: already type=transfer (pointer was cleared), IBAN in tail.
+        tx = await _make_tx(
+            db, src, "350", "transfer", "2026-06-07T00:00:00Z",
+            metadata_json=json.dumps({"transfer_direction": "out"}),
+        )
+        tx.raw_description = "IBKR | IBAN DE99500105171234567890"
+        await db.flush()
+
+        res = await detect_single_leg_iban(db)
+        assert any(m["tx_id"] == tx.id for m in res), "stranded transfer row must be re-bindable"
+        assert tx.counter_account_id == dst.id
+        meta = json.loads(tx.metadata_json)
+        assert meta.get("transfer_direction") == "out"  # recorded direction kept

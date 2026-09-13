@@ -946,7 +946,10 @@ async def detect_single_leg_iban(
         select(Transaction)
         .where(
             Transaction.deleted_at.is_(None),
-            Transaction.type.in_(("expense", "income")),
+            # Include unpaired `transfer` rows too (2026-09): a transfer
+            # whose counter pointer was cleared (orphan cleanup) could
+            # never be re-bound — this filter used to skip it forever.
+            Transaction.type.in_(("expense", "income", "transfer")),
             Transaction.counter_account_id.is_(None),
         )
     )
@@ -975,12 +978,18 @@ async def detect_single_leg_iban(
 
     matched: list[dict] = []
     for tx in rows:
-        # Skip rows already flagged as sub-account moves.
+        # Skip sub-account moves, synthetic mirrors, and single-leg rows
+        # already resolved via counter_account_hint.
+        existing_dir: str | None = None
         if tx.metadata_json:
             try:
                 m = json.loads(tx.metadata_json)
-                if isinstance(m, dict) and m.get("subaccount"):
-                    continue
+                if isinstance(m, dict):
+                    if m.get("subaccount") or m.get("synthetic_counterleg") or m.get("counter_account_hint"):
+                        continue
+                    d = m.get("transfer_direction")
+                    if d in ("in", "out"):
+                        existing_dir = d
             except (json.JSONDecodeError, TypeError):
                 pass
         haystack = (
@@ -998,7 +1007,12 @@ async def detect_single_leg_iban(
         if hit_account is None:
             continue
 
-        direction = "out" if tx.type == "expense" else "in"
+        if tx.type == "transfer":
+            # Stranded transfer (pointer cleared) — keep its recorded
+            # direction; fall back to 'out' (most single-leg cases).
+            direction = existing_dir or "out"
+        else:
+            direction = "out" if tx.type == "expense" else "in"
         original_type = tx.type
         tx.type = "transfer"
         tx.counter_account_id = hit_account.id
