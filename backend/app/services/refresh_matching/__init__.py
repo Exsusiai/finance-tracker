@@ -350,10 +350,14 @@ async def step_subaccount_pairs(ctx: RefreshContext) -> None:
 
 
 async def step_single_leg_iban(ctx: RefreshContext) -> None:
+    """`detect_single_leg_iban` returns list[dict] (keys tx_id / occurred_at /
+    …), not ORM rows — the previous `tx_row.occurred_at` raised AttributeError
+    the moment the detector actually matched something. Same class of bug as
+    the tuple-unpacking crash fixed in `step_orphan_pair`."""
     single_leg = await detect_single_leg_iban(ctx.db)
     for tx_row in single_leg:
         ctx.summary["single_leg_iban"] += 1
-        ctx.track_period(tx_row.occurred_at)
+        ctx.track_period(tx_row.get("occurred_at"))
     await ctx.db.flush()
 
 

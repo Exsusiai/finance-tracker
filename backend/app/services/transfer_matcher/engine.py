@@ -1044,6 +1044,7 @@ async def detect_single_leg_iban(
                 tx.category_id = replacement.id if replacement is not None else default_cat_id
         matched.append({
             "tx_id": tx.id,
+            "occurred_at": tx.occurred_at,
             "counter_account_id": hit_account.id,
             "counter_account_name": hit_account.name,
             "direction": direction,

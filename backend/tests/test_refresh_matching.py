@@ -592,3 +592,32 @@ class TestAsymmetricPointerHealing:
         assert json.loads(left.metadata_json)["paired_with_tx_id"] == right.id
         assert json.loads(right.metadata_json)["paired_with_tx_id"] == left.id
         assert ctx.summary["orphan_pointers_cleared"] == 0
+
+
+async def test_step_single_leg_iban_handles_dict_rows(db: AsyncSession):
+    """Regression: detect_single_leg_iban returns dicts, not ORM rows.
+
+    `step_single_leg_iban` did `tx_row.occurred_at` → AttributeError as soon as
+    the detector matched anything (it silently never matched before, so the bug
+    stayed latent and took down the whole refresh-matching request with a 500).
+    """
+    from app.services.refresh_matching import RefreshContext, step_single_leg_iban
+
+    src = await _make_account(db, "IbanStepSrc")
+    dst = Account(
+        name="IbanStepDst", type="bank", currency="EUR",
+        initial_balance=Decimal("0"), is_active=True,
+        iban="DE11500105170000000001",
+        created_at=_utcnow(), updated_at=_utcnow(),
+    )
+    db.add(dst)
+    await db.flush()
+    tx = await _make_tx(db, src, "120", "expense", "2026-06-05T00:00:00Z")
+    tx.raw_description = "Wire | IBAN DE11500105170000000001"
+    await db.flush()
+
+    ctx = RefreshContext(db=db)
+    await step_single_leg_iban(ctx)  # must not raise
+
+    assert ctx.summary["single_leg_iban"] == 1
+    assert (2026, 6) in ctx.affected_periods, "period must be tracked from the dict"
