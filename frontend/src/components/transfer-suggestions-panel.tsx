@@ -10,6 +10,7 @@ import {
 import {
   ApiError,
   type CounterLegCandidate,
+  dismissTransferSuggestion,
   fetchCounterLegCandidates,
   markAsTransfer,
   type TransferSuggestion,
@@ -97,7 +98,8 @@ export function TransferSuggestionsPanel() {
               </span>
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              系统识别了双边但置信度不够（50–74 分）。逐对确认即可。
+              系统识别出的候选对：高置信（≥75）可直接确认，其余请核对后再决定。
+              不是同一笔转账就点「忽略」，之后不会再提示这对组合。
             </p>
           </div>
           <div className="space-y-2">
@@ -544,6 +546,19 @@ function SuggestionCard({ suggestion: s, outAccountName, inAccountName, onDone }
     }
   };
 
+  const handleDismiss = async () => {
+    setError(null);
+    try {
+      setSubmitting(true);
+      await dismissTransferSuggestion(s.out_transaction_id, s.in_transaction_id);
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "忽略失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3 mb-3">
@@ -553,19 +568,28 @@ function SuggestionCard({ suggestion: s, outAccountName, inAccountName, onDone }
           </span>
           <span className={cn(
             "text-[10px] px-2 py-0.5 rounded-full font-medium",
-            s.score >= 65 ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-                          : "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+            s.auto ? "bg-primary/10 text-primary"
+            : s.score >= 65 ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                            : "bg-amber-500/10 text-amber-600 dark:text-amber-400",
           )}>
-            置信度 {s.score}
+            {s.auto ? `高置信 ${s.score}` : `置信度 ${s.score}`}
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={handleDismiss}
+            disabled={submitting}
+            title="不是同一笔转账 — 永久忽略这对组合，不再提示"
+            className="text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            ✕ 忽略
+          </button>
           <button
             onClick={handleConfirm}
             disabled={submitting}
             className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
-            {submitting ? "确认中…" : "✓ 确认配对"}
+            {submitting ? "处理中…" : "✓ 确认配对"}
           </button>
         </div>
       </div>

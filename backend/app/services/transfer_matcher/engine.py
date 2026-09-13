@@ -137,11 +137,21 @@ def _is_eligible(tx: Transaction) -> bool:
     couldn't find a real candidate) are also skipped — they're placeholders,
     not real money movements; pairing them with newly-imported real legs
     would leave 1 real + 1 synthetic + 1 new real = 3 rows for one transfer.
+
+    User-confirmed non-transfer rows are also skipped (2026-09): once the
+    user explicitly settles a row as an expense/income (inbox confirm or a
+    manual category edit stamps categorization_method='user'), it must stop
+    surfacing as a transfer candidate — an amount-coincidence (e.g. a €0.12
+    purchase vs daily €0.12 savings interest) would otherwise resuggest it
+    forever. Rule/LLM-categorized rows stay eligible: auto-categorization is
+    a guess, and imported transfer legs routinely arrive as expense/income.
     """
     if tx.deleted_at is not None:
         return False
     if tx.type == "transfer" and tx.counter_account_id is not None:
         return False  # already paired
+    if tx.type != "transfer" and tx.categorization_method == "user":
+        return False  # user explicitly settled this as expense/income
     if tx.metadata_json:
         try:
             meta = json.loads(tx.metadata_json)
@@ -153,6 +163,24 @@ def _is_eligible(tx: Transaction) -> bool:
         except (json.JSONDecodeError, TypeError):
             pass
     return True
+
+
+def _dismissed_pair_ids(tx: Transaction) -> set[int]:
+    """Counterpart tx ids the user explicitly rejected for this row
+    (metadata_json.dismissed_pair_tx_ids, written by the suggestions
+    dismiss endpoint). A dismissed combo must never resurface."""
+    if not tx.metadata_json:
+        return set()
+    try:
+        meta = json.loads(tx.metadata_json)
+    except (json.JSONDecodeError, TypeError):
+        return set()
+    if not isinstance(meta, dict):
+        return set()
+    raw = meta.get("dismissed_pair_tx_ids")
+    if not isinstance(raw, list):
+        return set()
+    return {int(v) for v in raw if isinstance(v, (int, float, str)) and str(v).isdigit()}
 
 
 # ─── Public API ─────────────────────────────────────────────────────────
@@ -259,12 +287,18 @@ async def find_transfer_pairs(
 
     pairs: list[_Candidate] = []
     used_ids: set[int] = set()
+    # Precompute per-row dismissed counterpart sets (avoids re-parsing
+    # metadata JSON inside the O(out×in) loop).
+    dismissed: dict[int, set[int]] = {r.id: _dismissed_pair_ids(r) for r in rows}
 
     for out_tx in outflows:
         if out_tx.id in used_ids:
             continue
         for in_tx in inflows:
             if in_tx.id in used_ids:
+                continue
+            # User explicitly rejected this combo — never resuggest.
+            if in_tx.id in dismissed.get(out_tx.id, ()) or out_tx.id in dismissed.get(in_tx.id, ()):
                 continue
             # Self-pair guard. The fallback in the directionless branch above
             # injects the same row into BOTH outflows and inflows, so without

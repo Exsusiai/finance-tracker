@@ -740,10 +740,27 @@ export interface TransferSuggestion {
   in_description: string | null;
   score: number;
   reasons: string[];
+  /** score ≥ auto threshold — high-confidence tier the matcher would apply
+   *  itself at import/refresh; shown here when it emerged afterwards. */
+  auto?: boolean;
 }
 
 export async function fetchTransferSuggestions(): Promise<TransferSuggestion[]> {
   return request("/api/v1/transactions/transfers/suggestions");
+}
+
+/** Permanently reject a suggested pair — the matcher never resuggests it. */
+export async function dismissTransferSuggestion(
+  outTransactionId: number,
+  inTransactionId: number,
+): Promise<{ dismissed: boolean }> {
+  return request("/api/v1/transactions/transfers/suggestions/dismiss", {
+    method: "POST",
+    body: JSON.stringify({
+      out_transaction_id: outTransactionId,
+      in_transaction_id: inTransactionId,
+    }),
+  });
 }
 
 export interface UnpairedTransfer {

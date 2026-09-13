@@ -335,6 +335,13 @@ class MarkTransferIn(BaseModel):
     amount_tolerance: str | None = None
 
 
+class TransferSuggestionDismiss(BaseModel):
+    """Reject a suggested transfer pair so the matcher never resuggests it."""
+
+    out_transaction_id: int
+    in_transaction_id: int
+
+
 # ─── PDF Import ─────────────────────────────────────────────────────────────
 
 class ParsedPreviewTx(BaseModel):

@@ -26,6 +26,7 @@ from app.schemas import (
     TransactionOut,
     TransactionSplitIn,
     TransactionUpdate,
+    TransferSuggestionDismiss,
 )
 from app.services.cashflow import parse_period, recompute_for_periods, recompute_period
 
@@ -408,6 +409,11 @@ async def update_transaction(
 
     for key, value in update_data.items():
         setattr(tx, key, value)
+
+    # A manual category pick settles the row — stamp it so the transfer
+    # matcher stops proposing it as a pair candidate (see confirm_inbox_item).
+    if "category_id" in update_data and update_data["category_id"] is not None:
+        tx.categorization_method = "user"
 
     # When an edit flips a row into a transfer, it must carry a direction:
     # the balance view and the 未配对 panel both default a direction-less
@@ -1585,11 +1591,63 @@ async def get_transfer_suggestions(
             "in_description": c.b.description,
             "score": c.score,
             "reasons": c.reasons,
+            # ≥AUTO pairs are applied automatically at import / refresh-matching,
+            # but pairs that BECOME eligible afterwards (e.g. the user marks both
+            # legs as transfer post-import) would otherwise be invisible: hidden
+            # here AND never auto-applied. Show everything; flag the high-
+            # confidence tier so the UI can label it.
+            "auto": c.score >= SCORE_THRESHOLD_AUTO,
         }
         for c in candidates
-        if c.score < SCORE_THRESHOLD_AUTO
     ]
     return ApiSuccess(data=suggestions)
+
+
+@router.post("/transfers/suggestions/dismiss", response_model=ApiSuccess[dict])
+async def dismiss_transfer_suggestion(
+    body: TransferSuggestionDismiss,
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently reject a suggested pair (amount-coincidence noise).
+
+    Stamps both rows' metadata_json.dismissed_pair_tx_ids so the matcher
+    never resuggests this combo. Idempotent.
+    """
+    rows: list[Transaction] = []
+    for tid in (body.out_transaction_id, body.in_transaction_id):
+        tx = (await db.execute(
+            select(Transaction).where(
+                Transaction.id == tid, Transaction.deleted_at.is_(None)
+            )
+        )).scalar_one_or_none()
+        if tx is None:
+            raise NotFoundError("Transaction", tid)
+        rows.append(tx)
+
+    for tx, other in ((rows[0], rows[1]), (rows[1], rows[0])):
+        meta: dict = {}
+        if tx.metadata_json:
+            try:
+                parsed = json.loads(tx.metadata_json)
+                if isinstance(parsed, dict):
+                    meta = parsed
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        dismissed = meta.get("dismissed_pair_tx_ids")
+        if not isinstance(dismissed, list):
+            dismissed = []
+        if other.id not in dismissed:
+            dismissed.append(other.id)
+        meta["dismissed_pair_tx_ids"] = dismissed
+        tx.metadata_json = json.dumps(meta, ensure_ascii=False)
+        touch_updated_at(tx)
+    await db.flush()
+    return ApiSuccess(data={
+        "out_transaction_id": body.out_transaction_id,
+        "in_transaction_id": body.in_transaction_id,
+        "dismissed": True,
+    })
 
 
 @router.get("/{transaction_id}/similar-count", response_model=ApiSuccess[dict])
@@ -1727,6 +1785,10 @@ async def confirm_inbox_item(
         setattr(tx, key, value)
 
     tx.is_pending = False
+    # The user has explicitly settled this row. Stamp it so the transfer
+    # matcher stops proposing it as a pair candidate (amount-coincidence
+    # suggestions kept resurfacing after manual categorization — 2026-09).
+    tx.categorization_method = "user"
     touch_updated_at(tx)
     await db.flush()
 
