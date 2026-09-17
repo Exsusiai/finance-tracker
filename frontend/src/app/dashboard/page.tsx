@@ -8,6 +8,7 @@ import {
   useFxRates,
   useCashFlowTimeseries,
   usePortfolioValueHistory,
+  useAccounts,
 } from "@/lib/hooks";
 import {
   formatCurrency,
@@ -35,7 +36,8 @@ export default function DashboardPage() {
   // ─── Data fetching ───────────────────────────────────────────────────
   const { data: balances, error: balancesError, isLoading: balancesLoading, mutate: refreshBalances } = useBalances();
   const { data: breakdown, error: breakdownError, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
-  const { data: netWorth } = useNetWorth();
+  const { data: netWorth, error: netWorthError, isLoading: netWorthLoading, mutate: refreshNetWorth } = useNetWorth();
+  const { data: accounts } = useAccounts();
   const { data: fxRatesRaw } = useFxRates("CNY");
   const fxMap = useMemo(() => latestFxMap(fxRatesRaw), [fxRatesRaw]);
   // Book-keeping series are pinned to BASE_CURRENCY (no displayCurrency conversion).
@@ -87,16 +89,24 @@ export default function DashboardPage() {
   }, [cashSeries]);
 
   // ─── Derived: Total Assets by currency (raw, account own currency) ─────
+  // F23: /accounts/balances returns every non-deleted account regardless of
+  // include_in_total — join against /accounts (which carries that flag) so
+  // this strip only counts accounts the user opted into totals, matching
+  // the net_worth scope shown in the hero above it.
   const currencyTotals = useMemo(() => {
     if (!balances || balances.length === 0) return [];
     const map = new Map<string, number>();
     for (const b of balances) {
+      if (accounts) {
+        const acct = accounts.find((a) => a.id === b.account_id);
+        if (acct && !acct.include_in_total) continue;
+      }
       map.set(b.currency, (map.get(b.currency) || 0) + parseFloat(b.balance || "0"));
     }
     return Array.from(map.entries())
       .map(([currency, total]) => ({ currency, total }))
       .sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
-  }, [balances]);
+  }, [balances, accounts]);
 
   // ─── Derived: Asset-class allocation segments (display currency) ───────
   // Coarse by-class view (us_stock / crypto / fund / …) PLUS bank cash, with
@@ -133,14 +143,18 @@ export default function DashboardPage() {
   }, [breakdown, netWorth, toDisplay]);
 
   // ─── Error / Loading ──────────────────────────────────────────────────
-  const hasError = balancesError || breakdownError;
-  const hasLoading = balancesLoading || breakdownLoading;
-  const refreshAll = () => { refreshBalances(); refreshBreakdown(); };
+  // F23: net_worth used to be excluded from both hasError/hasLoading, so a
+  // slow or failed net-worth fetch rendered as a silent "0" (nw defaults to
+  // { v: 0, c: displayCurrency } when netWorth is undefined) instead of a
+  // skeleton or an error state.
+  const hasError = balancesError || breakdownError || netWorthError;
+  const hasLoading = balancesLoading || breakdownLoading || netWorthLoading;
+  const refreshAll = () => { refreshBalances(); refreshBreakdown(); refreshNetWorth(); };
 
   if (hasError) {
     return (
       <ErrorDisplay
-        message={balancesError?.message || breakdownError?.message || "加载失败"}
+        message={balancesError?.message || breakdownError?.message || netWorthError?.message || "加载失败"}
         onRetry={refreshAll}
       />
     );

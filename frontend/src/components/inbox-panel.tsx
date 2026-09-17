@@ -16,7 +16,7 @@ import {
 import { CategoryScopeDialog } from "@/components/category-scope-dialog";
 import { MarkTransferDialog } from "@/components/mark-transfer-dialog";
 import { cn, formatCurrency, formatDate } from "@/lib/utils";
-import { LoadingSpinner } from "@/components/ui-common";
+import { ErrorDisplay, LoadingSpinner } from "@/components/ui-common";
 import { LlmQueueIndicator } from "@/components/llm-queue-indicator";
 
 /**
@@ -30,7 +30,7 @@ import { LlmQueueIndicator } from "@/components/llm-queue-indicator";
  *   - Skip (leave it pending; it stays in the inbox)
  */
 export function InboxPanel() {
-  const { data: items, isLoading, mutate: refreshInbox } = useInbox(200);
+  const { data: items, error: inboxError, isLoading, mutate: refreshInbox } = useInbox(200);
   const { data: categories } = useCategories();
   const [transferTx, setTransferTx] = useState<TransactionOut | null>(null);
   const [aiSubmitting, setAiSubmitting] = useState(false);
@@ -79,6 +79,12 @@ export function InboxPanel() {
   // Initial-load only. Background revalidation keeps the existing list
   // on screen so the user doesn't lose scroll position after confirming.
   if (isLoading && !items) return <LoadingSpinner />;
+  // F23: a failed fetch used to fall through to the `!items` branch below,
+  // which renders "收件箱已清空" — indistinguishable from an actually-empty
+  // inbox. Surface the error instead of lying about the state.
+  if (inboxError && !items) {
+    return <ErrorDisplay message="加载待确认交易失败" onRetry={refreshInbox} />;
+  }
   if (!items || items.length === 0) {
     return (
       <div>

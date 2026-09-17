@@ -87,7 +87,14 @@ async def list_holdings(
     from sqlalchemy.orm import selectinload
     stmt = (
         select(AssetHolding)
+        .join(Account, Account.id == AssetHolding.account_id)
         .options(selectinload(AssetHolding.account), selectinload(AssetHolding.asset))
+        # V9-F19: soft-deleted accounts are gone from /accounts (and from the
+        # UI entirely), so their holdings shouldn't linger as orphans in the
+        # holdings list. include_in_total=False / is_active=False holdings
+        # are intentionally still listed here (only excluded from the
+        # aggregated summary/breakdown below).
+        .where(Account.deleted_at.is_(None))
         .order_by(AssetHolding.id)
     )
     if account_id is not None:
@@ -275,6 +282,13 @@ async def portfolio_summary(
     by_currency: dict[str, dict[str, Decimal]] = {}
     fx_missing: list[dict[str, str]] = []
     total = Decimal("0")
+    # V9-F19: each holding's unrealized_pnl is denominated in its own quote
+    # currency (mirrors `_holding_to_out`'s rule: only computed when
+    # avg_cost's cost_currency matches the price's quote currency). Convert
+    # each one to base_currency individually before summing — raw numbers
+    # across currencies (e.g. 100 EUR + 100 USD) are not addable.
+    unrealized_pnl_base = Decimal("0")
+    pnl_unconvertible_count = 0
 
     for holding, asset in rows:
         # Get latest price
@@ -307,11 +321,28 @@ async def portfolio_summary(
                 "quote_currency": latest.currency,
                 "original_value": str(original_value),
             })
+            # pnl shares the same quote currency as market_value, so if the
+            # value itself has no FX path, any pnl this holding has is
+            # equally unconvertible — count it rather than silently
+            # dropping it (same rule as fx_missing above).
+            if holding.avg_cost is not None and latest.currency == holding.cost_currency:
+                pnl_unconvertible_count += 1
             continue
 
         bucket["base_value"] += converted
         total += converted
         by_class[asset.asset_class] = by_class.get(asset.asset_class, Decimal("0")) + converted
+
+        if holding.avg_cost is not None and latest.currency == holding.cost_currency:
+            pnl = original_value - (holding.quantity * holding.avg_cost)
+            if latest.currency == base_currency:
+                pnl_converted = pnl
+            else:
+                pnl_converted = await _convert_to_base(db, pnl, latest.currency, base_currency)
+            if pnl_converted is None:
+                pnl_unconvertible_count += 1
+            else:
+                unrealized_pnl_base += pnl_converted
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return ApiSuccess(data=PortfolioSummary(
@@ -324,6 +355,8 @@ async def portfolio_summary(
             for k, v in by_currency.items()
         },
         fx_missing=fx_missing,
+        unrealized_pnl_base=str(unrealized_pnl_base),
+        pnl_unconvertible_count=pnl_unconvertible_count,
     ))
 
 
@@ -412,16 +445,8 @@ async def portfolio_breakdown(
 
 # FX conversion now lives in services/valuation/fx.py so the holdings
 # endpoints and the account-balance aggregation share one implementation.
-# These thin wrappers preserve the original names/signatures used by tests
+# This thin wrapper preserves the original name/signature used by tests
 # (test_usdt_alias.py) and the call sites above.
-async def _latest_fx_rate(
-    db: AsyncSession, base: str, quote: str
-) -> Decimal | None:
-    from app.services.valuation.fx import latest_fx_rate
-
-    return await latest_fx_rate(db, base, quote)
-
-
 async def _convert_to_base(
     db: AsyncSession,
     amount: Decimal,

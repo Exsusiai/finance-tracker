@@ -481,7 +481,7 @@ export function AccountForm({
 
           {isEdit && (
             <p className="text-xs text-muted-foreground">
-              币种与初始余额创建后不可修改。如需调整当前余额，请在投资组合页使用"调整余额"。
+              币种与初始余额创建后不可修改。如需调整当前余额，请在投资组合页使用「调整余额」。
             </p>
           )}
 

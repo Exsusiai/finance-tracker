@@ -1,7 +1,6 @@
 "use client";
 
 import useSWR, { mutate as globalMutate } from "swr";
-import useSWRInfinite from "swr/infinite";
 
 // 2026-05-06: cross-page SWR invalidation. Whenever a write operation
 // mutates the transaction graph (PDF upload, inbox confirm, mark-transfer,
@@ -19,6 +18,7 @@ const _TX_GRAPH_KEY_PREFIXES = [
   "cashflow",           // useCashFlowMonthly / by-category / timeseries
   "transfer-suggestions",
   "transfer-unpaired",
+  "recently-promoted",  // useRecentlyPromoted()
   "accounts",           // re-balanced after delete / status changes
 ];
 const _TX_GRAPH_EXACT_KEYS = new Set([
@@ -66,13 +66,9 @@ import {
   fetchInbox,
   fetchTransferSuggestions,
   fetchUnpairedTransfers,
+  fetchRecentlyPromoted,
 } from "@/lib/api";
-import type { TransactionFilters, TransactionOut } from "@/lib/api";
-
-// Generic fetcher for SWR
-async function swrFetcher<T>(fn: () => Promise<T>): Promise<T> {
-  return fn();
-}
+import type { TransactionFilters } from "@/lib/api";
 
 export function useCashFlowMonthly(from?: string, to?: string) {
   return useSWR(
@@ -217,6 +213,16 @@ export function useUnpairedTransfers() {
   return useSWR(
     "transfer-unpaired",
     () => fetchUnpairedTransfers(),
+    { revalidateOnFocus: false },
+  );
+}
+
+// V9 batch5: audit entry for rows auto-flipped expense/income → transfer by
+// `refresh-matching`, so a false-positive promotion can be spotted & undone.
+export function useRecentlyPromoted() {
+  return useSWR(
+    "recently-promoted",
+    () => fetchRecentlyPromoted(),
     { revalidateOnFocus: false },
   );
 }

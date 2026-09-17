@@ -47,15 +47,6 @@ const TYPE_OPTIONS = [
   { value: "transfer", label: "转账" },
 ];
 
-const ACCOUNT_TYPE_LABELS: Record<string, string> = {
-  bank: "银行",
-  credit_card: "信用卡",
-  brokerage: "券商",
-  crypto_wallet: "加密钱包",
-  cash: "现金",
-  other: "其他",
-};
-
 export default function TransactionsPage() {
   // ─── Filter state ─────────────────────────────────────────────────────
   const [search, setSearch] = useState("");
@@ -119,7 +110,7 @@ export default function TransactionsPage() {
   // ─── Derived data ─────────────────────────────────────────────────────
   const transactions = useMemo(() => {
     if (!txResponse?.data) return [];
-    let items = [...txResponse.data];
+    const items = [...txResponse.data];
     items.sort((a, b) => {
       let cmp = 0;
       switch (sortField) {

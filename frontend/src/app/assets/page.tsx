@@ -121,7 +121,7 @@ export default function AssetsPage() {
     if (typeof window !== "undefined") window.localStorage.setItem("display_currency", c);
   };
 
-  const { data: summary, mutate: refreshSummary } = usePortfolioSummary();
+  const { data: summary, isLoading: summaryLoading, mutate: refreshSummary } = usePortfolioSummary();
   const { data: netWorth, isLoading: netWorthLoading, mutate: refreshNetWorth } = useNetWorth();
   const { data: holdings, error: holdingsError, isLoading: holdingsLoading, mutate: refreshHoldings } = useHoldings();
   const { data: breakdown, isLoading: breakdownLoading, mutate: refreshBreakdown } = usePortfolioBreakdown();
@@ -169,13 +169,13 @@ export default function AssetsPage() {
     refreshByPrefix("transactions");
   };
 
-  const totalUnrealizedPnl = useMemo(() => {
-    if (!holdings) return 0;
-    return holdings.reduce((sum, h) => {
-      const v = parseFloat(h.unrealized_pnl ?? "");
-      return sum + (isNaN(v) ? 0 : v);
-    }, 0);
-  }, [holdings]);
+  // V9-F19: each holding's unrealized_pnl is denominated in its own quote
+  // currency (EUR/USD/USDT/…) — summing the raw strings would silently mix
+  // currencies (100 EUR profit + 100 USD profit != 200 of anything). The
+  // backend now converts each holding's pnl to base_currency before summing;
+  // use that instead of reducing over `holdings` locally.
+  const totalUnrealizedPnl = summary ? parseFloat(summary.unrealized_pnl_base) || 0 : 0;
+  const pnlUnconvertibleCount = summary?.pnl_unconvertible_count ?? 0;
 
   const baseCurrency = netWorth?.base_currency ?? summary?.base_currency ?? "CNY";
 
@@ -294,8 +294,6 @@ export default function AssetsPage() {
     setShowForm(true);
   }
 
-  const hasAccounts = (accounts?.length ?? 0) > 0;
-
   return (
     <div className="min-h-screen bg-background text-foreground pb-16 md:pb-0">
       <div className="mx-auto max-w-7xl px-4 py-6 md:px-6 lg:px-8">
@@ -404,11 +402,18 @@ export default function AssetsPage() {
                 <StatTile
                   className="sm:col-span-2 lg:col-span-2"
                   label="未实现盈亏"
-                  loading={holdingsLoading}
+                  loading={summaryLoading}
                   value={`${pnl.value >= 0 ? "+" : ""}${formatCurrency(pnl.value, pnl.currency)}`}
                   valueClassName={cn(
                     totalUnrealizedPnl > 0 ? "text-gain" : totalUnrealizedPnl < 0 ? "text-loss" : "text-foreground",
                   )}
+                  hint={
+                    pnlUnconvertibleCount > 0 ? (
+                      <span className="text-warning">
+                        ⚠ {pnlUnconvertibleCount} 项持仓缺少汇率，未计入
+                      </span>
+                    ) : undefined
+                  }
                 />
               </>
             );

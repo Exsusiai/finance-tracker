@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   invalidateTransactionGraph,
   useAccounts,
+  useRecentlyPromoted,
   useTransferSuggestions,
   useUnpairedTransfers,
 } from "@/lib/hooks";
@@ -13,6 +14,8 @@ import {
   dismissTransferSuggestion,
   fetchCounterLegCandidates,
   markAsTransfer,
+  type PromotedTransaction,
+  revertTypePromotion,
   type TransferSuggestion,
   type UnpairedTransfer,
 } from "@/lib/api";
@@ -34,6 +37,7 @@ export function TransferSuggestionsPanel() {
   const { data: suggestions, isLoading: loadingSugs } = useTransferSuggestions();
   const { data: unpaired, isLoading: loadingUnpaired } = useUnpairedTransfers();
   const { data: accounts } = useAccounts(false);
+  const { data: recentlyPromoted, mutate: refreshRecentlyPromoted } = useRecentlyPromoted();
 
   const accountName = (id: number) => accounts?.find((a) => a.id === id)?.name ?? `#${id}`;
 
@@ -47,14 +51,26 @@ export function TransferSuggestionsPanel() {
 
   const hasSuggestions = (suggestions?.length ?? 0) > 0;
   const hasUnpaired = (unpaired?.length ?? 0) > 0;
+  const hasRecentlyPromoted = (recentlyPromoted?.length ?? 0) > 0;
 
   if (!hasSuggestions && !hasUnpaired) {
     return (
-      <div className="rounded-xl border border-border bg-card p-12 text-center">
-        <p className="text-base font-medium mb-1">所有转账都已配对</p>
-        <p className="text-sm text-muted-foreground">
-          没有未配对的转账，也没有待确认的候选对。
-        </p>
+      <div className="space-y-6">
+        <div className="rounded-xl border border-border bg-card p-12 text-center">
+          <p className="text-base font-medium mb-1">所有转账都已配对</p>
+          <p className="text-sm text-muted-foreground">
+            没有未配对的转账，也没有待确认的候选对。
+          </p>
+        </div>
+        {hasRecentlyPromoted && (
+          <RecentlyPromotedSection
+            items={recentlyPromoted!}
+            onDone={() => {
+              refreshRecentlyPromoted();
+              refreshAll();
+            }}
+          />
+        )}
       </div>
     );
   }
@@ -115,6 +131,106 @@ export function TransferSuggestionsPanel() {
           </div>
         </section>
       )}
+
+      {hasRecentlyPromoted && (
+        <RecentlyPromotedSection
+          items={recentlyPromoted!}
+          onDone={() => {
+            refreshRecentlyPromoted();
+            refreshAll();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Audit: recently auto-promoted to transfer ────────────────────────
+
+interface RecentlyPromotedSectionProps {
+  items: PromotedTransaction[];
+  onDone: () => void;
+}
+
+/** Collapsed-by-default audit trail: rows `refresh-matching` auto-flipped
+ * from expense/income to transfer. Lets the user spot false positives
+ * (e.g. a real expense whose description happened to contain a sub-account
+ * name) and undo them via the existing `revert-type-promotion` endpoint,
+ * which also unbinds any counter-leg the promotion created. */
+function RecentlyPromotedSection({ items, onDone }: RecentlyPromotedSectionProps) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 text-sm font-semibold text-foreground"
+      >
+        <span className={cn("transition-transform", open && "rotate-90")}>▸</span>
+        最近自动改为转账
+        <span className="text-xs font-normal text-muted-foreground">
+          {items.length} 笔
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-muted-foreground">
+            这些交易被「刷新自动配对」从支出/收入自动改判为转账。如果误判（比如描述里恰好含子账户名的真实支出），点「撤销」还原原类型。
+          </p>
+          {items.map((p) => (
+            <RecentlyPromotedRow key={p.transaction_id} item={p} onDone={onDone} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RecentlyPromotedRow({ item, onDone }: { item: PromotedTransaction; onDone: () => void }) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleRevert = async () => {
+    setError(null);
+    try {
+      setSubmitting(true);
+      await revertTypePromotion(item.transaction_id);
+      onDone();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "撤销失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-2.5 flex items-center gap-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap text-xs">
+          <span className="font-medium tabular-nums">
+            {formatCurrency(parseFloat(item.amount), item.currency)}
+          </span>
+          <span className="text-muted-foreground">{formatDate(item.occurred_at)}</span>
+          <span className="text-muted-foreground">{item.account_name ?? `#${item.account_id}`}</span>
+          {item.original_type && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+              {item.original_type} → {item.current_type}
+            </span>
+          )}
+        </div>
+        <div className="mt-0.5 text-xs text-foreground truncate" title={item.description ?? ""}>
+          {item.description || "—"}
+        </div>
+        {error && <p className="mt-1 text-[11px] text-destructive">{error}</p>}
+      </div>
+      <button
+        onClick={handleRevert}
+        disabled={submitting}
+        className="shrink-0 text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+      >
+        {submitting ? "撤销中…" : "撤销"}
+      </button>
     </div>
   );
 }

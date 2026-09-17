@@ -106,6 +106,13 @@ export interface PortfolioSummary {
   as_of: string;
   by_class: Record<string, string>;
   by_currency: Record<string, string>;
+  /** V9-F19: portfolio-level unrealized P&L, already converted to base_currency
+   *  per-holding and summed (raw per-holding pnl values are in mixed
+   *  currencies and must never be added directly). */
+  unrealized_pnl_base: string;
+  /** Holdings whose pnl currency had no FX path to base_currency — excluded
+   *  from unrealized_pnl_base rather than silently dropped. */
+  pnl_unconvertible_count: number;
 }
 
 export interface PortfolioBreakdown {

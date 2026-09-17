@@ -415,7 +415,13 @@ async def test_mcp_import_failure_rolls_back_inserted_rows(tmp_path, monkeypatch
         s.add(a)
         s.commit()
         aid = a.id
-    monkeypatch.setattr(server, "_DB_PATH", path)
+    # V9-R1 harness adaptation (assertions unchanged): MCP write tools now go
+    # through the backend's async session factory instead of a private sync
+    # sqlite3 connection, so the fault-injection DB is wired via that factory.
+    import app.db as app_db
+    from sqlalchemy.ext.asyncio import async_sessionmaker as _asm, create_async_engine as _cae
+    async_engine = _cae(f"sqlite+aiosqlite:///{path}")
+    monkeypatch.setattr(app_db, "async_session_factory", _asm(async_engine, expire_on_commit=False))
     monkeypatch.setattr(server, "settings", SimpleNamespace(pdf_storage_dir=tmp_path / "pdfs", base_currency="EUR"))
     async def parsed(*args, **kwargs):
         # Fault injection: the second parsed row fails a real database constraint.

@@ -192,8 +192,3 @@ function mergeSubaccountNames(
   cur.subaccount_names = names;
   return JSON.stringify(cur);
 }
-
-function arrayEqual(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((v, i) => v === b[i]);
-}

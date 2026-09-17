@@ -14,14 +14,71 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3100}"
+ENV_FILE="$ROOT/.env"
 
 cd "$ROOT"
 
-echo "[start] backend → tmux ft-backend on :${BACKEND_PORT}"
+# --- Resolve BACKEND_HOST / AUTH_DISABLED from the project-root .env -------
+# The backend's startup guard (app/main.py) refuses to boot when
+# AUTH_DISABLED=true and Settings.backend_host is non-loopback — but Settings
+# reads BACKEND_HOST from this same .env, independently of what host uvicorn
+# is actually told to bind to. Previously this script hardcoded
+# `--host 0.0.0.0`, so an .env with BACKEND_HOST=127.0.0.1 (guard sees
+# loopback → passes) + AUTH_DISABLED=true would still end up bound to
+# 0.0.0.0 in reality — unauthenticated exposure on the LAN. Reading the same
+# value here (and exporting it into the uvicorn process env below) keeps the
+# guard's view and the actual bind in sync.
+_env_var() {
+  local key="$1"
+  [ -f "$ENV_FILE" ] || return 0
+  # `grep` exits 1 when the key is simply absent — a normal, expected outcome
+  # here (not an error) — so it's wrapped in `{ ... || true; }` to keep that
+  # from tripping `pipefail` under `set -e` and aborting the whole script
+  # before the guard even runs.
+  { grep -E "^[[:space:]]*${key}[[:space:]]*=" "$ENV_FILE" 2>/dev/null || true; } \
+    | tail -n1 \
+    | sed -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//" \
+    | sed -E 's/[[:space:]]*(#.*)?$//' \
+    | sed -E 's/^"//; s/"$//' \
+    | sed -E "s/^'//; s/'\$//"
+}
+
+# pydantic's bool parsing (used by Settings.auth_disabled) accepts these
+# values case-insensitively as true; mirror it here.
+_is_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|t|y) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Shell env override (if the caller already exported BACKEND_HOST) wins,
+# same precedence pattern as BACKEND_PORT/FRONTEND_PORT above; otherwise read
+# .env; otherwise fall back to 0.0.0.0 (preserves this script's prior
+# hardcoded behaviour — cortana-box's deployed .env sets AUTH_DISABLED=false
+# for exactly this reason).
+BACKEND_HOST="${BACKEND_HOST:-$(_env_var BACKEND_HOST)}"
+BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
+AUTH_DISABLED_VAL="${AUTH_DISABLED:-$(_env_var AUTH_DISABLED)}"
+
+if _is_truthy "$AUTH_DISABLED_VAL"; then
+  case "$BACKEND_HOST" in
+    127.0.0.1|::1|localhost) : ;;
+    *)
+      echo "[start] ERROR: AUTH_DISABLED=true (.env) but BACKEND_HOST='${BACKEND_HOST}' is not loopback." >&2
+      echo "[start]        Starting would bind an unauthenticated API to a non-loopback interface." >&2
+      echo "[start]        Fix: set AUTH_DISABLED=false in .env (and configure FINANCE_TRACKER_API_TOKEN)," >&2
+      echo "[start]        or set BACKEND_HOST to 127.0.0.1 / ::1 / localhost." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+echo "[start] backend → tmux ft-backend on ${BACKEND_HOST}:${BACKEND_PORT}"
 tmux kill-session -t ft-backend 2>/dev/null || true
 sleep 1
 tmux new-session -d -s ft-backend \
-  "cd '$ROOT' && .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${BACKEND_PORT} 2>&1 | tee /tmp/ft-backend.log"
+  "cd '$ROOT' && BACKEND_HOST='${BACKEND_HOST}' .venv/bin/python -m uvicorn app.main:app --host '${BACKEND_HOST}' --port ${BACKEND_PORT} 2>&1 | tee /tmp/ft-backend.log"
 
 echo "[start] frontend → tmux ft-frontend on :${FRONTEND_PORT}"
 tmux kill-session -t ft-frontend 2>/dev/null || true

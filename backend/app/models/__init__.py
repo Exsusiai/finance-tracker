@@ -28,10 +28,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.session import Base
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _utcnow_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

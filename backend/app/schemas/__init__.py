@@ -513,6 +513,13 @@ class PortfolioSummary(BaseModel):
     by_currency: dict[str, dict[str, str]] = {}
     # Holdings excluded from totals because no FX path resolved.
     fx_missing: list[dict[str, str]] = []
+    # V9-F19: portfolio-level unrealized P&L, base-currency-converted per
+    # holding (each holding's pnl is in its own quote currency — summing raw
+    # numbers across currencies is meaningless). Holdings whose pnl currency
+    # has no FX path are excluded from the sum and counted here instead of
+    # being silently dropped.
+    unrealized_pnl_base: str = "0"
+    pnl_unconvertible_count: int = 0
 
 
 class PortfolioBreakdown(BaseModel):

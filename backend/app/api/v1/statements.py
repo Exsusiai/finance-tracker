@@ -115,19 +115,10 @@ def _parsed_preview_from_result(result: dict) -> list[ParsedPreviewTx]:
 
 
 async def _load_subaccount_names(db: AsyncSession, account_id: int | None) -> list[str]:
-    if not account_id:
-        return []
-    from app.models import Account
+    # V9-R1: single implementation lives in services.statement_import.
+    from app.services.statement_import import load_subaccount_names
 
-    acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
-    if not (acct and acct.metadata_json):
-        return []
-    try:
-        meta = json.loads(acct.metadata_json)
-        raw = meta.get("subaccount_names") if isinstance(meta, dict) else None
-        return [str(n) for n in raw if str(n).strip()] if isinstance(raw, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
+    return await load_subaccount_names(db, account_id)
 
 
 async def _resolve_candidate_account(
@@ -168,53 +159,12 @@ async def _resolve_candidate_account(
 async def _insert_and_ingest(
     db: AsyncSession, pdf_import: PdfImport, result: dict, account_id: int
 ) -> None:
-    """Create Transaction rows from parser output + run the ingestion pipeline.
+    """V9-R1: thin delegate — the shared implementation (currency guard +
+    ingestion pipeline) lives in services.statement_import so REST and MCP
+    can never drift apart again."""
+    from app.services.statement_import import insert_parsed_transactions
 
-    Shared by commit / assign-account / reparse so the insert path stays
-    identical (amount normalize → categorize → transfer-match → recompute)."""
-    # V9-F04: parsed rows must match the target account's currency — the
-    # balance view sums raw amounts in the account's unit, so importing a
-    # USD statement into a EUR account silently mixes units. Reject the
-    # whole commit atomically; the user picks the right account instead.
-    target_currency = (await db.execute(
-        select(Account.currency).where(Account.id == account_id)
-    )).scalar_one_or_none()
-    if target_currency:
-        mismatched = sorted({
-            (t.get("currency") or "").upper()
-            for t in result.get("transactions", [])
-            if t.get("currency") and t["currency"].upper() != target_currency.upper()
-        })
-        if mismatched:
-            raise InvalidInputError(
-                f"账单币种 {', '.join(mismatched)} 与目标账户币种 {target_currency} 不一致，"
-                "已取消导入。请选择对应币种的账户。",
-                details={"account_currency": target_currency, "statement_currencies": mismatched},
-            )
-
-    new_txs: list[Transaction] = []
-    for tx_data in result.get("transactions", []):
-        tx = Transaction(
-            account_id=account_id,
-            occurred_at=tx_data.get("occurred_at", ""),
-            amount=Decimal(str(tx_data.get("amount", 0))),
-            currency=tx_data.get("currency", "CNY"),
-            type=tx_data.get("type", "expense"),
-            description=tx_data.get("description"),
-            raw_description=tx_data.get("raw_description"),
-            counterparty=tx_data.get("counterparty"),
-            source="pdf_import",
-            pdf_import_id=pdf_import.id,
-            external_id=tx_data.get("external_id"),
-            metadata_json=tx_data.get("metadata_json"),
-            is_pending=True,
-        )
-        db.add(tx)
-        new_txs.append(tx)
-    if new_txs:
-        from app.services.ingestion import ingest_transactions
-
-        await ingest_transactions(db, new_txs, auto_pair=True)
+    await insert_parsed_transactions(db, pdf_import, result, account_id)
 
 
 async def _reconcile_commit(

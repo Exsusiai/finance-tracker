@@ -70,3 +70,4 @@ logs/
 
 # Local self-improvement notes (per-machine)
 .learnings/
+:memory:*

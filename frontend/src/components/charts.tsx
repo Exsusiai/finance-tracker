@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useRef } from "react";
 import {
   AreaChart,
   Area,
@@ -19,18 +19,37 @@ import {
   Legend,
   Brush,
 } from "recharts";
-import { formatCurrency, formatPercent, periodLabel, ASSET_CLASS_LABELS } from "@/lib/utils";
+import { formatCurrency, periodLabel, ASSET_CLASS_LABELS } from "@/lib/utils";
 import type { TimeRange } from "@/lib/time-range";
 
 // ─── Shared Tooltip ────────────────────────────────────────────────────
 
-function ChartTooltip({ active, payload, label, valuePrefix = "", valueSuffix = "" }: any) {
+// Minimal shape of what recharts passes to custom tooltip renderers. The
+// library's own generics are awkward for custom content components, so we
+// type just the fields we read.
+interface TooltipEntry {
+  name?: string;
+  value?: number | string;
+  color?: string;
+  stroke?: string;
+  payload?: { fill?: string; percent?: number };
+}
+interface TooltipProps {
+  active?: boolean;
+  payload?: TooltipEntry[];
+  label?: string;
+  valuePrefix?: string;
+  valueSuffix?: string;
+  currency?: string;
+}
+
+function ChartTooltip({ active, payload, label, valuePrefix = "", valueSuffix = "" }: TooltipProps) {
   if (!active || !payload?.length) return null;
 
   return (
     <div className="rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-sm">
       <p className="text-muted-foreground mb-1">{label}</p>
-      {payload.map((entry: any, i: number) => (
+      {payload.map((entry: TooltipEntry, i: number) => (
         <div key={i} className="flex items-center gap-2">
           <span
             className="inline-block h-2.5 w-2.5 rounded-full"
@@ -38,7 +57,7 @@ function ChartTooltip({ active, payload, label, valuePrefix = "", valueSuffix = 
           />
           <span className="text-muted-foreground">{entry.name}:</span>
           <span className="font-medium text-foreground">
-            {valuePrefix}{formatNumber(entry.value)}{valueSuffix}
+            {valuePrefix}{formatNumber(Number(entry.value ?? 0))}{valueSuffix}
           </span>
         </div>
       ))}
@@ -52,17 +71,17 @@ function formatNumber(v: number): string {
   return v.toFixed(2);
 }
 
-function PieTooltip({ active, payload }: any) {
+function PieTooltip({ active, payload }: TooltipProps) {
   if (!active || !payload?.length) return null;
   const d = payload[0];
   return (
     <div className="rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-sm">
       <div className="flex items-center gap-2 mb-1">
-        <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: d.payload.fill }} />
+        <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: d.payload?.fill }} />
         <span className="font-medium text-foreground">{d.name}</span>
       </div>
       <p className="text-muted-foreground">
-        {formatCurrency(d.value)} ({d.payload.percent?.toFixed(1) ?? "0"}%)
+        {formatCurrency(Number(d.value ?? 0))} ({d.payload?.percent?.toFixed(1) ?? "0"}%)
       </p>
     </div>
   );
@@ -412,12 +431,12 @@ export function PortfolioValueChart({ points, currency }: PortfolioValueChartPro
 
 // ─── Money-aware tooltip (currency-formatted) ───────────────────────────
 
-function MoneyTooltip({ active, payload, label, currency }: any) {
+function MoneyTooltip({ active, payload, label, currency }: TooltipProps) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-sm">
       <p className="text-muted-foreground mb-1">{label}</p>
-      {payload.map((entry: any, i: number) => (
+      {payload.map((entry: TooltipEntry, i: number) => (
         <div key={i} className="flex items-center gap-2">
           <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: entry.color || entry.stroke }} />
           <span className="text-muted-foreground">{entry.name}:</span>
@@ -562,8 +581,7 @@ export function exportChartAsPng(chartId: string, filename: string) {
     
     canvas.toBlob((blob) => {
       if (blob) {
-        const { downloadBlob } = require("@/lib/api");
-        downloadBlob(blob, filename);
+        import("@/lib/api").then(({ downloadBlob }) => downloadBlob(blob, filename));
       }
     }, "image/png");
     URL.revokeObjectURL(url);

@@ -123,18 +123,6 @@ async def parse_pdf_statement(
         _reset_subaccount_names(_names_token)
 
 
-def _extract_text_sync(content: bytes) -> str:
-    """Synchronous helper: extract concatenated page text from a PDF."""
-    import pdfplumber
-    out = ""
-    with pdfplumber.open(io.BytesIO(content)) as pdf:
-        for page in pdf.pages:
-            t = page.extract_text()
-            if t:
-                out += t + "\n"
-    return out
-
-
 def _extract_text_and_words_sync(content: bytes) -> tuple[str, list[list[dict]]]:
     """Extract concatenated text PLUS per-page word lists with x/y coords.
 
@@ -345,10 +333,6 @@ def _set_subaccount_names(names: list[str]) -> _ctxvars.Token:
 def _reset_subaccount_names(token: _ctxvars.Token) -> None:
     _SUBACCOUNT_NAMES_VAR.reset(token)
 
-
-# Backward-compatible empty list for any external reader that imported the
-# old name. Reading this no longer reflects per-task state.
-_SUBACCOUNT_USER_NAMES: list[str] = []
 
 # Cross-bank transfer cues (description-level). When matched we mark the row as
 # a transfer right away, even before the matcher pairs it with a counterparty
