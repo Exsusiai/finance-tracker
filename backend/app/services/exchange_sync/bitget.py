@@ -20,8 +20,16 @@ The sum is ``available + locked`` (and ``frozen`` for spot) per coin — i.e. th
 coin physically in the wallet. ``equity`` (= balance + unrealizedPL) is
 intentionally NOT used, so the total doesn't flicker with open-position PnL.
 
-Per-endpoint failures (rate-limit / 5xx) skip that endpoint but don't kill the
-rest — a Bitget mix-endpoint outage shouldn't drop the user's spot balances.
+F06 fix (2026-09): every endpoint above is load-bearing. A per-endpoint
+failure (rate-limit / 5xx) used to be swallowed and the *remaining* totals
+returned as if they were the complete balance — the caller (wallet_sync
+orchestrator) then persisted that partial snapshot via
+``apply_balance_snapshot()``, which zeroes out any coin absent from a
+"complete" round. So a transient mix-endpoint outage silently erased the
+user's futures balances (and a funding-wallet outage erased UTA
+funding-only coins). Now any endpoint failure propagates as an exception
+so the orchestrator skips the snapshot replacement entirely and keeps
+whatever was synced last.
 """
 
 from __future__ import annotations
@@ -79,62 +87,55 @@ class BitgetProvider:
             totals: dict[str, Decimal] = {}
 
             # ─── Spot (also probes for Unified Account mode) ──────────
-            try:
-                spot_body = await self._get_raw(
-                    http, _SPOT_PATH, query="",
-                    api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+            # F06: no longer catches httpx.HTTPError — a spot failure
+            # must abort the whole fetch (see module docstring), not
+            # fall through to a futures-only "complete" result.
+            spot_body = await self._get_raw(
+                http, _SPOT_PATH, query="",
+                api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+            )
+            spot_code = str(spot_body.get("code", "00000"))
+            if spot_code == _UNIFIED_ACCOUNT_CODE:
+                # Unified Account: classic endpoints are dead — switch to v3.
+                return await self._fetch_unified(
+                    http, api_key=api_key, api_secret=api_secret, passphrase=passphrase,
                 )
-                spot_code = str(spot_body.get("code", "00000"))
-                if spot_code == _UNIFIED_ACCOUNT_CODE:
-                    # Unified Account: classic endpoints are dead — switch to v3.
-                    return await self._fetch_unified(
-                        http, api_key=api_key, api_secret=api_secret, passphrase=passphrase,
-                    )
-                if spot_code != "00000":
-                    raise ExchangeAuthError(
-                        f"Bitget error {spot_code}: {spot_body.get('msg') or 'unknown'}"
-                    )
-                for row in spot_body.get("data") or []:
-                    coin = row.get("coin")
-                    if not coin:
-                        continue
-                    qty = (
-                        _dec(row.get("available"))
-                        + _dec(row.get("frozen"))
-                        + _dec(row.get("locked"))
-                    )
-                    if qty > 0:
-                        totals[coin] = totals.get(coin, Decimal(0)) + qty
-            except ExchangeAuthError:
-                # Auth fails here → can't trust anything that follows; bail.
-                raise
-            except httpx.HTTPError as exc:
-                log.warning("bitget_spot_failed", error=str(exc))
-                # Continue with futures — spot may be temporarily 5xx.
+            if spot_code != "00000":
+                raise ExchangeAuthError(
+                    f"Bitget error {spot_code}: {spot_body.get('msg') or 'unknown'}"
+                )
+            for row in spot_body.get("data") or []:
+                coin = row.get("coin")
+                if not coin:
+                    continue
+                qty = (
+                    _dec(row.get("available"))
+                    + _dec(row.get("frozen"))
+                    + _dec(row.get("locked"))
+                )
+                if qty > 0:
+                    totals[coin] = totals.get(coin, Decimal(0)) + qty
 
             # ─── Futures (3 product types) ───────────────────────────
+            # F06: same as spot above — a failing product type must abort
+            # rather than silently return the other product types' totals
+            # as a "complete" balance.
             for product in _MIX_PRODUCT_TYPES:
-                try:
-                    qs = f"productType={product}"
-                    mix_data = await self._get(
-                        http, _MIX_PATH, query=qs,
-                        api_key=api_key, api_secret=api_secret, passphrase=passphrase,
-                    )
-                    for row in mix_data:
-                        coin = row.get("marginCoin")
-                        if not coin:
-                            continue
-                        # available + locked = physical coin balance.
-                        # Excludes unrealizedPL so net worth doesn't
-                        # flicker with open-position PnL.
-                        qty = _dec(row.get("available")) + _dec(row.get("locked"))
-                        if qty > 0:
-                            totals[coin] = totals.get(coin, Decimal(0)) + qty
-                except httpx.HTTPError as exc:
-                    log.warning(
-                        "bitget_mix_failed", product_type=product, error=str(exc),
-                    )
-                    continue
+                qs = f"productType={product}"
+                mix_data = await self._get(
+                    http, _MIX_PATH, query=qs,
+                    api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+                )
+                for row in mix_data:
+                    coin = row.get("marginCoin")
+                    if not coin:
+                        continue
+                    # available + locked = physical coin balance.
+                    # Excludes unrealizedPL so net worth doesn't
+                    # flicker with open-position PnL.
+                    qty = _dec(row.get("available")) + _dec(row.get("locked"))
+                    if qty > 0:
+                        totals[coin] = totals.get(coin, Decimal(0)) + qty
 
             return [
                 BalanceItem(
@@ -165,8 +166,11 @@ class BitgetProvider:
 
         Per coin we take ``balance`` (== available + locked/frozen, the physical
         coin held); ``equity`` adds unrealizedPL, which we skip to keep net
-        worth from flickering — same rule as the classic path. A funding-wallet
-        failure doesn't drop the trading balances we already have."""
+        worth from flickering — same rule as the classic path. F06 (2026-09):
+        BOTH wallets are mandatory — a funding-wallet failure now raises
+        instead of silently returning the trading-only total as "complete"
+        (that let a transient funding outage erase funding-only coins from
+        the persisted snapshot)."""
         totals: dict[str, Decimal] = {}
 
         # ─── Trading account (mandatory; auth/other errors are fatal) ─────
@@ -190,27 +194,25 @@ class BitgetProvider:
             if qty > 0:
                 totals[coin] = totals.get(coin, Decimal(0)) + qty
 
-        # ─── Funding wallet (best-effort; don't lose trading on its failure) ─
-        try:
-            fbody = await self._get_raw(
-                http, _V3_FUNDING_PATH, query="",
-                api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+        # ─── Funding wallet (mandatory — see docstring above) ─────────────
+        fbody = await self._get_raw(
+            http, _V3_FUNDING_PATH, query="",
+            api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+        )
+        fcode = str(fbody.get("code", "00000"))
+        if fcode != "00000":
+            raise ExchangeAuthError(
+                f"Bitget v3 funding error {fcode}: {fbody.get('msg') or 'unknown'}"
             )
-            fcode = str(fbody.get("code", "00000"))
-            if fcode == "00000":
-                for a in fbody.get("data") or []:
-                    coin = a.get("coin")
-                    if not coin:
-                        continue
-                    qty = _dec(a.get("balance"))
-                    if qty == 0:
-                        qty = _dec(a.get("available")) + _dec(a.get("frozen"))
-                    if qty > 0:
-                        totals[coin] = totals.get(coin, Decimal(0)) + qty
-            else:
-                log.warning("bitget_funding_failed", code=fcode, msg=fbody.get("msg"))
-        except httpx.HTTPError as exc:
-            log.warning("bitget_funding_failed", error=str(exc))
+        for a in fbody.get("data") or []:
+            coin = a.get("coin")
+            if not coin:
+                continue
+            qty = _dec(a.get("balance"))
+            if qty == 0:
+                qty = _dec(a.get("available")) + _dec(a.get("frozen"))
+            if qty > 0:
+                totals[coin] = totals.get(coin, Decimal(0)) + qty
 
         return [
             BalanceItem(symbol=coin, contract=None, quantity=qty.normalize(), decimals=8)

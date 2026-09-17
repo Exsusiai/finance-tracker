@@ -157,7 +157,7 @@ async def compute_composition(db: AsyncSession, base_currency: str) -> Compositi
     final: dict[str, _Bucket] = {}
     dust = 0
     for b in buckets.values():
-        if b.value < _DUST:
+        if abs(b.value) < _DUST:
             dust += 1
             continue
         # Cash-like buckets (bank cash / stablecoins / brokerage idle cash) are

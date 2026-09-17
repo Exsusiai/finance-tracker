@@ -42,6 +42,100 @@ _auth = Annotated[str, Depends(require_auth)]
 # the second. A bank→broker/crypto/exchange transfer therefore stays single-leg.
 _SNAPSHOT_ACCOUNT_TYPES = frozenset({"brokerage", "crypto_wallet", "exchange"})
 
+# NUMERIC(20, 8) — the storage precision of every money column. Derived
+# base_amounts are quantized to it so they round-trip without drift.
+_BASE_QUANTUM = Decimal("0.00000001")
+
+
+def _ensure_transfer_direction(tx: Transaction, old_type: str) -> None:
+    """When an edit flips a row into a transfer, it must carry a direction:
+    the balance view and the 未配对 panel both default a direction-less
+    transfer to 'out', silently reversing the sign of income-origin moves
+    (e.g. a repayment coming back IN shown as -). Infer from the type we're
+    replacing (income → in, else out) unless one is already present.
+
+    V9-F10: shared by PATCH and the inbox confirm entrypoint — confirm used to
+    skip this and booked every confirmed-as-transfer income as an outflow.
+    """
+    if tx.type != "transfer" or old_type == "transfer":
+        return
+    existing_meta: dict = {}
+    if tx.metadata_json:
+        try:
+            parsed = json.loads(tx.metadata_json)
+            if isinstance(parsed, dict):
+                existing_meta = parsed
+        except (json.JSONDecodeError, TypeError):
+            existing_meta = {}
+    if not existing_meta.get("transfer_direction"):
+        existing_meta["transfer_direction"] = "in" if old_type == "income" else "out"
+        tx.metadata_json = json.dumps(existing_meta, ensure_ascii=False)
+
+
+# The facts `pair_transactions` binds two legs on. Editing any of them on one
+# leg invalidates the pairing (V9-F09).
+_PAIRING_CRITICAL_FIELDS = ("type", "amount", "account_id", "occurred_at")
+
+
+def _load_meta(tx: Transaction) -> dict:
+    """`metadata_json` as a dict; `{}` for NULL / malformed / non-object."""
+    if not tx.metadata_json:
+        return {}
+    try:
+        parsed = json.loads(tx.metadata_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _store_meta(tx: Transaction, meta: dict) -> None:
+    tx.metadata_json = json.dumps(meta, sort_keys=True, ensure_ascii=False) if meta else None
+
+
+async def _unpair_on_critical_edit(
+    db: AsyncSession, tx: Transaction, changed: set[str]
+) -> tuple[int, int] | None:
+    """Release a transfer pairing the edit just invalidated (V9-F09).
+
+    A pairing asserts that two rows are one economic event, matched on type /
+    amount / account / date. Change one of those on a leg and the assertion no
+    longer holds — but the stale `paired_with_tx_id` keeps feeding
+    ``paired_dedup_predicate``, which then drops the row from every cashflow
+    total (an income edited out of a transfer pair vanished from /monthly while
+    /timeseries still counted it).
+
+    Both legs return to the unpaired state; the counterpart stays
+    ``type='transfer'`` so the user can re-bind it. Returns the counterpart's
+    period so the caller recomputes it too.
+    """
+    if not changed & set(_PAIRING_CRITICAL_FIELDS):
+        return None
+    meta = _load_meta(tx)
+    paired_id = meta.get("paired_with_tx_id")
+    if tx.counter_account_id is None and paired_id is None:
+        return None
+
+    counterpart_period: tuple[int, int] | None = None
+    if paired_id is not None:
+        counterpart = (await db.execute(
+            select(Transaction).where(
+                Transaction.id == paired_id,
+                Transaction.deleted_at.is_(None),
+            )
+        )).scalar_one_or_none()
+        if counterpart is not None:
+            ctr_meta = _load_meta(counterpart)
+            ctr_meta.pop("paired_with_tx_id", None)
+            _store_meta(counterpart, ctr_meta)
+            counterpart.counter_account_id = None
+            touch_updated_at(counterpart)
+            counterpart_period = parse_period(counterpart.occurred_at)
+
+    meta.pop("paired_with_tx_id", None)
+    _store_meta(tx, meta)
+    tx.counter_account_id = None
+    return counterpart_period
+
 
 def _normalize_amount(val) -> str:
     """Normalize Decimal to clean string (no trailing zeros, no scientific notation)."""
@@ -101,6 +195,36 @@ async def _reject_snapshot_account(db: AsyncSession, account_id: int) -> None:
             f"{acc} accounts are valued from holdings — they cannot hold "
             "transactions. Sync the account or edit its holdings instead.",
             details={"account_id": account_id, "account_type": acc},
+        )
+
+
+async def _validate_account_currency(
+    db: AsyncSession, account_id: int, currency: str | None
+) -> None:
+    """V9-F04: a transaction's currency must equal its account's currency.
+
+    ``v_account_balance`` sums raw ``amount`` in the account's own unit — a
+    100 USD row on a EUR account silently debits 100 EUR. The account model
+    is single-currency, so every write entrance rejects the mismatch instead
+    of mixing units. (``base_amount`` is the global base fold, NOT an
+    account-unit amount.)
+    """
+    if not currency:
+        return
+    acc_currency = (await db.execute(
+        select(Account.currency).where(
+            Account.id == account_id, Account.deleted_at.is_(None)
+        )
+    )).scalar_one_or_none()
+    if acc_currency is not None and acc_currency.upper() != currency.upper():
+        raise InvalidInputError(
+            f"交易币种 {currency} 与账户币种 {acc_currency} 不一致。"
+            "账户为单币种模型；请换用对应币种的账户，或修正交易币种。",
+            details={
+                "account_id": account_id,
+                "account_currency": acc_currency,
+                "transaction_currency": currency,
+            },
         )
 
 
@@ -243,6 +367,8 @@ async def create_transaction(
     await _validate_kind_match(db, tx_type=body.type, category_id=body.category_id)
     # V8-P1-3: snapshot accounts have no cash ledger.
     await _reject_snapshot_account(db, body.account_id)
+    # V9-F04: currency must match the account's unit.
+    await _validate_account_currency(db, body.account_id, body.currency)
     tx = Transaction(
         account_id=body.account_id,
         counter_account_id=body.counter_account_id,
@@ -286,7 +412,9 @@ async def batch_create_transactions(
 ):
     # Sprint 1 FIX-5: validate kind invariant for every row before creating any.
     # V8-P1-3: and refuse any row targeting a snapshot account.
+    # V9-F04: and refuse currency/account-unit mismatches.
     for t_data in body.transactions:
+        await _validate_account_currency(db, t_data.account_id, t_data.currency)
         await _validate_kind_match(db, tx_type=t_data.type, category_id=t_data.category_id)
         await _reject_snapshot_account(db, t_data.account_id)
     created = []
@@ -330,6 +458,67 @@ async def batch_create_transactions(
         result = await db.execute(fetch)
         created = list(result.scalars().all())
     return ApiSuccess(data=[_tx_to_out(tx) for tx in created])
+
+
+# V9-F21: registered BEFORE `/{transaction_id}` — FastAPI matches routes in
+# registration order, so a single-segment literal path declared after the int
+# path param never gets a chance (the param parse fails with 422 first).
+@router.get("/recently-promoted-to-transfer", response_model=ApiSuccess[list[dict]])
+async def list_recently_promoted(
+    _token: _auth,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """List rows whose `type` was auto-flipped from expense/income to
+    transfer by a recent `refresh-matching` run.
+
+    These carry `metadata.type_promoted_by='refresh_matching'` plus the
+    timestamp and original type. Use this to spot false positives —
+    e.g. a real expense that happened to contain a sub-account name like
+    "saving" but wasn't actually a transfer.
+
+    The frontend can later wrap this in a UI; for now it's CLI-callable.
+    """
+    from sqlalchemy import text as _text
+    promoted_filter = _text(
+        "metadata_json IS NOT NULL "
+        "AND json_valid(metadata_json) "
+        "AND json_extract(metadata_json, '$.type_promoted_by') = 'refresh_matching'"
+    )
+    stmt = (
+        select(Transaction)
+        .options(selectinload(Transaction.account), selectinload(Transaction.category))
+        .where(
+            Transaction.deleted_at.is_(None),
+            promoted_filter,
+        )
+        .order_by(Transaction.occurred_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    out: list[dict] = []
+    for r in rows:
+        meta: dict = {}
+        if r.metadata_json:
+            try:
+                meta = json.loads(r.metadata_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                meta = {}
+        out.append({
+            "transaction_id": r.id,
+            "account_id": r.account_id,
+            "account_name": r.account.name if r.account else None,
+            "category_id": r.category_id,
+            "category_name": r.category.name if r.category else None,
+            "occurred_at": r.occurred_at,
+            "amount": str(r.amount),
+            "currency": r.currency,
+            "description": r.description,
+            "current_type": r.type,
+            "original_type": meta.get("type_promoted_from"),
+            "promoted_at": meta.get("type_promoted_at"),
+        })
+    return ApiSuccess(data=out)
 
 
 @router.get("/{transaction_id}", response_model=ApiSuccess[TransactionOut])
@@ -400,6 +589,18 @@ async def update_transaction(
     final_cat_id = update_data.get("category_id", tx.category_id)
     await _validate_kind_match(db, tx_type=final_type, category_id=final_cat_id)
 
+    # V9-F20: PATCH could relocate a transaction into a snapshot account —
+    # create refuses this, PATCH must too (same phantom-ledger reason).
+    if update_data.get("account_id") is not None:
+        await _reject_snapshot_account(db, update_data["account_id"])
+    # V9-F04: the resulting (account, currency) combo must stay unit-consistent.
+    if "account_id" in update_data or "currency" in update_data:
+        await _validate_account_currency(
+            db,
+            update_data.get("account_id", tx.account_id),
+            update_data.get("currency", tx.currency),
+        )
+
     # Sprint 3 FIX-15 (review V2 closes V1 P1-5): non-adjustment rows are
     # always stored as ABS(amount). Apply the same invariant the ingestion
     # pipeline enforces, so PATCH can't reintroduce signed amounts.
@@ -407,31 +608,50 @@ async def update_transaction(
         if final_type != "adjustment" and update_data["amount"] < 0:
             update_data["amount"] = -update_data["amount"]
 
+    # V9-F13: an FX-only edit used to leave the old base_amount in place, and
+    # base_amount outranks fx_rate_to_base everywhere downstream — so the new
+    # rate was silently ignored. Re-derive base_amount from the rate the caller
+    # just set; if they sent both, they must agree.
+    patched_rate = update_data.get("fx_rate_to_base")
+    if patched_rate is not None:
+        final_amount = update_data.get("amount", tx.amount)
+        final_amount = (
+            final_amount if isinstance(final_amount, Decimal)
+            else Decimal(str(final_amount))
+        )
+        derived_base = (final_amount * patched_rate).quantize(_BASE_QUANTUM)
+        patched_base = update_data.get("base_amount")
+        if patched_base is None:
+            update_data["base_amount"] = derived_base
+        elif abs(patched_base - derived_base) > Decimal("0.01"):
+            raise InvalidInputError(
+                "base_amount and fx_rate_to_base disagree: "
+                f"{final_amount} × {patched_rate} = {derived_base}, "
+                f"but base_amount={patched_base}.",
+                details={
+                    "amount": str(final_amount),
+                    "fx_rate_to_base": str(patched_rate),
+                    "base_amount": str(patched_base),
+                    "derived_base_amount": str(derived_base),
+                },
+            )
+
+    pairing_before = {f: getattr(tx, f) for f in _PAIRING_CRITICAL_FIELDS}
+
     for key, value in update_data.items():
         setattr(tx, key, value)
+
+    pairing_changed = {
+        f for f, before in pairing_before.items() if getattr(tx, f) != before
+    }
 
     # A manual category pick settles the row — stamp it so the transfer
     # matcher stops proposing it as a pair candidate (see confirm_inbox_item).
     if "category_id" in update_data and update_data["category_id"] is not None:
         tx.categorization_method = "user"
 
-    # When an edit flips a row into a transfer, it must carry a direction:
-    # the balance view and the 未配对 panel both default a direction-less
-    # transfer to 'out', silently reversing the sign of income-origin moves
-    # (e.g. a repayment coming back IN shown as -). Infer from the type we're
-    # replacing (income → in, else out) unless one is already present.
-    if tx.type == "transfer" and old_type != "transfer":
-        existing_meta: dict = {}
-        if tx.metadata_json:
-            try:
-                parsed = json.loads(tx.metadata_json)
-                if isinstance(parsed, dict):
-                    existing_meta = parsed
-            except (json.JSONDecodeError, TypeError):
-                existing_meta = {}
-        if not existing_meta.get("transfer_direction"):
-            existing_meta["transfer_direction"] = "in" if old_type == "income" else "out"
-            tx.metadata_json = json.dumps(existing_meta, ensure_ascii=False)
+    _ensure_transfer_direction(tx, old_type)
+    unpaired_period = await _unpair_on_critical_edit(db, tx, pairing_changed)
 
     touch_updated_at(tx)
     await db.flush()
@@ -449,7 +669,7 @@ async def update_transaction(
     #   - "never":  skip both AND disable any existing rule for this keyword
     new_category_id = tx.category_id
     new_period = parse_period(tx.occurred_at)
-    affected_periods = [old_period, new_period]
+    affected_periods = [old_period, new_period, unpaired_period]
     if (
         new_category_id is not None
         and new_category_id != old_category_id
@@ -615,11 +835,32 @@ async def split_transaction(
         raise InvalidInputError("Adjustment rows cannot be split.")
 
     orig_amount = abs(tx.amount if isinstance(tx.amount, Decimal) else Decimal(str(tx.amount)))
+
+    # Which way did the original move money? Transfer lines inherit that side so
+    # the signed balance impact is preserved exactly.
+    orig_in = tx.type == "income" or (tx.type == "transfer" and meta.get("transfer_direction") == "in")
+    direction = "in" if orig_in else "out"
+    # V9-F03: a line moving money the OTHER way turns the abs-sum check into a
+    # lie — 100 expense "split" into 20 expense + 80 income nets +60 on the
+    # balance instead of −100. Only same-direction kinds are a split.
+    same_direction_kind = "income" if orig_in else "expense"
+
     total = Decimal("0")
     for ln in body.lines:
         amt = Decimal(ln.amount)
         if amt <= 0:
             raise InvalidInputError("Each split line amount must be positive.")
+        if ln.type not in (same_direction_kind, "transfer"):
+            raise InvalidInputError(
+                f"Split line type '{ln.type}' reverses the direction of a "
+                f"'{tx.type}' transaction. Lines must be '{same_direction_kind}' "
+                "or 'transfer' so the signed total is preserved.",
+                details={
+                    "line_type": ln.type,
+                    "original_type": tx.type,
+                    "allowed": [same_direction_kind, "transfer"],
+                },
+            )
         await _validate_kind_match(db, tx_type=ln.type, category_id=ln.category_id)
         total += amt
     if total != orig_amount:
@@ -628,15 +869,26 @@ async def split_transaction(
             details={"lines_total": str(total), "original": str(orig_amount)},
         )
 
-    # Which way did the original move money? Transfer lines inherit that side so
-    # the signed balance impact is preserved exactly.
-    orig_in = tx.type == "income" or (tx.type == "transfer" and meta.get("transfer_direction") == "in")
-    direction = "in" if orig_in else "out"
+    # V9-F01: freeze the pre-split base_amount. Reading tx.base_amount lazily
+    # meant the first line's own (smaller) base became the denominator for the
+    # rest, so 90 EUR split 20/80 produced 18 + 14.4.
+    orig_base = tx.base_amount
+    if orig_base is not None and not isinstance(orig_base, Decimal):
+        orig_base = Decimal(str(orig_base))
+    base_allocated = Decimal("0")
 
-    def _line_base(amt: Decimal):
-        if tx.base_amount is not None and orig_amount != 0:
-            return tx.base_amount * amt / orig_amount
-        return None
+    def _line_base(amt: Decimal, *, is_last: bool):
+        """Pro-rata share of the frozen base, 8-dp quantized. The final line
+        absorbs the rounding remainder so the lines sum back to orig_base."""
+        nonlocal base_allocated
+        if orig_base is None or orig_amount == 0:
+            return None
+        if is_last:
+            share = orig_base - base_allocated
+        else:
+            share = (orig_base * amt / orig_amount).quantize(_BASE_QUANTUM)
+        base_allocated += share
+        return share
 
     snapshot = {
         "amount": str(tx.amount),
@@ -657,7 +909,7 @@ async def split_transaction(
     tx.category_id = first.category_id
     if first.description:
         tx.description = first.description
-    tx.base_amount = _line_base(first_amt)
+    tx.base_amount = _line_base(first_amt, is_last=len(body.lines) == 1)
     new_meta = {k: v for k, v in meta.items() if k not in ("transfer_direction", "paired_with_tx_id")}
     new_meta["split_group_id"] = group_id
     new_meta["split_original"] = snapshot
@@ -668,7 +920,8 @@ async def split_transaction(
     touch_updated_at(tx)
 
     children: list[Transaction] = []
-    for ln in body.lines[1:]:
+    last_index = len(body.lines) - 1
+    for idx, ln in enumerate(body.lines[1:], start=1):
         amt = Decimal(ln.amount)
         child_meta: dict = {"split_group_id": group_id}
         if ln.type == "transfer":
@@ -684,7 +937,11 @@ async def split_transaction(
             description=ln.description or tx.description,
             counterparty=tx.counterparty,
             source=tx.source,
-            base_amount=_line_base(amt),
+            # V9-F02: inherit the import link, otherwise deleting or reparsing
+            # the statement misses these siblings and their amounts survive as
+            # orphan balance.
+            pdf_import_id=tx.pdf_import_id,
+            base_amount=_line_base(amt, is_last=idx == last_index),
             fx_rate_to_base=tx.fx_rate_to_base,
             is_pending=False,
             metadata_json=json.dumps(child_meta, ensure_ascii=False),
@@ -1221,64 +1478,6 @@ async def unbind_counter(
     })
 
 
-@router.get("/recently-promoted-to-transfer", response_model=ApiSuccess[list[dict]])
-async def list_recently_promoted(
-    _token: _auth,
-    db: AsyncSession = Depends(get_db),
-    limit: int = Query(200, ge=1, le=1000),
-):
-    """List rows whose `type` was auto-flipped from expense/income to
-    transfer by a recent `refresh-matching` run.
-
-    These carry `metadata.type_promoted_by='refresh_matching'` plus the
-    timestamp and original type. Use this to spot false positives —
-    e.g. a real expense that happened to contain a sub-account name like
-    "saving" but wasn't actually a transfer.
-
-    The frontend can later wrap this in a UI; for now it's CLI-callable.
-    """
-    from sqlalchemy import text as _text
-    promoted_filter = _text(
-        "metadata_json IS NOT NULL "
-        "AND json_valid(metadata_json) "
-        "AND json_extract(metadata_json, '$.type_promoted_by') = 'refresh_matching'"
-    )
-    stmt = (
-        select(Transaction)
-        .options(selectinload(Transaction.account), selectinload(Transaction.category))
-        .where(
-            Transaction.deleted_at.is_(None),
-            promoted_filter,
-        )
-        .order_by(Transaction.occurred_at.desc())
-        .limit(limit)
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-    out: list[dict] = []
-    for r in rows:
-        meta: dict = {}
-        if r.metadata_json:
-            try:
-                meta = json.loads(r.metadata_json) or {}
-            except (json.JSONDecodeError, TypeError):
-                meta = {}
-        out.append({
-            "transaction_id": r.id,
-            "account_id": r.account_id,
-            "account_name": r.account.name if r.account else None,
-            "category_id": r.category_id,
-            "category_name": r.category.name if r.category else None,
-            "occurred_at": r.occurred_at,
-            "amount": str(r.amount),
-            "currency": r.currency,
-            "description": r.description,
-            "current_type": r.type,
-            "original_type": meta.get("type_promoted_from"),
-            "promoted_at": meta.get("type_promoted_at"),
-        })
-    return ApiSuccess(data=out)
-
-
 @router.post("/{transaction_id}/revert-type-promotion", response_model=ApiSuccess[TransactionOut])
 async def revert_type_promotion(
     transaction_id: int,
@@ -1575,7 +1774,7 @@ async def get_transfer_suggestions(
     db: AsyncSession = Depends(get_db),
 ):
     """Suggest pairs the matcher couldn't auto-confirm (score 50–74)."""
-    from app.services.transfer_matcher import find_transfer_pairs, SCORE_THRESHOLD_AUTO
+    from app.services.transfer_matcher import find_transfer_pairs
     candidates = await find_transfer_pairs(db)
     suggestions = [
         {
@@ -1595,8 +1794,10 @@ async def get_transfer_suggestions(
             # but pairs that BECOME eligible afterwards (e.g. the user marks both
             # legs as transfer post-import) would otherwise be invisible: hidden
             # here AND never auto-applied. Show everything; flag the high-
-            # confidence tier so the UI can label it.
-            "auto": c.score >= SCORE_THRESHOLD_AUTO,
+            # confidence tier so the UI can label it. V9-F07: auto now means
+            # score + positive evidence / established account pair — mirror
+            # the matcher's own eligibility, not the raw score.
+            "auto": c.auto,
         }
         for c in candidates
     ]
@@ -1757,6 +1958,7 @@ async def confirm_inbox_item(
         raise NotFoundError("Pending Transaction", transaction_id)
 
     old_category_id = tx.category_id
+    old_type = tx.type
     update_data = body.model_dump(exclude_unset=True)
     new_category_id = update_data.get("category_id", old_category_id)
 
@@ -1783,6 +1985,8 @@ async def confirm_inbox_item(
             if final_type != "adjustment" and value < 0:
                 value = -value
         setattr(tx, key, value)
+
+    _ensure_transfer_direction(tx, old_type)
 
     tx.is_pending = False
     # The user has explicitly settled this row. Stamp it so the transfer

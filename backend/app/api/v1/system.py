@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_auth
 from app.core.config import get_settings
+from app.core.errors import InvalidInputError
 from app.db import get_db, async_session_factory
 from app.schemas import (
     ApiSuccess,
@@ -46,9 +47,28 @@ async def get_settings_route(_token: _auth):
 async def update_settings(
     body: SettingsUpdate,
     _token: _auth,
+    db: AsyncSession = Depends(get_db),
 ):
     """Update application settings (in-memory only for this session)."""
     update_data = body.model_dump(exclude_unset=True)
+
+    # V9-F14: base_currency is the LEDGER base every stored base_amount /
+    # fx_rate_to_base / cashflow snapshot was folded into. Historical rows do
+    # not record which currency they were folded to, so switching the base on
+    # a non-empty ledger silently relabels e.g. 90 EUR as 90 CNY. Forbid it;
+    # the safe knob for viewing is the frontend display-currency switch.
+    new_base = update_data.get("base_currency")
+    if new_base is not None and new_base.upper() != settings.base_currency.upper():
+        has_rows = (await db.execute(
+            text("SELECT 1 FROM transactions WHERE deleted_at IS NULL LIMIT 1")
+        )).scalar_one_or_none() is not None
+        if has_rows:
+            raise InvalidInputError(
+                "账本已有交易，不能直接切换记账本位币（历史折算金额没有记录其币种，"
+                "切换会把旧金额换标签）。如需查看其他币种请用前端「显示币种」。",
+                details={"current": settings.base_currency, "requested": new_base},
+            )
+
     for key, value in update_data.items():
         # Update cached settings
         setattr(settings, key, value)

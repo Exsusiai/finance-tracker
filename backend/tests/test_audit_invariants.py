@@ -362,13 +362,27 @@ async def test_r10_patch_currency_only_refolds(client: AsyncClient) -> None:
         ))
         await s.commit()
 
-    # Create a CNY tx (same currency → no FX needed).
-    create = await client.post(
-        "/api/v1/transactions",
-        json=_make_tx_body(occurred_at="2026-10-10T00:00:00Z", amount="50", currency="CNY"),
-        headers=AUTH,
-    )
-    tx_id = create.json()["data"]["id"]
+    # V9-F04 pins tx.currency to the account's unit at the API, so the only
+    # legal currency edit left is repairing a legacy wrong-currency row back
+    # to the account currency. Seed a EUR account + a legacy CNY row on it
+    # directly (bypassing the guard), then PATCH currency=EUR to repair it.
+    from app.models import Transaction as _Tx
+
+    async with _TestingSessionLocal() as s:
+        s.add(Account(
+            id=91, name="EUR-R10", type="bank", currency="EUR",
+            initial_balance=Decimal("0"), is_active=True,
+            created_at="2026-05-01T00:00:00Z", updated_at="2026-05-01T00:00:00Z",
+        ))
+        legacy = _Tx(
+            account_id=91, occurred_at="2026-10-10T00:00:00Z",
+            amount=Decimal("50"), currency="CNY", type="expense",
+            source="pdf_import", is_pending=False,
+            created_at="2026-10-10T00:00:00Z", updated_at="2026-10-10T00:00:00Z",
+        )
+        s.add(legacy)
+        await s.commit()
+        tx_id = legacy.id
 
     # Now PATCH only currency=EUR. amount stays 50.
     # Expected: base_amount becomes 400 (50 EUR * 8 CNY/EUR).

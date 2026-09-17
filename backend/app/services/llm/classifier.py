@@ -209,6 +209,24 @@ async def classify_with_llm(
         touch_updated_at(n)
     await db.flush()
 
+    # V9-F16: the provider call blocks for seconds — the user may have
+    # confirmed this row meanwhile (independent session). Re-read the row's
+    # CURRENT state before any write-back; writing through the stale ORM
+    # object would clobber the human decision with an LLM guess.
+    from app.services.user_lock import is_user_locked
+
+    try:
+        await db.refresh(tx)
+    except Exception:  # noqa: BLE001 — refresh is best-effort; guards below still run
+        pass
+    if not tx.is_pending or is_user_locked(tx):
+        logger.info(
+            "llm_result_discarded_row_settled",
+            tx_id=tx.id,
+            categorization_method=tx.categorization_method,
+        )
+        return LLMClassifyOutcome(matched=False, suggested=False, result=result, note_ids_used=note_ids)
+
     # Stamp LLM attempt timestamp on every reachable row — even abstains.
     # Without this, refresh-matching keeps re-dispatching the same hopeless
     # rows every time the user clicks the button, burning the monthly
@@ -282,11 +300,34 @@ async def classify_with_llm(
         return LLMClassifyOutcome(matched=False, suggested=True, result=result, note_ids_used=note_ids)
 
     if result.confidence >= runtime.confidence_threshold:
-        tx.category_id = target.id
-        tx.is_pending = False
-        tx.categorization_method = "llm"
-        tx.categorization_confidence = result.confidence
-        tx.llm_reason = result.reason
+        # Guarded conditional write (V9-F16 belt to the refresh check above):
+        # only lands while the row is still pending and not user-settled, so a
+        # confirmation racing between our refresh and this write can't be
+        # clobbered. rowcount 0 → someone beat us; discard the LLM result.
+        from sqlalchemy import or_ as _or, update as _update
+
+        upd = (await db.execute(
+            _update(Transaction)
+            .where(
+                Transaction.id == tx.id,
+                Transaction.is_pending.is_(True),
+                _or(
+                    Transaction.categorization_method.is_(None),
+                    Transaction.categorization_method != "user",
+                ),
+            )
+            .values(
+                category_id=target.id,
+                is_pending=False,
+                categorization_method="llm",
+                categorization_confidence=result.confidence,
+                llm_reason=result.reason,
+            )
+            .execution_options(synchronize_session="fetch")
+        ))
+        if upd.rowcount == 0:
+            logger.info("llm_result_discarded_row_settled", tx_id=tx.id)
+            return LLMClassifyOutcome(matched=False, suggested=False, result=result, note_ids_used=note_ids)
         _stamp_attempt({
             "outcome": "matched",
             "path": result.category_path,

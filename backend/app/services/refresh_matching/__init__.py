@@ -28,7 +28,6 @@ from app.services.pdf_parser.engine import (
     _set_subaccount_names,
 )
 from app.services.transfer_matcher import (
-    SCORE_THRESHOLD_AUTO,
     detect_same_account_pairs,
     detect_single_leg_iban,
     find_transfer_pairs,
@@ -243,11 +242,17 @@ async def step_redetect_type(ctx: RefreshContext) -> None:
             names = [str(n).strip().lower() for n in raw if str(n).strip()]
         sub_names_by_account[a.id] = names
 
+    from app.services.user_lock import not_user_locked_clause
+
     type_candidates = (await ctx.db.execute(
         select(Transaction).where(
             Transaction.deleted_at.is_(None),
             Transaction.source == "pdf_import",
             Transaction.user_note.is_(None),
+            # V9-F16: a row the user explicitly confirmed (inbox confirm /
+            # manual category edit stamps categorization_method='user') must
+            # not be re-typed by automation.
+            not_user_locked_clause(),
             Transaction.type.in_(("expense", "income")),
         )
     )).scalars().all()
@@ -305,6 +310,8 @@ async def step_recategorize(ctx: RefreshContext) -> None:
     Gemini can't classify (e.g. credit-card payment receipts that should
     really be transfers, but the type stays expense).
     """
+    from app.services.user_lock import not_user_locked_clause
+
     rows = (await ctx.db.execute(
         select(Transaction).where(
             Transaction.deleted_at.is_(None),
@@ -312,6 +319,9 @@ async def step_recategorize(ctx: RefreshContext) -> None:
             Transaction.type.in_(("expense", "income")),
             Transaction.source != "manual",
             Transaction.user_note.is_(None),
+            # V9-F16: user-confirmed rows (even confirmed-as-uncategorised)
+            # are settled — automation keeps its hands off.
+            not_user_locked_clause(),
         )
     )).scalars().all()
     for r in rows:
@@ -368,7 +378,9 @@ async def step_auto_pair(ctx: RefreshContext) -> None:
     candidates = await find_transfer_pairs(ctx.db)
     used_ids: set[int] = set()
     for c in candidates:
-        if c.score < SCORE_THRESHOLD_AUTO:
+        # V9-F07: gate on candidate.auto (score + positive evidence or an
+        # established account pair), not raw score.
+        if not c.auto:
             continue
         if c.a.id in used_ids or c.b.id in used_ids:
             continue

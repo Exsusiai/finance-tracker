@@ -44,7 +44,7 @@ from app.models import (
 from app.services.bank_sync.crypto import decrypt_str
 from app.services.broker_sync import dispatch as _broker_dispatch
 from app.services.broker_sync.upsert import apply_broker_snapshot
-from app.services.crypto_sync import dispatch as _crypto_dispatch
+from app.services.crypto_sync import BalanceItem, dispatch as _crypto_dispatch
 from app.services.exchange_sync import dispatch as _exchange_dispatch
 from app.services.market_data.coingecko import (
     fetch_native_price,
@@ -182,18 +182,53 @@ async def _sync_crypto_wallet(
         )
     ).scalars().all()
 
-    now = _utcnow_str()
+    # F05 fix (2026-09): apply_balance_snapshot() REPLACES the entire
+    # (account, chain) snapshot in one call. Applying it once per address
+    # (the old behaviour) meant the second address on a chain clobbered
+    # the first — "1 ETH + 2 ETH" became "2 ETH", and any token the
+    # second address didn't hold got zeroed out. Group by chain, fetch
+    # every address first, aggregate quantities by asset identity, then
+    # replace the chain's snapshot exactly once.
+    by_chain: dict[str, list[ChainAddress]] = {}
     for row in rows:
-        label = f"{row.chain}:{row.address[:8]}…"
+        by_chain.setdefault(row.chain, []).append(row)
+
+    now = _utcnow_str()
+    for chain, addr_rows in by_chain.items():
+        label = (
+            f"{chain}:{addr_rows[0].address[:8]}…"
+            if len(addr_rows) == 1
+            else f"{chain} ({len(addr_rows)} addresses)"
+        )
         try:
-            provider = _dispatch_chain(row.chain, alchemy_api_key)
-            items = await provider.fetch_balances(row.address)
-            synced = await apply_balance_snapshot(db, acc.id, row.chain, items)
-            row.last_synced_at = now
-            row.last_sync_status = "ok"
-            row.last_sync_error = None
+            provider = _dispatch_chain(chain, alchemy_api_key)
+            # Aggregate across addresses BEFORE writing anything. If any
+            # address on this chain fails to fetch, the exception below
+            # skips apply_balance_snapshot() entirely for this chain —
+            # the previous snapshot is left untouched rather than being
+            # replaced with a partial (incomplete) total.
+            totals: dict[tuple[str | None, str | None], BalanceItem] = {}
+            for row in addr_rows:
+                for item in await provider.fetch_balances(row.address):
+                    key = (item.symbol, item.contract)
+                    existing = totals.get(key)
+                    totals[key] = (
+                        item
+                        if existing is None
+                        else BalanceItem(
+                            symbol=item.symbol,
+                            contract=item.contract,
+                            quantity=existing.quantity + item.quantity,
+                            decimals=item.decimals,
+                        )
+                    )
+            synced = await apply_balance_snapshot(db, acc.id, chain, totals.values())
+            for row in addr_rows:
+                row.last_synced_at = now
+                row.last_sync_status = "ok"
+                row.last_sync_error = None
             summary.results.append(SyncResult(
-                label=label, chain=row.chain, exchange=None,
+                label=label, chain=chain, exchange=None,
                 synced=synced, error=None,
             ))
         except Exception as exc:  # noqa: BLE001 — capture & continue is intentional
@@ -202,18 +237,19 @@ async def _sync_crypto_wallet(
             # in an httpx URL can't leak via `last_sync_error`.
             log.warning(
                 "wallet_sync_chain_failed",
-                account_id=acc.id, chain=row.chain,
+                account_id=acc.id, chain=chain,
                 # V5-P1-6: never log raw repr(exc) — httpx HTTPStatusError's
                 # repr contains the request URL (Alchemy key, Binance
                 # signature, etc.). _safe_error_text scrubs these.
                 error_class=exc.__class__.__name__, error=_safe_error_text(exc),
             )
             safe = _safe_error_text(exc)
-            row.last_synced_at = now
-            row.last_sync_status = "error"
-            row.last_sync_error = safe
+            for row in addr_rows:
+                row.last_synced_at = now
+                row.last_sync_status = "error"
+                row.last_sync_error = safe
             summary.results.append(SyncResult(
-                label=label, chain=row.chain, exchange=None,
+                label=label, chain=chain, exchange=None,
                 synced=0, error=safe,
             ))
 
@@ -321,8 +357,16 @@ async def _sync_brokerage(
 
 
 async def _refresh_prices_for_account(db: AsyncSession, account_id: int) -> None:
-    """Look up CoinGecko prices for every Asset this account currently
-    holds and write them as fresh ``market_prices`` rows.
+    """Per-account price refresh, run right after a wallet/exchange sync."""
+    await refresh_onchain_native_prices(db, account_id=account_id)
+
+
+async def refresh_onchain_native_prices(
+    db: AsyncSession, *, account_id: int | None = None
+) -> int:
+    """Look up CoinGecko prices for active crypto holdings and write them
+    as fresh ``market_prices`` rows. Returns the number of Asset rows
+    priced.
 
     Strategy:
     - Group active holdings by (chain, contract). Tokens with a contract
@@ -332,19 +376,34 @@ async def _refresh_prices_for_account(db: AsyncSession, account_id: int) -> None
     - Skip anything `is_spam_token()` flags (defence in depth — should
       never fire here since upsert.py already filtered, but cheap).
     - Best-effort: a per-symbol failure logs + moves on.
+
+    ``account_id=None`` covers every account's active holdings — this is
+    what the market-data scheduler / "refresh market data" button use
+    (F22, 2026-09): they used to call ``refresh_crypto_prices()``, which
+    explicitly EXCLUDED onchain/native (and CEX-symbol) holdings on the
+    assumption only an account *sync* would price them. That left those
+    holdings' prices stale between syncs. ``account_id=<id>`` is the
+    original per-account scope used right after a wallet/exchange sync.
+
+    Restricted to ``asset_class == 'crypto'`` — without this, the global
+    scan would also sweep in brokerage (IBKR/TR) stock holdings, and a
+    stock ticker that happens to collide with a crypto symbol (e.g. the
+    US stock "UNI" vs. the Uniswap token) would get mispriced via
+    CoinGecko's ``simple/price`` symbol lookup below.
     """
-    rows = (
-        await db.execute(
-            select(AssetHolding, Asset)
-            .join(Asset, Asset.id == AssetHolding.asset_id)
-            .where(
-                AssetHolding.account_id == account_id,
-                AssetHolding.is_active == True,  # noqa: E712
-            )
+    stmt = (
+        select(AssetHolding, Asset)
+        .join(Asset, Asset.id == AssetHolding.asset_id)
+        .where(
+            AssetHolding.is_active == True,  # noqa: E712
+            Asset.asset_class == "crypto",
         )
-    ).all()
+    )
+    if account_id is not None:
+        stmt = stmt.where(AssetHolding.account_id == account_id)
+    rows = (await db.execute(stmt)).all()
     if not rows:
-        return
+        return 0
 
     now = _utcnow_str()
 
@@ -403,3 +462,4 @@ async def _refresh_prices_for_account(db: AsyncSession, account_id: int) -> None
                 _record(asset.id, price)
 
     await db.flush()
+    return len(written_asset_ids)

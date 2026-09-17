@@ -7,27 +7,49 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Asset, MarketPrice, FxRate
+from app.services.wallet_sync.orchestrator import refresh_onchain_native_prices
 
 logger = logging.getLogger(__name__)
 
+# Stock (a_share/eu_stock/us_stock) sources whose data_source_id is NOT a
+# Yahoo Finance ticker — IBKR carries a Flex conid, Trade Republic an ISIN
+# (see broker_sync/upsert.py). Feeding either to yfinance.Ticker() is at
+# best a no-op (empty history) and at worst mis-resolves to an unrelated
+# instrument that happens to share the string. Those sources already get
+# live prices from their own statement/websocket feed during account sync
+# (F22, 2026-09).
+_NON_YAHOO_STOCK_SOURCES = ("ibkr", "traderepublic")
+
 
 async def refresh_crypto_prices(db: AsyncSession) -> dict[str, Any]:
-    """Refresh crypto prices (CoinGecko) for legacy/manual crypto assets.
+    """Refresh crypto prices for every crypto asset.
 
-    Excludes ``data_source IN ('onchain','native')`` — those rows are
-    created by the P1-4 wallet_sync pipeline and have a contract address
-    (or no source id at all) as ``data_source_id``. Sending those values
-    to ``/simple/price?ids=`` returns 404 because the endpoint expects a
-    CoinGecko coin id. The wallet_sync orchestrator handles their prices
-    via ``fetch_token_prices`` / ``fetch_native_prices`` already.
-    (V5-P2-4, 2026-05-20)
+    Two paths, merged:
+    - Legacy/manual crypto assets (CoinGecko coin-id in ``data_source_id``)
+      via ``/simple/price?ids=``, below.
+    - Wallet/exchange-synced holdings (onchain contract tokens, native
+      chain coins, CEX ticker symbols) via
+      ``wallet_sync.orchestrator.refresh_onchain_native_prices()`` — the
+      SAME batched CoinGecko helper the per-account post-sync refresh
+      uses. F22 (2026-09): this function used to hard-exclude those rows
+      entirely (comment below), so neither the scheduler nor the
+      "refresh market data" button ever re-priced them between account
+      syncs — only a sync itself did. Reusing the existing per-account
+      function (with ``account_id=None``) closes that gap without a
+      second implementation.
     """
     result = {"prices_updated": 0, "errors": []}
     try:
+        # Excludes ``data_source IN ('onchain','native')`` — those rows are
+        # created by the P1-4 wallet_sync pipeline and have a contract address
+        # (or no source id at all) as ``data_source_id``. Sending those values
+        # to ``/simple/price?ids=`` returns 404 because the endpoint expects a
+        # CoinGecko coin id. They're covered by refresh_onchain_native_prices()
+        # below instead. (V5-P2-4, 2026-05-20)
         stmt = select(Asset).where(
             Asset.asset_class == "crypto",
             Asset.data_source.is_not(None),
@@ -50,19 +72,46 @@ async def refresh_crypto_prices(db: AsyncSession) -> dict[str, Any]:
                 result["errors"].append(f"{asset.symbol}: {e}")
     except Exception as e:
         result["errors"].append(f"crypto: {e}")
+
+    try:
+        result["prices_updated"] += await refresh_onchain_native_prices(db)
+    except Exception as e:
+        result["errors"].append(f"wallet_synced_crypto: {e}")
+
     await db.flush()
     return result
 
 
 async def refresh_stock_prices(db: AsyncSession) -> dict[str, Any]:
-    """Refresh stock prices (yfinance) for a-share / eu_stock / us_stock assets."""
-    result = {"prices_updated": 0, "errors": []}
+    """Refresh stock prices (yfinance) for a-share / eu_stock / us_stock assets.
+
+    F22: skips ``data_source IN ('ibkr', 'traderepublic')`` — see
+    ``_NON_YAHOO_STOCK_SOURCES`` above. A blacklist (rather than requiring
+    ``data_source == 'yfinance'``) keeps manually-created assets (which may
+    leave ``data_source`` unset) working exactly as before.
+    """
+    result = {"prices_updated": 0, "errors": [], "skipped": 0}
     try:
+        # NOT IN excludes NULL rows under SQL's three-valued logic — a
+        # manually-created asset with data_source=None would otherwise
+        # silently drop out of both queries below. Spell out "NULL or not
+        # a broker source" instead.
+        is_yahoo_source = or_(
+            Asset.data_source.is_(None),
+            Asset.data_source.notin_(_NON_YAHOO_STOCK_SOURCES),
+        )
         stmt = select(Asset).where(
             Asset.asset_class.in_(["a_share", "eu_stock", "us_stock"]),
             Asset.data_source_id.is_not(None),
+            is_yahoo_source,
         )
         assets = (await db.execute(stmt)).scalars().all()
+        skipped_stmt = select(Asset.id).where(
+            Asset.asset_class.in_(["a_share", "eu_stock", "us_stock"]),
+            Asset.data_source_id.is_not(None),
+            Asset.data_source.in_(_NON_YAHOO_STOCK_SOURCES),
+        )
+        result["skipped"] = len((await db.execute(skipped_stmt)).all())
         for asset in assets:
             try:
                 data = await _fetch_stock_price(asset)

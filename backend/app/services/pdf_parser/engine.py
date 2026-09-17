@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import io
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -356,7 +356,11 @@ _SUBACCOUNT_USER_NAMES: list[str] = []
 _CROSS_BANK_TRANSFER_HINTS_BASE = (
     "outgoing transfer",
     "incoming transfer",
-    "sepa direct debit",
+    # NOTE (V9-F07): "sepa direct debit" was removed here — it names a PAYMENT
+    # METHOD (insurance premiums, subscriptions, card repayments all use it),
+    # not an own-account relationship. Treating it as a transfer cue silently
+    # removed real expenses from the spend statistics. Genuine cross-bank legs
+    # get promoted later by the matcher on positive evidence instead.
     # Credit-card "we received your payment" entries — semantically a transfer
     # from a bank account into the credit-card balance, not a real expense
     # even though the AMEX/Advanzia parsers tag them as expense by default.
@@ -383,7 +387,6 @@ _DIRECTION_IN_HINTS = (
 )
 _DIRECTION_OUT_HINTS = (
     "outgoing transfer",
-    "sepa direct debit",
 )
 
 
@@ -587,12 +590,59 @@ _AMEX_ROW = re.compile(
 )
 
 
+def _amex_de_period(text: str) -> tuple[date, date] | None:
+    """Parse "Abrechnungszeitraum vom DD.MM.YY bis DD.MM.YY" → (start, end)."""
+    m = re.search(
+        r"Abrechnungszeitraum\s+vom\s*(\d{2})\.(\d{2})\.(\d{2})\s*bis\s*(\d{2})\.(\d{2})\.(\d{2})",
+        text,
+    )
+    if not m:
+        return None
+    s_dd, s_mm, s_yy, e_dd, e_mm, e_yy = m.groups()
+    try:
+        return (
+            date(2000 + int(s_yy), int(s_mm), int(s_dd)),
+            date(2000 + int(e_yy), int(e_mm), int(e_dd)),
+        )
+    except ValueError:
+        return None
+
+
+_AMEX_PERIOD_TOLERANCE = timedelta(days=5)
+
+
+def _amex_de_row_year(dd: str, mm: str, period: tuple[date, date] | None, fallback_year: int) -> int:
+    """Pick the year for a row's `dd.mm` date.
+
+    A statement period can straddle a year boundary (e.g. "vom 09.12.25 bis
+    08.01.26"), so a single header year misdates rows from the other side of
+    the boundary (F18: December rows landing in the following January's
+    year). Try both the period's start and end year and keep whichever
+    places the row's date inside the statement window (±5 days tolerance for
+    dates just outside the printed range). Falls back to `fallback_year`
+    (the old header-year behaviour) when there's no period or neither
+    candidate year fits.
+    """
+    if period is not None:
+        start, end = period
+        window_start, window_end = start - _AMEX_PERIOD_TOLERANCE, end + _AMEX_PERIOD_TOLERANCE
+        for candidate_year in dict.fromkeys((start.year, end.year)):
+            try:
+                candidate = date(candidate_year, int(mm), int(dd))
+            except ValueError:
+                continue
+            if window_start <= candidate <= window_end:
+                return candidate_year
+    return fallback_year
+
+
 def _parse_amex_de(text: str) -> list[dict]:
     txs: list[dict] = []
 
     # Year is in header: "Datum 08.04.26" → 2026
     yr_match = re.search(r"Datum[\s\S]{0,80}?(\d{2})\.(\d{2})\.(\d{2})", text)
     year = 2000 + int(yr_match.group(3)) if yr_match else datetime.now(timezone.utc).year
+    period = _amex_de_period(text)
 
     seq = 0
     matches = list(_AMEX_ROW.finditer(text))
@@ -625,7 +675,8 @@ def _parse_amex_de(text: str) -> list[dict]:
         tx_type = "income" if is_credit else "expense"
         dd, mm = d_book.split(".")
         try:
-            date_iso = f"{year}-{mm}-{dd}T00:00:00Z"
+            row_year = _amex_de_row_year(dd, mm, period, year)
+            date_iso = f"{row_year}-{mm}-{dd}T00:00:00Z"
         except Exception:
             continue
         seq += 1

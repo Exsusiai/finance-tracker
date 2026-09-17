@@ -236,9 +236,14 @@ class TestBitgetProvider:
         assert got["USDC"] == Decimal("746.95565305")
 
     @pytest.mark.asyncio
-    async def test_unified_funding_failure_keeps_trading(self):
-        """If the funding-wallet call fails, the trading balances we already
-        fetched still surface (best-effort funding, like classic mix tolerance)."""
+    async def test_unified_funding_failure_raises(self):
+        """F06 fix (2026-09): a funding-wallet failure must raise, not
+        return the trading-only balances as if they were the complete
+        snapshot. Silently returning a partial total used to let the
+        caller (wallet_sync orchestrator) persist it via
+        apply_balance_snapshot(), which zeroes out any coin absent from
+        a "complete" round — erasing funding-only coins on a transient
+        funding-wallet outage."""
         fx = _load("bitget_unified.json")
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -255,20 +260,20 @@ class TestBitgetProvider:
             transport=httpx.MockTransport(handler),
             base_url="https://api.bitget.com",
         )
-        items = await BitgetProvider(http=client).fetch_balances(
-            api_key="ak", api_secret="sk", passphrase="pp"
-        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await BitgetProvider(http=client).fetch_balances(
+                api_key="ak", api_secret="sk", passphrase="pp"
+            )
         await client.aclose()
-        got = {it.symbol: it.quantity for it in items}
-        # Trading balances intact; funding-only ETH absent; USDT = trading only.
-        assert "ETH" not in got
-        assert got["USDT"] == Decimal("536.94164805")
-        assert got["BTC"] == Decimal("0.00327113")
 
     @pytest.mark.asyncio
-    async def test_futures_endpoint_failure_does_not_kill_spot(self):
-        """If one /mix endpoint is rate-limited or 5xx, the rest of the
-        result still surfaces — we don't lose the spot balances."""
+    async def test_futures_endpoint_failure_raises(self):
+        """F06 fix (2026-09): if a /mix endpoint is rate-limited or 5xx,
+        fetch_balances() must raise instead of quietly returning the
+        spot-only balances as a "complete" result — the caller
+        (wallet_sync orchestrator) would otherwise persist that partial
+        total via apply_balance_snapshot(), zeroing out any futures coin
+        absent from this round."""
         fx = _load("bitget_account.json")
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -283,14 +288,11 @@ class TestBitgetProvider:
             base_url="https://api.bitget.com",
         )
         provider = BitgetProvider(http=client)
-        items = await provider.fetch_balances(
-            api_key="ak", api_secret="sk", passphrase="pp"
-        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await provider.fetch_balances(
+                api_key="ak", api_secret="sk", passphrase="pp"
+            )
         await client.aclose()
-
-        # Spot balances still made it through (BTC 0.25, USDT 500, SOL 10).
-        symbols = {it.symbol for it in items}
-        assert symbols == {"BTC", "USDT", "SOL"}
 
     @pytest.mark.asyncio
     async def test_passphrase_required(self):

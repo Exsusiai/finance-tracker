@@ -150,7 +150,9 @@ export function AllocationBar({ segments, formatValue }: AllocationBarProps) {
   return (
     <div>
       <div className="flex h-3 w-full gap-[3px] overflow-hidden rounded-full">
-        {segments.map((s) => (
+        {/* Negative segments (e.g. a debt bucket) have no meaningful bar
+            width — skip them here but keep them in the legend below. */}
+        {segments.filter((s) => Number.isFinite(s.percent) && s.percent > 0).map((s) => (
           <div
             key={s.key}
             className="h-full rounded-[2px] transition-opacity duration-200"
@@ -177,7 +179,9 @@ export function AllocationBar({ segments, formatValue }: AllocationBarProps) {
             <div className="min-w-0">
               <div className="flex items-baseline gap-2">
                 <span className="truncate text-sm text-foreground">{s.label}</span>
-                <span className="text-xs tabular-nums text-muted-foreground">{s.percent.toFixed(1)}%</span>
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  {Number.isFinite(s.percent) ? s.percent.toFixed(1) : "0.0"}%
+                </span>
               </div>
               <div className="text-sm font-medium tabular-nums text-foreground">
                 {formatValue(s.value, s.currency)}

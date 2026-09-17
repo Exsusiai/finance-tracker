@@ -32,7 +32,7 @@ os.environ.setdefault("BASE_CURRENCY", "CNY")
 
 from app.db import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Account, Category, FxRate  # noqa: E402
+from app.models import Account, Category, FxRate, Transaction  # noqa: E402
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
 _engine = create_async_engine(TEST_DB_URL, echo=False)
@@ -67,6 +67,19 @@ async def setup_schema():
             is_active=True,
             created_at="2026-01-01T00:00:00Z",
             updated_at="2026-01-01T00:00:00Z",
+        ))
+        # V9-F04: tx.currency must equal account.currency, so foreign-currency
+        # fold cases need accounts in the matching unit (fold = account unit →
+        # global base, not "any currency on any account").
+        s.add(Account(
+            id=11, name="Main EUR", type="bank", currency="EUR",
+            initial_balance=Decimal("0"), is_active=True,
+            created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
+        ))
+        s.add(Account(
+            id=12, name="Main GBP", type="bank", currency="GBP",
+            initial_balance=Decimal("0"), is_active=True,
+            created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
         ))
         s.add(Category(
             id=2001,
@@ -128,7 +141,7 @@ async def test_same_currency_included_in_cashflow(client: AsyncClient) -> None:
 async def test_fx_missing_excluded_from_cashflow(client: AsyncClient) -> None:
     """100 GBP expense with no FX rate seeded should be excluded and flagged."""
     r = await client.post("/api/v1/transactions", json={
-        "account_id": 10,
+        "account_id": 12,
         "occurred_at": "2026-04-01T00:00:00Z",
         "amount": "100",
         "currency": "GBP",
@@ -152,7 +165,7 @@ async def test_fx_missing_excluded_from_cashflow(client: AsyncClient) -> None:
 async def test_eur_tx_folds_to_base_amount(client: AsyncClient) -> None:
     """50 EUR expense with EUR→CNY=8 should fold to base_amount=400."""
     r = await client.post("/api/v1/transactions", json={
-        "account_id": 10,
+        "account_id": 11,
         "occurred_at": "2026-05-01T00:00:00Z",
         "amount": "50",
         "currency": "EUR",
@@ -183,7 +196,7 @@ async def test_patch_amount_refolds_base_amount(client: AsyncClient) -> None:
     """After PATCH amount=100 on 50 EUR (base=400), base_amount should update to 800."""
     # Create 50 EUR tx
     r = await client.post("/api/v1/transactions", json={
-        "account_id": 10,
+        "account_id": 11,
         "occurred_at": "2026-06-01T00:00:00Z",
         "amount": "50",
         "currency": "EUR",
@@ -222,17 +235,30 @@ async def test_patch_amount_refolds_base_amount(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_patch_currency_refolds_base_amount(client: AsyncClient) -> None:
-    """100 CNY tx PATCHed to {currency=EUR, amount=50} → base_amount=400."""
-    r = await client.post("/api/v1/transactions", json={
-        "account_id": 10,
-        "occurred_at": "2026-07-01T00:00:00Z",
-        "amount": "100",
-        "currency": "CNY",
-        "type": "expense",
-        "description": "CNY→EUR currency patch",
-    }, headers=AUTH)
-    assert r.status_code == 201, r.text
-    tx_id = r.json()["data"]["id"]
+    """Fixing a legacy wrong-currency row back to the ACCOUNT's currency
+    refolds base_amount.
+
+    V9-F04 pins tx.currency to the account's unit at every write entrance, so
+    the only legal currency edit left is repairing a pre-guard row whose
+    currency was wrong. Seed such a row directly (bypassing the API guard),
+    then PATCH {currency=EUR, amount=50} on the EUR account → base=400.
+    """
+    async with _TestingSessionLocal() as s:
+        legacy = Transaction(
+            account_id=11,  # EUR account
+            occurred_at="2026-07-01T00:00:00Z",
+            amount=Decimal("100"),
+            currency="CNY",  # wrong unit — legacy data from before the guard
+            type="expense",
+            source="pdf_import",
+            is_pending=False,
+            description="legacy wrong-currency row",
+            created_at="2026-07-01T00:00:00Z",
+            updated_at="2026-07-01T00:00:00Z",
+        )
+        s.add(legacy)
+        await s.commit()
+        tx_id = legacy.id
 
     p = await client.patch(
         f"/api/v1/transactions/{tx_id}",

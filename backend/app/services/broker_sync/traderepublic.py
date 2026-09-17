@@ -286,13 +286,17 @@ class TradeRepublicProvider:
     async def _fetch_cash(self, tr) -> list[BrokerPosition]:
         """Uninvested cash balances → cash-class positions (price 1:1).
 
-        Best-effort: a cash-feed failure must not sink the whole sync.
+        F06 (2026-09): must NOT swallow a cash-feed failure and return an
+        empty list — apply_broker_snapshot() zeroes out any position type
+        absent from a "complete" round, so an empty list here would read
+        as "no cash" and erase the account's real cash balance on a
+        transient websocket hiccup. Let the exception propagate: the
+        outer try/except in fetch_positions() turns it into a
+        BrokerSyncError, which orchestrator._sync_brokerage() treats as a
+        failed sync — apply_broker_snapshot() is skipped entirely and
+        whatever was there before (stocks AND cash) is preserved.
         """
-        try:
-            rows = await self._sub(tr, {"type": "cash"})
-        except Exception as exc:  # noqa: BLE001
-            log.info("tr_cash_failed", error=_short(exc, 80))
-            return []
+        rows = await self._sub(tr, {"type": "cash"})
         out: list[BrokerPosition] = []
         for row in rows or []:
             amount = _dec(row.get("amount"))

@@ -366,6 +366,14 @@ async def parse_bank_statement(
 
         file_hash = hashlib.sha256(content).hexdigest()
 
+        # V9-F17: failed attempts must not block a clean retry — after the
+        # atomic rollback below, a failed record carries no ledger rows, so
+        # re-importing the same file is safe. Purge stale failed records for
+        # this hash instead of treating them as "already imported".
+        conn.execute(
+            "DELETE FROM pdf_imports WHERE file_hash = ? AND status = 'failed'",
+            (file_hash,),
+        )
         existing = conn.execute(
             "SELECT id FROM pdf_imports WHERE file_hash = ?", (file_hash,)
         ).fetchone()
@@ -596,10 +604,21 @@ async def parse_bank_statement(
             conn.commit()
             return {"success": False, "error": "pdfplumber not installed"}
         except Exception as e:
+            # V9-F17: a mid-batch failure (e.g. a constraint error on row N)
+            # used to mark the import failed and COMMIT — permanently keeping
+            # rows 1..N-1 in the ledger while reporting failure, and the
+            # file-hash guard then blocked a clean re-import. Roll back the
+            # whole attempt first (discards the partial transactions AND the
+            # in-flight import row), then record the failure in a fresh,
+            # self-contained transaction so nothing half-lands.
+            conn.rollback()
             conn.execute("""
-                UPDATE pdf_imports SET status = 'failed', error_message = ?, updated_at = ?
-                WHERE id = ?
-            """, (str(e), now, import_id))
+                INSERT INTO pdf_imports
+                    (filename, file_hash, file_size, storage_path, account_id,
+                     transactions_count, status, error_message, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 0, 'failed', ?, ?, ?)
+            """, (path.name, file_hash, len(content), str(storage_path),
+                  account_id, str(e)[:500], now, now))
             conn.commit()
             return {"success": False, "error": f"Parse failed: {e}"}
 

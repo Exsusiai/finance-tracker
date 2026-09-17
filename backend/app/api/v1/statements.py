@@ -172,6 +172,26 @@ async def _insert_and_ingest(
 
     Shared by commit / assign-account / reparse so the insert path stays
     identical (amount normalize → categorize → transfer-match → recompute)."""
+    # V9-F04: parsed rows must match the target account's currency — the
+    # balance view sums raw amounts in the account's unit, so importing a
+    # USD statement into a EUR account silently mixes units. Reject the
+    # whole commit atomically; the user picks the right account instead.
+    target_currency = (await db.execute(
+        select(Account.currency).where(Account.id == account_id)
+    )).scalar_one_or_none()
+    if target_currency:
+        mismatched = sorted({
+            (t.get("currency") or "").upper()
+            for t in result.get("transactions", [])
+            if t.get("currency") and t["currency"].upper() != target_currency.upper()
+        })
+        if mismatched:
+            raise InvalidInputError(
+                f"账单币种 {', '.join(mismatched)} 与目标账户币种 {target_currency} 不一致，"
+                "已取消导入。请选择对应币种的账户。",
+                details={"account_currency": target_currency, "statement_currencies": mismatched},
+            )
+
     new_txs: list[Transaction] = []
     for tx_data in result.get("transactions", []):
         tx = Transaction(
@@ -278,6 +298,30 @@ def _stored_bank_format(pdf_import: PdfImport) -> str | None:
         return None
     val = meta.get("bank_format")
     return val or None
+
+
+async def _load_split_siblings(
+    db: AsyncSession, group_ids: set[int]
+) -> list[Transaction]:
+    """Active rows created by splitting one of `group_ids` (V9-F02).
+
+    A split turns the original row into line 1 and adds sibling rows tagged
+    ``metadata.split_group_id = <original id>``. Siblings created before the
+    fix carry no ``pdf_import_id``, so removing a statement by import id left
+    them behind as orphan balance. Callers pass the ids they are about to
+    remove and must handle these the same way.
+    """
+    if not group_ids:
+        return []
+    rows = (await db.execute(
+        select(Transaction).where(
+            Transaction.deleted_at.is_(None),
+            Transaction.id.notin_(group_ids),
+            func.json_valid(Transaction.metadata_json),
+            func.json_extract(Transaction.metadata_json, "$.split_group_id").in_(group_ids),
+        )
+    )).scalars().all()
+    return list(rows)
 
 
 @router.post("/upload", response_model=ApiSuccess[PdfImportOut])
@@ -432,6 +476,19 @@ async def upload_csv(
     parse_result = detect_and_parse_csv(content)
     if parse_result.get("error"):
         raise ParserError(parse_result["error"])
+
+    # V9-F04: reject unit mismatch before any row lands (same reason as the
+    # PDF commit guard in _insert_and_ingest).
+    mismatched = sorted({
+        (t.get("currency") or "").upper()
+        for t in parse_result.get("transactions", [])
+        if t.get("currency") and t["currency"].upper() != acct.currency.upper()
+    })
+    if mismatched:
+        raise InvalidInputError(
+            f"CSV 币种 {', '.join(mismatched)} 与目标账户币种 {acct.currency} 不一致，已取消导入。",
+            details={"account_currency": acct.currency, "csv_currencies": mismatched},
+        )
 
     summary = await import_csv_rows(db, account_id, parse_result)
     return ApiSuccess(data={
@@ -823,7 +880,11 @@ async def reparse_statement(
     old_txs_stmt = select(Transaction).where(Transaction.pdf_import_id == import_id)
     old_txs_result = await db.execute(old_txs_stmt)
     old_periods: set[tuple[int, int]] = set()
-    for old_tx in old_txs_result.scalars().all():
+    old_txs = list(old_txs_result.scalars().all())
+    # Pre-fix split siblings have no pdf_import_id of their own; without this
+    # they'd survive the reparse as orphan balance (V9-F02).
+    old_txs.extend(await _load_split_siblings(db, {t.id for t in old_txs}))
+    for old_tx in old_txs:
         period = parse_period(old_tx.occurred_at)
         if period:
             old_periods.add(period)
@@ -930,7 +991,11 @@ async def delete_statement(
     tx_result = await db.execute(tx_stmt)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     affected_periods: set[tuple[int, int]] = set()
-    for tx in tx_result.scalars().all():
+    doomed = list(tx_result.scalars().all())
+    # Pre-fix split siblings have no pdf_import_id of their own — sweep them
+    # by split group so the statement leaves nothing behind (V9-F02).
+    doomed.extend(await _load_split_siblings(db, {t.id for t in doomed}))
+    for tx in doomed:
         tx.deleted_at = now
         period = parse_period(tx.occurred_at)
         if period:

@@ -82,13 +82,19 @@ def paired_dedup_predicate(table: str = "transactions") -> str:
     or ``t`` when the query aliases it). Single source of truth so every
     cashflow entrypoint (monthly / recompute / by-category / snapshot /
     MCP) dedups identically — review V7 §P1-3 / §P2-4.
+
+    V9-F09: the ``type = 'transfer'`` gate. Only transfers are recorded as two
+    rows, so only a transfer can be a redundant leg. A row that has left a pair
+    (edited back into an income/expense) but still carries a stale
+    ``paired_with_tx_id`` would otherwise be dropped from income/expense totals
+    entirely — real money silently missing from every dashboard.
     """
     return (
-        "NOT EXISTS ("
+        f"({table}.type <> 'transfer' OR NOT EXISTS ("
         "SELECT 1 FROM transactions p "
         f"WHERE p.deleted_at IS NULL AND p.id < {table}.id "
         f"AND {table}.metadata_json IS NOT NULL AND json_valid({table}.metadata_json) "
-        f"AND p.id = json_extract({table}.metadata_json, '$.paired_with_tx_id'))"
+        f"AND p.id = json_extract({table}.metadata_json, '$.paired_with_tx_id')))"
     )
 
 _RECOMPUTE_SQL = text(f"""

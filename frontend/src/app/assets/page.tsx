@@ -980,6 +980,12 @@ function DistributionPanel({ mode, breakdown, composition, baseCurrency, display
     };
   });
 
+  // A negative bucket (e.g. credit-card debt in "按构成") has no meaningful
+  // pie-slice angle — Recharts doesn't support negative pie values. Keep it
+  // in the legend below (with its negative amount) but drop it from the
+  // chart itself instead of rendering a broken/undefined arc.
+  const pieSlices = pieData.filter((d) => d.value > 0);
+
   const title =
     mode === "class"
       ? "按类型（仅投资）"
@@ -1001,7 +1007,7 @@ function DistributionPanel({ mode, breakdown, composition, baseCurrency, display
         <ResponsiveContainer width="100%" height={300} className="max-w-[360px]">
           <PieChart>
             <Pie
-              data={pieData}
+              data={pieSlices}
               cx="50%"
               cy="50%"
               innerRadius={70}
@@ -1010,7 +1016,7 @@ function DistributionPanel({ mode, breakdown, composition, baseCurrency, display
               dataKey="value"
               stroke="none"
             >
-              {pieData.map((entry, i) => (
+              {pieSlices.map((entry, i) => (
                 <Cell key={i} fill={entry.fill} />
               ))}
             </Pie>

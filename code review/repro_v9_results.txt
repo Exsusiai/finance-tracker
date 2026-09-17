@@ -1,0 +1,189 @@
+Finance Tracker V9 isolated audit probes
+Code baseline: 8fadc38
+Assertions describe correct behaviour. Failures below demonstrate unfixed issues.
+No application lifespan or live services were used by these probes.
+
+FFFFFFFFFFFFFFFFFFFFFF                                                   [100%]
+=================================== FAILURES ===================================
+___________________ test_split_preserves_foreign_base_amount ___________________
+code review/repro_v9.py:99: in test_split_preserves_foreign_base_amount
+    assert actual == D("90"), f"split base total is {actual}, expected 90"
+E   AssertionError: split base total is 32.4, expected 90
+E   assert Decimal('32.4') == Decimal('90')
+E    +  where Decimal('90') = D('90')
+_________________ test_statement_delete_removes_split_children _________________
+code review/repro_v9.py:119: in test_statement_delete_removes_split_children
+    assert await balance(s, a.id) == 0, "80 of deleted statement survives as a split child"
+E   AssertionError: 80 of deleted statement survives as a split child
+E   assert Decimal('-80') == 0
+_____________________ test_split_preserves_signed_balance ______________________
+code review/repro_v9.py:133: in test_split_preserves_signed_balance
+    assert await balance(s, a.id) == D("-100"), "opposite-sign split changes -100 into +60"
+E   AssertionError: opposite-sign split changes -100 into +60
+E   assert Decimal('60') == Decimal('-100')
+E    +  where Decimal('-100') = D('-100')
+____________ test_foreign_transaction_does_not_pollute_account_unit ____________
+code review/repro_v9.py:147: in test_foreign_transaction_does_not_pollute_account_unit
+    assert await balance(s, a.id) in (D("1000"), D("910")), "100 USD is subtracted as 100 EUR"
+E   AssertionError: 100 USD is subtracted as 100 EUR
+E   assert Decimal('900') in (Decimal('1000'), Decimal('910'))
+----------------------------- Captured stdout call -----------------------------
+2026-09-13T23:08:58.540313Z [info     ] ingest_complete                auto_categorized=0 auto_paired=0 periods=1 subaccount_paired=0 suggested=0 total=1
+___________________ test_same_chain_addresses_are_aggregated ___________________
+code review/repro_v9.py:168: in test_same_chain_addresses_are_aggregated
+    assert actual == D("3"), f"1 ETH + 2 ETH became {actual} ETH"
+E   AssertionError: 1 ETH + 2 ETH became 2.00000000 ETH
+E   assert Decimal('2.00000000') == Decimal('3')
+E    +  where Decimal('3') = D('3')
+__________ test_partial_exchange_response_preserves_previous_holdings __________
+code review/repro_v9.py:195: in test_partial_exchange_response_preserves_previous_holdings
+    assert btc == D("1"), f"503 removed BTC; quantity={btc}, status={conn.last_sync_status}, errors={result.total_errors}"
+E   AssertionError: 503 removed BTC; quantity=0E-8, status=ok, errors=0
+E   assert Decimal('0E-8') == Decimal('1')
+E    +  where Decimal('1') = D('1')
+----------------------------- Captured stdout call -----------------------------
+2026-09-13T23:08:58.589641Z [warning  ] bitget_spot_failed             error="Server error '503 Service Unavailable' for url 'https://mock.invalid/api/v2/spot/account/assets'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/503"
+_________ test_amount_and_date_alone_do_not_auto_erase_income_expense __________
+code review/repro_v9.py:207: in test_amount_and_date_alone_do_not_auto_erase_income_expense
+    assert expense.type == "expense" and income.type == "income", f"unrelated rows became transfers: {result.auto_paired}"
+E   AssertionError: unrelated rows became transfers: [(1, 2)]
+E   assert ('transfer' == 'expense'
+E     
+E     - expense
+E     + transfer)
+----------------------------- Captured stdout call -----------------------------
+2026-09-13T23:08:58.635704Z [info     ] transfer_paired                in_id=2 out_id=1 reasons=['amount-equal'] score=80
+2026-09-13T23:08:58.643439Z [info     ] ingest_complete                auto_categorized=0 auto_paired=1 periods=1 subaccount_paired=0 suggested=0 total=2
+____________ test_synthetic_replacement_requires_matching_direction ____________
+code review/repro_v9.py:226: in test_synthetic_replacement_requires_matching_direction
+    assert await balance(s, b.id) == before, "unrelated -100 expense replaced +100 synthetic deposit"
+E   AssertionError: unrelated -100 expense replaced +100 synthetic deposit
+E   assert Decimal('100') == Decimal('0')
+----------------------------- Captured stdout call -----------------------------
+2026-09-13T23:08:58.673983Z [info     ] synthetic_replaced             real_id=3 source_id=1 synthetic_id=2
+___________ test_editing_transfer_does_not_hide_income_from_monthly ____________
+code review/repro_v9.py:241: in test_editing_transfer_does_not_hide_income_from_monthly
+    assert D(monthly[0]["income"]) == D(ts["income"][0]), f"monthly={monthly[0]['income']}, timeseries={ts['income'][0]}"
+E   AssertionError: monthly=0, timeseries=100
+E   assert Decimal('0') == Decimal('100')
+E    +  where Decimal('0') = D('0')
+E    +  and   Decimal('100') = D('100')
+______________ test_inbox_income_to_transfer_preserves_direction _______________
+code review/repro_v9.py:255: in test_inbox_income_to_transfer_preserves_direction
+    assert await balance(s, a.id) == D("100"), "confirmation reverses +100 to -100"
+E   AssertionError: confirmation reverses +100 to -100
+E   assert Decimal('-100') == Decimal('100')
+E    +  where Decimal('100') = D('100')
+______________ test_composition_keeps_large_negative_liabilities _______________
+code review/repro_v9.py:272: in test_composition_keeps_large_negative_liabilities
+    assert composition.total == nw.net_worth, f"composition={composition.total}, net worth={nw.net_worth}, dust={composition.dust_excluded_count}"
+E   AssertionError: composition=10000.0000000000000000, net worth=9000.0000000000000000, dust=1
+E   assert Decimal('10000.0000000000000000') == Decimal('9000.0000000000000000')
+E    +  where Decimal('10000.0000000000000000') = CompositionResult(base_currency='EUR', total=Decimal('10000.0000000000000000'), entries=[{'key': 'STOCK', 'label': 'STOCK', 'asset_class': 'us_stock', 'value': '10000.0000000000000000', 'count': 1}], dust_excluded_count=1).total
+E    +  and   Decimal('9000.0000000000000000') = NetWorthResult(base_currency='EUR', cash_total=Decimal('-1000'), investment_total=Decimal('10000.0000000000000000'), c...e': Decimal('10000.0000000000000000'), 'base_value': Decimal('10000.0000000000000000')}}, as_of='2026-09-13T23:08:58Z').net_worth
+____________ test_paypal_reused_id_is_stable_across_export_windows _____________
+code review/repro_v9.py:296: in test_paypal_reused_id_is_stable_across_export_windows
+    assert result.imported == 1, f"distinct reversal skipped as duplicate: {result}"
+E   AssertionError: distinct reversal skipped as duplicate: CsvImportSummary(detected_source='paypal', parsed=1, imported=0, skipped_duplicate=1, skipped_no_external_id=0, error=None, period='2026-09', opening_balance_seeded=None, new_ids=[])
+E   assert 0 == 1
+E    +  where 0 = CsvImportSummary(detected_source='paypal', parsed=1, imported=0, skipped_duplicate=1, skipped_no_external_id=0, error=None, period='2026-09', opening_balance_seeded=None, new_ids=[]).imported
+----------------------------- Captured stdout call -----------------------------
+2026-09-13T23:08:58.772400Z [info     ] ingest_complete                auto_categorized=0 auto_paired=0 periods=1 subaccount_paired=0 suggested=0 total=1
+2026-09-13T23:08:58.772458Z [info     ] csv_import_complete            account_id=1 imported=1 parsed=1 skipped_duplicate=0
+2026-09-13T23:08:58.772714Z [info     ] csv_import_complete            account_id=1 imported=0 parsed=1 skipped_duplicate=1
+___________________ test_literal_promoted_route_is_reachable ___________________
+code review/repro_v9.py:303: in test_literal_promoted_route_is_reachable
+    assert r.status_code == 200, r.text
+E   AssertionError: {"detail":[{"type":"int_parsing","loc":["path","transaction_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"recently-promoted-to-transfer"}]}
+E   assert 422 == 200
+E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
+___________ test_patch_cannot_move_transaction_into_snapshot_account ___________
+code review/repro_v9.py:315: in test_patch_cannot_move_transaction_into_snapshot_account
+    assert r.status_code in (400, 422), f"snapshot guard bypassed: status {r.status_code}"
+E   AssertionError: snapshot guard bypassed: status 200
+E   assert 200 in (400, 422)
+E    +  where 200 = <Response [200 OK]>.status_code
+____________________ test_fx_only_patch_updates_base_amount ____________________
+code review/repro_v9.py:327: in test_fx_only_patch_updates_base_amount
+    assert D(r.json()["data"]["base_amount"]) == D("80"), "edited FX=0.8, but higher-priority base_amount remains 90"
+E   AssertionError: edited FX=0.8, but higher-priority base_amount remains 90
+E   assert Decimal('90') == Decimal('80')
+E    +  where Decimal('90') = D('90')
+E    +  and   Decimal('80') = D('80')
+_____________ test_uncategorized_income_and_expense_are_not_merged _____________
+code review/repro_v9.py:341: in test_uncategorized_income_and_expense_are_not_merged
+    assert groups == {"income": D("100"), "expense": D("20")}, f"uncategorized breakdown={groups}"
+E   AssertionError: uncategorized breakdown={'expense': Decimal('120')}
+E   assert {'expense': Decimal('120')} == {'expense': D...ecimal('100')}
+E     
+E     Differing items:
+E     {'expense': Decimal('120')} != {'expense': Decimal('20')}
+E     Right contains 1 more item:
+E     {'income': Decimal('100')}
+E     Use -v to get more diff
+________ test_base_currency_change_does_not_relabel_historical_amounts _________
+code review/repro_v9.py:362: in test_base_currency_change_does_not_relabel_historical_amounts
+    assert D(monthly["income"]) == D("900"), f"90 EUR has been relabelled as {monthly['income']} {monthly['base_currency']}"
+E   AssertionError: 90 EUR has been relabelled as 90 CNY
+E   assert Decimal('90') == Decimal('900')
+E    +  where Decimal('90') = D('90')
+E    +  and   Decimal('900') = D('900')
+________ test_llm_response_does_not_overwrite_later_manual_confirmation ________
+code review/repro_v9.py:400: in test_llm_response_does_not_overwrite_later_manual_confirmation
+    assert actual.category_id == travel.id and actual.categorization_method == "user", f"manual category {travel.id} overwritten by {actual.category_id}/{actual.categorization_method}"
+E   AssertionError: manual category 2 overwritten by 1/llm
+E   assert (1 == 2)
+E    +  where 1 = <app.models.Transaction object at 0x114990410>.category_id
+E    +  and   2 = <app.models.Category object at 0x114653c50>.id
+_______________ test_mcp_import_failure_rolls_back_inserted_rows _______________
+code review/repro_v9.py:434: in test_mcp_import_failure_rolls_back_inserted_rows
+    assert count == 0, f"failed MCP import committed {count} transaction(s)"
+E   AssertionError: failed MCP import committed 1 transaction(s)
+E   assert 1 == 0
+_________ test_amex_january_statement_places_december_in_previous_year _________
+code review/repro_v9.py:441: in test_amex_january_statement_places_december_in_previous_year
+    assert rows[0]["occurred_at"].startswith("2025-12-28"), rows[0]
+E   AssertionError: {'amount': '10.00', 'counterparty': None, 'currency': 'EUR', 'description': 'GROCERY SHOP', ...}
+E   assert False
+E    +  where False = <built-in method startswith of str object at 0x114b1e8f0>('2025-12-28')
+E    +    where <built-in method startswith of str object at 0x114b1e8f0> = '2026-12-28T00:00:00Z'.startswith
+_________ test_refresh_matching_respects_manual_category_confirmation __________
+code review/repro_v9.py:452: in test_refresh_matching_respects_manual_category_confirmation
+    assert t.type == "expense", "refresh-matching overwrites a user-confirmed expense as transfer"
+E   AssertionError: refresh-matching overwrites a user-confirmed expense as transfer
+E   assert 'transfer' == 'expense'
+E     
+E     - expense
+E     + transfer
+_____ test_sepa_direct_debit_is_not_automatically_an_own_account_transfer ______
+code review/repro_v9.py:459: in test_sepa_direct_debit_is_not_automatically_an_own_account_transfer
+    assert rows[0]["type"] == "expense", rows[0]
+E   AssertionError: {'amount': '100.00', 'counterparty': None, 'currency': 'EUR', 'description': 'SEPA Direct Debit Insurance', ...}
+E   assert 'transfer' == 'expense'
+E     
+E     - expense
+E     + transfer
+=========================== short test summary info ============================
+FAILED code review/repro_v9.py::test_split_preserves_foreign_base_amount - As...
+FAILED code review/repro_v9.py::test_statement_delete_removes_split_children
+FAILED code review/repro_v9.py::test_split_preserves_signed_balance - Asserti...
+FAILED code review/repro_v9.py::test_foreign_transaction_does_not_pollute_account_unit
+FAILED code review/repro_v9.py::test_same_chain_addresses_are_aggregated - As...
+FAILED code review/repro_v9.py::test_partial_exchange_response_preserves_previous_holdings
+FAILED code review/repro_v9.py::test_amount_and_date_alone_do_not_auto_erase_income_expense
+FAILED code review/repro_v9.py::test_synthetic_replacement_requires_matching_direction
+FAILED code review/repro_v9.py::test_editing_transfer_does_not_hide_income_from_monthly
+FAILED code review/repro_v9.py::test_inbox_income_to_transfer_preserves_direction
+FAILED code review/repro_v9.py::test_composition_keeps_large_negative_liabilities
+FAILED code review/repro_v9.py::test_paypal_reused_id_is_stable_across_export_windows
+FAILED code review/repro_v9.py::test_literal_promoted_route_is_reachable - As...
+FAILED code review/repro_v9.py::test_patch_cannot_move_transaction_into_snapshot_account
+FAILED code review/repro_v9.py::test_fx_only_patch_updates_base_amount - Asse...
+FAILED code review/repro_v9.py::test_uncategorized_income_and_expense_are_not_merged
+FAILED code review/repro_v9.py::test_base_currency_change_does_not_relabel_historical_amounts
+FAILED code review/repro_v9.py::test_llm_response_does_not_overwrite_later_manual_confirmation
+FAILED code review/repro_v9.py::test_mcp_import_failure_rolls_back_inserted_rows
+FAILED code review/repro_v9.py::test_amex_january_statement_places_december_in_previous_year
+FAILED code review/repro_v9.py::test_refresh_matching_respects_manual_category_confirmation
+FAILED code review/repro_v9.py::test_sepa_direct_debit_is_not_automatically_an_own_account_transfer
+22 failed in 1.24s

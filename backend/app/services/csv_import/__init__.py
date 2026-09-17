@@ -12,6 +12,7 @@ Returns a summary dict the caller can surface to the UI.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -58,18 +59,48 @@ async def import_csv_rows(
     if not rows:
         return summary
 
-    # Existing external_ids on this account (live rows only) → dedup set.
-    existing = set(
-        (
-            await db.execute(
-                select(Transaction.external_id).where(
-                    Transaction.account_id == account_id,
-                    Transaction.deleted_at.is_(None),
-                    Transaction.external_id.isnot(None),
-                )
+    # Existing rows on this account (live only). We need CONTENT, not just the
+    # external_id string: PayPal reuses a Transaction ID for related events
+    # (a withdrawal and its later reversal), and the parser's per-file `#N`
+    # suffix is only stable WITHIN one export. When the two events land in
+    # different export windows each gets the bare ID, so pure string dedup
+    # skipped the second, distinct event as a "duplicate" (V9-F12). Identity =
+    # base provider ID + the stable event fields (timestamp, amount, type,
+    # direction).
+    existing_rows = (
+        await db.execute(
+            select(
+                Transaction.external_id,
+                Transaction.occurred_at,
+                Transaction.amount,
+                Transaction.type,
+                Transaction.metadata_json,
+            ).where(
+                Transaction.account_id == account_id,
+                Transaction.deleted_at.is_(None),
+                Transaction.external_id.isnot(None),
             )
-        ).scalars().all()
-    )
+        )
+    ).all()
+    existing = {row[0] for row in existing_rows}
+
+    def _direction(meta_json: str | None) -> str | None:
+        if not meta_json:
+            return None
+        try:
+            m = json.loads(meta_json)
+            return m.get("transfer_direction") if isinstance(m, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    def _content_key(ext: str, occurred_at: str, amount, tx_type: str, meta_json: str | None):
+        base = ext.split("#", 1)[0]
+        amt = Decimal(str(amount or 0)).copy_abs().normalize()
+        return (base, occurred_at, amt, tx_type, _direction(meta_json))
+
+    existing_content = {
+        _content_key(row[0], row[1], row[2], row[3], row[4]) for row in existing_rows
+    }
 
     # Seed the opening balance on the VERY FIRST import so the account balance
     # matches the provider's real balance (we only import a window; whatever
@@ -96,15 +127,32 @@ async def import_csv_rows(
 
     new_txs: list[Transaction] = []
     seen_in_batch: set[str] = set()
+    batch_content: set = set()
     for r in rows:
         ext = r.get("external_id")
         if not ext:
             summary.skipped_no_external_id += 1
             continue
-        if ext in existing or ext in seen_in_batch:
+        key = _content_key(
+            ext, r.get("occurred_at", ""), r.get("amount", 0),
+            r.get("type", "expense"), r.get("metadata_json"),
+        )
+        # Duplicate = same provider ID AND same event content. A reused ID
+        # with different content (the reversal of an earlier withdrawal) is a
+        # distinct event and must import — under a free suffix so the partial
+        # unique index (account_id, external_id) stays satisfied.
+        if key in existing_content or key in batch_content:
             summary.skipped_duplicate += 1
             continue
+        if ext in existing or ext in seen_in_batch:
+            base = ext.split("#", 1)[0]
+            n = 2
+            while f"{base}#{n}" in existing or f"{base}#{n}" in seen_in_batch:
+                n += 1
+            ext = f"{base}#{n}"
+            r = {**r, "external_id": ext}
         seen_in_batch.add(ext)
+        batch_content.add(key)
         new_txs.append(
             Transaction(
                 account_id=account_id,

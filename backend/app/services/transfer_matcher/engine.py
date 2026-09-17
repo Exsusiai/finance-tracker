@@ -48,6 +48,13 @@ class _Candidate:
     b: Transaction          # the incoming leg (income)
     score: int
     reasons: list[str]
+    # V9-F07: eligible for AUTOMATIC rewriting (not just suggestion). Amount +
+    # date coincidence alone is NOT enough to silently erase real income /
+    # expense — auto requires positive evidence (IBAN / account-name hit) OR
+    # an account pair with previously confirmed transfers between them (the
+    # compromise: N26↔Revolut keeps auto-pairing, a first-ever account combo
+    # only suggests).
+    auto: bool = False
 
 
 def _date_only(dt_str: str) -> datetime:
@@ -163,6 +170,29 @@ def _is_eligible(tx: Transaction) -> bool:
         except (json.JSONDecodeError, TypeError):
             pass
     return True
+
+
+def _money_direction(tx: Transaction) -> str | None:
+    """The row's own money direction: 'out' (money leaves the account),
+    'in' (money arrives), or None when undeterminable.
+
+    expense → out, income → in, transfer → its recorded metadata
+    transfer_direction. Used to stop direction-blind matching (V9-F08): a
+    -100 expense must never replace / pair with a +100 mirror just because
+    the absolute amounts and dates line up.
+    """
+    if tx.type == "expense":
+        return "out"
+    if tx.type == "income":
+        return "in"
+    if tx.type == "transfer" and tx.metadata_json:
+        try:
+            meta = json.loads(tx.metadata_json)
+            if isinstance(meta, dict) and meta.get("transfer_direction") in ("in", "out"):
+                return meta["transfer_direction"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
 
 
 def _dismissed_pair_ids(tx: Transaction) -> set[int]:
@@ -285,26 +315,41 @@ async def find_transfer_pairs(
             outflows.append(r)
             inflows.append(r)
 
-    pairs: list[_Candidate] = []
-    used_ids: set[int] = set()
+    # V9-F07 compromise: automatic rewriting needs more than an amount+date
+    # coincidence. Positive evidence = an IBAN or account-name hit in the
+    # descriptions, OR the two accounts already have at least one confirmed
+    # transfer between them (established relationship — keeps the user's
+    # routine same-day N26↔Revolut moves auto-pairing even though their
+    # descriptions carry no account names). First-ever account combos with
+    # nothing but amount+date only ever become suggestions.
+    est_rows = (await db.execute(
+        select(Transaction.account_id, Transaction.counter_account_id).where(
+            Transaction.deleted_at.is_(None),
+            Transaction.type == "transfer",
+            Transaction.counter_account_id.isnot(None),
+        ).distinct()
+    )).all()
+    established: set[frozenset[int]] = {
+        frozenset((a, b)) for a, b in est_rows if a is not None and b is not None
+    }
+
     # Precompute per-row dismissed counterpart sets (avoids re-parsing
     # metadata JSON inside the O(out×in) loop).
     dismissed: dict[int, set[int]] = {r.id: _dismissed_pair_ids(r) for r in rows}
 
+    # Phase 1 — collect ALL candidates ≥ SUGGEST without consuming legs.
+    # The old loop marked legs used the moment the FIRST ≥AUTO candidate
+    # appeared (iteration order), so a later, stronger candidate for the same
+    # leg never got compared. Conflicts are resolved in phase 2, score-first.
+    collected: list[_Candidate] = []
     for out_tx in outflows:
-        if out_tx.id in used_ids:
-            continue
         for in_tx in inflows:
-            if in_tx.id in used_ids:
-                continue
             # User explicitly rejected this combo — never resuggest.
             if in_tx.id in dismissed.get(out_tx.id, ()) or out_tx.id in dismissed.get(in_tx.id, ()):
                 continue
             # Self-pair guard. The fallback in the directionless branch above
             # injects the same row into BOTH outflows and inflows, so without
-            # this check `pair(r, r)` becomes a valid candidate (same amount,
-            # same date → score 80, auto-confirmed) and we'd write a row's
-            # paired_with_tx_id pointing at itself.
+            # this check `pair(r, r)` becomes a valid candidate.
             if in_tx.id == out_tx.id:
                 continue
             if in_tx.account_id == out_tx.account_id:
@@ -329,15 +374,31 @@ async def find_transfer_pairs(
             score += hint
             reasons += hint_reasons
 
-            if score >= SCORE_THRESHOLD_SUGGEST:
-                pairs.append(_Candidate(a=out_tx, b=in_tx, score=score, reasons=reasons))
-                if score >= SCORE_THRESHOLD_AUTO:
-                    used_ids.add(out_tx.id)
-                    used_ids.add(in_tx.id)
-                    break  # this outflow is matched, move on
+            if score < SCORE_THRESHOLD_SUGGEST:
+                continue
+            # Positive evidence: IBAN / account-name hints only. The ±5
+            # directional-verb hints ("to "/"from ") describe generic payment
+            # wording, not an own-account relationship.
+            evidence = any("IBAN" in r or "name" in r for r in hint_reasons)
+            pair_known = frozenset((out_tx.account_id, in_tx.account_id)) in established
+            auto = score >= SCORE_THRESHOLD_AUTO and (evidence or pair_known)
+            if score >= SCORE_THRESHOLD_AUTO and not auto:
+                reasons.append("suggest-only:no-evidence")
+            collected.append(_Candidate(a=out_tx, b=in_tx, score=score, reasons=reasons, auto=auto))
 
-    # Sort: high-score first (caller may pair top-down)
-    pairs.sort(key=lambda c: -c.score)
+    # Phase 2 — resolve conflicts score-first: auto winners consume their
+    # legs; weaker candidates touching a consumed leg are dropped so callers
+    # never see a suggestion for a leg that a stronger auto pair owns.
+    collected.sort(key=lambda c: -c.score)
+    used_ids: set[int] = set()
+    pairs: list[_Candidate] = []
+    for c in collected:
+        if c.a.id in used_ids or c.b.id in used_ids:
+            continue
+        if c.auto:
+            used_ids.add(c.a.id)
+            used_ids.add(c.b.id)
+        pairs.append(c)
     return pairs
 
 
@@ -407,6 +468,14 @@ async def replace_synthetic_with_real(
             except (json.JSONDecodeError, TypeError):
                 meta = {}
         if not isinstance(meta, dict) or meta.get("synthetic_counterleg") is not True:
+            continue
+
+        # V9-F08: the real row must move money the SAME way the mirror did.
+        # Without this, an unrelated -100 expense could replace a +100
+        # synthetic deposit and get force-flipped to transfer-in (+200 swing).
+        mirror_dir = meta.get("transfer_direction")
+        real_dir_own = _money_direction(real_tx)
+        if mirror_dir not in ("in", "out") or real_dir_own != mirror_dir:
             continue
 
         # Found a synthetic mirror to replace. Re-point its source.
@@ -627,6 +696,14 @@ async def find_existing_counter_leg(
             continue  # don't bind two synthetic mirrors to each other
         if meta.get("subaccount") is True:
             continue
+        # V9-F08: honour the "opposite direction" promise in the docstring.
+        # A transfer's other leg must move money the opposite way; two
+        # same-direction rows are never one transfer. Unknown directions
+        # (legacy direction-less transfer rows) are allowed through.
+        src_dir = _money_direction(src_tx)
+        cand_dir = _money_direction(c)
+        if src_dir is not None and cand_dir is not None and src_dir == cand_dir:
+            continue
         return c
     return None
 
@@ -744,8 +821,10 @@ async def auto_pair_after_import(
 
     # Step 2: cross-account transfer matcher
     candidates = await find_transfer_pairs(db, candidate_ids=new_tx_ids)
-    auto = [c for c in candidates if c.score >= SCORE_THRESHOLD_AUTO]
-    suggested = [c for c in candidates if SCORE_THRESHOLD_SUGGEST <= c.score < SCORE_THRESHOLD_AUTO]
+    # V9-F07: auto-rewrite gates on candidate.auto (evidence / established
+    # account pair), not on raw score — see find_transfer_pairs.
+    auto = [c for c in candidates if c.auto]
+    suggested = [c for c in candidates if not c.auto]
 
     paired_ids: list[tuple[int, int]] = []
     for c in auto:

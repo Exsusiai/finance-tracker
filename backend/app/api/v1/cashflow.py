@@ -133,6 +133,13 @@ async def cashflow_by_category(
     FX-missing rows. We now reuse `_AMOUNT_BASE_EXPR` from the cashflow
     engine (CASE: base currency → amount; FX present → fold; else NULL),
     so `/by-category` and `/monthly` agree exactly.
+
+    Review V9 F15 fix: uncategorized rows (`category_id IS NULL`) used to
+    default `kind` to `'expense'`, so an uncategorized income row and an
+    uncategorized expense row were merged into one bucket mislabeled
+    `expense`. Uncategorized rows now fall back to `t.type` for `kind` and
+    are grouped separately per type. `adjustment` rows are excluded from
+    this report (they aren't income/expense/transfer activity).
     """
     # Normalise scope: a range (from/to) takes precedence over a single
     # period. Collapse a single period into a range so the SQL has one shape.
@@ -149,7 +156,7 @@ async def cashflow_by_category(
         SELECT
             c.id,
             COALESCE(c.name, 'Uncategorized'),
-            COALESCE(c.kind, 'expense'),
+            COALESCE(c.kind, t.type),
             SUM(ABS({_AMOUNT_BASE_EXPR})) AS total,
             COUNT(*) AS count,
             SUM(CASE
@@ -162,12 +169,16 @@ async def cashflow_by_category(
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.deleted_at IS NULL
           AND t.is_pending = 0
+          AND t.type != 'adjustment'
           AND substr(t.occurred_at, 1, 7) >= :range_from
           AND substr(t.occurred_at, 1, 7) <= :range_to
           -- Keep only one leg per transfer pair (see paired_dedup_predicate),
           -- otherwise the 借还钱 category double-counts the moved amount.
           AND {paired_dedup_predicate("t")}
-        GROUP BY t.category_id
+        -- Uncategorized rows (c.kind IS NULL) fall back to t.type for kind,
+        -- so they group separately per type instead of merging into one
+        -- 'expense'-labeled bucket (review V9 F15).
+        GROUP BY t.category_id, COALESCE(c.kind, t.type)
         ORDER BY total DESC
     """)
     result = await db.execute(stmt, {
