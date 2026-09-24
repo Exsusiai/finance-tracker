@@ -74,15 +74,37 @@ if _is_truthy "$AUTH_DISABLED_VAL"; then
   esac
 fi
 
+# Kill anything still listening on a port before starting. A stale listener
+# outside our tmux sessions (e.g. an orphan from a pre-tmux launch) makes the
+# new server die on EADDRINUSE while the health check below passes against the
+# WRONG process — the orphan then serves an in-memory build manifest that no
+# longer matches .next on disk (chunk 400s, "Application error" on every page).
+_free_port() {
+  local port="$1" pids
+  pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    echo "[start] WARN: port ${port} still held by pid(s) ${pids} — killing stale listener(s)"
+    kill $pids 2>/dev/null || true
+    sleep 2
+    pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+      echo "[start] ERROR: port ${port} still occupied by pid(s) ${pids} after kill; aborting." >&2
+      exit 1
+    fi
+  fi
+}
+
 echo "[start] backend → tmux ft-backend on ${BACKEND_HOST}:${BACKEND_PORT}"
 tmux kill-session -t ft-backend 2>/dev/null || true
 sleep 1
+_free_port "${BACKEND_PORT}"
 tmux new-session -d -s ft-backend \
   "cd '$ROOT' && BACKEND_HOST='${BACKEND_HOST}' .venv/bin/python -m uvicorn app.main:app --host '${BACKEND_HOST}' --port ${BACKEND_PORT} 2>&1 | tee /tmp/ft-backend.log"
 
 echo "[start] frontend → tmux ft-frontend on :${FRONTEND_PORT}"
 tmux kill-session -t ft-frontend 2>/dev/null || true
 sleep 1
+_free_port "${FRONTEND_PORT}"
 tmux new-session -d -s ft-frontend \
   "cd '$ROOT/frontend' && npx next start -H 0.0.0.0 -p ${FRONTEND_PORT} 2>&1 | tee /tmp/ft-frontend.log"
 
