@@ -23,6 +23,7 @@ function _useStableId(prefix: string): string {
 const PROVIDERS: Array<{ value: BrokerProvider; label: string }> = [
   { value: "ibkr", label: "Interactive Brokers (Flex)" },
   { value: "traderepublic", label: "Trade Republic" },
+  { value: "trading212", label: "Trading 212" },
 ];
 
 interface BrokerConnectionEditorProps {
@@ -48,6 +49,10 @@ export function BrokerConnectionEditor({
   const [queryId, setQueryId] = useState("");
   const [token, setToken] = useState("");
 
+  // Trading 212 fields
+  const [t212Key, setT212Key] = useState("");
+  const [t212Secret, setT212Secret] = useState("");
+
   // Trade Republic fields (two-step)
   const [phone, setPhone] = useState("");
   const [pin, setPin] = useState("");
@@ -60,6 +65,8 @@ export function BrokerConnectionEditor({
   const providerId = _useStableId("broker");
   const queryIdId = _useStableId("qid");
   const tokenId = _useStableId("token");
+  const t212KeyId = _useStableId("t212key");
+  const t212SecretId = _useStableId("t212secret");
   const phoneId = _useStableId("phone");
   const pinId = _useStableId("pin");
   const codeId = _useStableId("code");
@@ -111,6 +118,30 @@ export function BrokerConnectionEditor({
       setExisting(r);
       setToken("");
       setOkMsg("凭据已加密保存。点 ↻ 同步可拉取持仓（收盘后数据）。");
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "保存失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // ─── Trading 212 ──────────────────────────────────────────────────────
+  async function handleT212Submit() {
+    setError(null);
+    setOkMsg(null);
+    if (!t212Key.trim()) return setError("API Key 必填");
+    if (!t212Secret.trim()) return setError("API Secret 必填");
+    try {
+      setSubmitting(true);
+      const r = await upsertBrokerConnection(accountId, {
+        provider: "trading212",
+        token: t212Key.trim(),
+        api_secret: t212Secret.trim(),
+      });
+      setExisting(r);
+      setT212Key("");
+      setT212Secret("");
+      setOkMsg("凭据已加密保存。点 ↻ 同步可拉取持仓与闲置现金。");
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "保存失败");
     } finally {
@@ -182,7 +213,7 @@ export function BrokerConnectionEditor({
     <div className="space-y-3">
       {existing && existing.credentials_stale && (
         <div className="px-3 py-2 rounded-lg border border-destructive/40 bg-destructive/10 text-xs text-destructive">
-          ⚠ 已保存的凭据无法解密（加密 key 已变更），请重新{provider === "traderepublic" ? "连接" : "输入 Token"}并保存。
+          ⚠ 已保存的凭据无法解密（加密 key 已变更），请重新{provider === "traderepublic" ? "连接" : provider === "trading212" ? "输入 API Key/Secret" : "输入 Token"}并保存。
         </div>
       )}
       {existing && existing.has_token && (
@@ -262,6 +293,52 @@ export function BrokerConnectionEditor({
           <button
             type="button"
             onClick={() => void handleIbkrSubmit()}
+            disabled={submitting || loadFailed}
+            className="w-full px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+          >
+            {submitting ? "保存中…" : existing ? "更新凭据" : "保存凭据"}
+          </button>
+        </div>
+      )}
+
+      {/* ── Trading 212 ────────────────────────────────────────── */}
+      {provider === "trading212" && (
+        <div className="space-y-2">
+          <div className="px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs text-amber-800 dark:text-amber-200">
+            ℹ 在 Trading 212 App / 网页：<strong>Settings → API</strong> 生成 API Key。
+            权限只勾<strong>只读</strong>（account data + portfolio），不要给下单权限。
+            Secret 只显示一次，请立即粘贴到下方。注意：Invest 与 Stocks ISA 是独立账户，各自需要单独的
+            Key；Demo 环境的 Key 不能用于真实账户。
+          </div>
+          <div>
+            <label htmlFor={t212KeyId} className="block text-xs font-medium mb-1">API Key (ID)</label>
+            <input
+              id={t212KeyId}
+              type="text"
+              value={t212Key}
+              onChange={(e) => setT212Key(e.target.value)}
+              autoComplete="off"
+              className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          <div>
+            <label htmlFor={t212SecretId} className="block text-xs font-medium mb-1">
+              API Secret {existing && <span className="text-muted-foreground">（提交即覆盖已有）</span>}
+            </label>
+            <input
+              id={t212SecretId}
+              type="password"
+              value={t212Secret}
+              onChange={(e) => setT212Secret(e.target.value)}
+              autoComplete="new-password"
+              className="w-full px-3 py-2 text-sm font-mono rounded-lg border border-border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          {error && <div className="text-xs text-destructive">{error}</div>}
+          {okMsg && <div className="text-xs text-emerald-600 dark:text-emerald-400">{okMsg}</div>}
+          <button
+            type="button"
+            onClick={() => void handleT212Submit()}
             disabled={submitting || loadFailed}
             className="w-full px-4 py-2 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
           >

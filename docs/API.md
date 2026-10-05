@@ -520,24 +520,28 @@
 
 ---
 
-## 13. 券商同步 Broker Sync (IBKR Flex + Trade Republic)
+## 13. 券商同步 Broker Sync (IBKR Flex + Trade Republic + Trading 212)
 
-券商账户（`type=brokerage`）持仓快照与估值。与 crypto/exchange 同表 `asset_holdings`，共用 `POST /accounts/{id}/sync` orchestrator。Flex token / TR cookie session 以 AES-256-GCM 加密存入 `broker_connections`（需 `FINANCE_BANK_ENCRYPTION_KEY`）；secrets 绝不回显。
+券商账户（`type=brokerage`）持仓快照与估值。与 crypto/exchange 同表 `asset_holdings`，共用 `POST /accounts/{id}/sync` orchestrator。Flex token / TR cookie session / T212 key pair 以 AES-256-GCM 加密存入 `broker_connections`（需 `FINANCE_BANK_ENCRYPTION_KEY`）；secrets 绝不回显。
 
-### IBKR Flex 连接（静态 token）
+### IBKR Flex / Trading 212 连接（静态凭据）
 
 | Method | Path                                   | 说明                                                      |
 |--------|----------------------------------------|-----------------------------------------------------------|
 | GET    | `/accounts/{id}/broker-connection`     | 获取连接状态（未设时 `data=null`；`credentials_stale=true` 表示加密密钥已轮换需重填）|
-| PUT    | `/accounts/{id}/broker-connection`     | IBKR：创建或覆盖（body: `provider`+`token`+`query_id`；token 加密入库）|
+| PUT    | `/accounts/{id}/broker-connection`     | IBKR / Trading 212：创建或覆盖（凭据加密入库）|
 | DELETE | `/accounts/{id}/broker-connection`     | 删除连接                                                  |
 
 **`PUT /accounts/{id}/broker-connection` 请求**（`BrokerConnectionIn`）：
 ```json
 { "provider": "ibkr", "token": "<Flex Web Service token>", "query_id": "<数字 Query ID>" }
 ```
-- `provider` 当前仅支持 `"ibkr"`（TR 走下方专属端点）
-- `query_id` 为 IBKR Client Portal 创建的 Activity Flex Query ID（只需勾选 Open Positions section，Format=XML）
+```json
+{ "provider": "trading212", "token": "<API Key (ID)>", "api_secret": "<API Secret>" }
+```
+- `provider` 支持 `"ibkr"` / `"trading212"`（TR 走下方专属端点）
+- IBKR：`query_id` 为 IBKR Client Portal 创建的 Activity Flex Query ID（只需勾选 Open Positions section，Format=XML），必填
+- Trading 212：`api_secret` 必填；后端把 key+secret 合成 `"<key>:<secret>"` 单 blob 加密存 `token_enc`，`query_id=NULL`。密钥在 T212 App Settings → API 生成（只勾只读 scope；Invest / Stocks ISA 各自独立 key；仅支持 LIVE 环境）
 - 未配置 `FINANCE_BANK_ENCRYPTION_KEY` 时返回 400
 
 **`BrokerConnectionOut` 字段**：`id`, `provider`, `query_id`（TR 为 `null`）, `has_token` (bool), `credentials_stale` (bool), `last_synced_at`, `last_sync_status`, `last_sync_error`。
@@ -570,7 +574,9 @@ TR 无官方 API，使用社区逆向库 `pytr`（仅只读）。登录需两步
 
 ### 同步触发（共用）
 
-`POST /accounts/{id}/sync` 对 `brokerage` 类型账户也适用（orchestrator 按 `provider` dispatch：IBKR 走 Flex token，TR 走 cookie session）。同步完成后持仓写入 `asset_holdings`，价格写入 `market_prices`。
+`POST /accounts/{id}/sync` 对 `brokerage` 类型账户也适用（orchestrator 按 `provider` dispatch：IBKR 走 Flex token，TR 走 cookie session，Trading 212 走 Basic-auth key pair）。同步完成后持仓写入 `asset_holdings`，价格写入 `market_prices`。
+
+> Trading 212 为官方公开 REST API（beta）：`GET /equity/positions`（instrument + currentPrice 内嵌，原币写 `market_prices(source='trading212')`）+ `GET /equity/account/summary`（闲置现金 availableToTrade+reservedForOrders+inPies → cash 持仓，summary 失败不阻塞持仓）。positions 不带 instrument type，ETF 会按 ISIN 前缀归入 us_stock/eu_stock（未调 5MB metadata 端点，known limitation）。
 
 > `GET /accounts/balances` 对 brokerage 账户返回 `compute_brokerage_value_per_account` 折算到 `BASE_CURRENCY` 的估值（EUR/USD→CNY via `services/valuation/fx.py`）。
 

@@ -711,3 +711,257 @@ class TestTradeRepublicSync:
             )
         ).scalars().all()
         assert len(holdings) == 2
+
+
+# ═══ Trading 212 ═════════════════════════════════════════════════════════════
+#
+# Official public REST API (beta). Basic auth (API key + secret). The
+# positions endpoint embeds the instrument (ticker/name/isin/currency) and
+# currentPrice, so one GET covers holdings + prices; account/summary adds
+# idle cash. All HTTP goes through httpx.MockTransport — no network.
+
+_T212_BLOB = "key-id-123:secret-xyz"
+
+_T212_POSITIONS = [
+    {
+        "instrument": {
+            "ticker": "AAPL_US_EQ",
+            "name": "Apple Inc",
+            "isin": "US0378331005",
+            "currency": "USD",
+        },
+        "quantity": 15.5,
+        "quantityAvailableForTrading": 12.5,
+        "quantityInPies": 3,
+        "currentPrice": 185.5,
+        "averagePricePaid": 170.25,
+        "createdAt": "2024-01-10T09:15:00Z",
+        "walletImpact": {"currency": "EUR", "totalCost": 2089.45},
+    },
+    {
+        "instrument": {
+            "ticker": "VUSA_LSE_EQ",
+            "name": "Vanguard S&P 500 UCITS ETF",
+            "isin": "IE00B3XXRP09",
+            "currency": "EUR",
+        },
+        "quantity": 10,
+        "currentPrice": 90.12,
+        "averagePricePaid": 80.5,
+    },
+    {
+        "instrument": {
+            "ticker": "BTC_CRYPTO",
+            "name": "Bitcoin",
+            "isin": "",
+            "currency": "USD",
+        },
+        "quantity": 0.05,
+        "currentPrice": 65000.0,
+        "averagePricePaid": None,
+    },
+]
+
+_T212_SUMMARY = {
+    "id": 12345678,
+    "currency": "EUR",
+    "totalValue": 15250.75,
+    "cash": {"availableToTrade": 2500.5, "reservedForOrders": 150.0, "inPies": 500.0},
+    "investments": {"currentValue": 12100.25, "totalCost": 10500.0},
+}
+
+
+def _t212_handler(
+    *,
+    positions=None,
+    summary=None,
+    positions_status: int = 200,
+    summary_status: int = 200,
+):
+    import base64
+
+    expected_auth = "Basic " + base64.b64encode(_T212_BLOB.encode()).decode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == expected_auth
+        if request.url.path.endswith("/equity/positions"):
+            return httpx.Response(positions_status, json=positions or [])
+        if request.url.path.endswith("/equity/account/summary"):
+            return httpx.Response(summary_status, json=summary or {})
+        return httpx.Response(404)
+
+    return handler
+
+
+def _t212_provider(handler):
+    from app.services.broker_sync.trading212 import Trading212Provider
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return Trading212Provider(credentials_blob=_T212_BLOB, client=client)
+
+
+class TestTrading212Mapping:
+    def test_clean_symbol(self):
+        from app.services.broker_sync.trading212 import _clean_symbol
+
+        assert _clean_symbol("AAPL_US_EQ") == "AAPL"
+        assert _clean_symbol("VUSA_LSE_EQ") == "VUSA"
+        assert _clean_symbol("BTC_CRYPTO") == "BTC"
+        # Ticker with no exchange segment (lowercase marker variants).
+        assert _clean_symbol("VUAGl_EQ") == "VUAGL"
+        # Unknown shape passes through untouched (upper-cased).
+        assert _clean_symbol("WEIRD") == "WEIRD"
+
+    def test_asset_class(self):
+        from app.services.broker_sync.trading212 import _t212_asset_class
+
+        assert _t212_asset_class("AAPL_US_EQ", "US0378331005") == "us_stock"
+        assert _t212_asset_class("VUSA_LSE_EQ", "IE00B3XXRP09") == "eu_stock"
+        assert _t212_asset_class("BTC_CRYPTO", "") == "crypto"
+        # US exchange segment wins even without an ISIN.
+        assert _t212_asset_class("MSFT_US_EQ", "") == "us_stock"
+        # No signal at all → other.
+        assert _t212_asset_class("X_EQ", "") == "other"
+
+
+class TestTrading212Provider:
+    async def test_fetch_positions_and_cash(self):
+        prov = _t212_provider(
+            _t212_handler(positions=_T212_POSITIONS, summary=_T212_SUMMARY)
+        )
+        positions = await prov.fetch_positions()
+        by = {p.symbol: p for p in positions}
+
+        assert by["AAPL"].quantity == Decimal("15.5")
+        assert by["AAPL"].mark_price == Decimal("185.5")
+        assert by["AAPL"].avg_cost == Decimal("170.25")
+        assert by["AAPL"].currency == "USD"
+        assert by["AAPL"].asset_class == "us_stock"
+        assert by["AAPL"].conid == "US0378331005"  # ISIN as stable id
+        assert by["AAPL"].description == "Apple Inc"
+
+        assert by["VUSA"].asset_class == "eu_stock"
+        assert by["VUSA"].currency == "EUR"
+
+        assert by["BTC"].asset_class == "crypto"
+        assert by["BTC"].avg_cost is None
+        assert by["BTC"].conid == "BTC_CRYPTO"  # no ISIN → ticker fallback
+
+        # Idle cash from account/summary: 2500.5 + 150 + 500, account ccy.
+        cash = by["EUR"]
+        assert cash.asset_class == "cash"
+        assert cash.quantity == Decimal("3150.5")
+        assert cash.mark_price == Decimal("1")
+
+    async def test_summary_failure_is_non_fatal(self):
+        prov = _t212_provider(
+            _t212_handler(positions=_T212_POSITIONS, summary_status=500)
+        )
+        positions = await prov.fetch_positions()
+        assert {p.symbol for p in positions} == {"AAPL", "VUSA", "BTC"}
+
+    async def test_zero_cash_omitted(self):
+        summary = {"currency": "EUR", "cash": {"availableToTrade": 0}}
+        prov = _t212_provider(
+            _t212_handler(positions=_T212_POSITIONS, summary=summary)
+        )
+        positions = await prov.fetch_positions()
+        assert "EUR" not in {p.symbol for p in positions}
+
+    async def test_401_raises_with_env_hint(self):
+        prov = _t212_provider(_t212_handler(positions_status=401))
+        with pytest.raises(BrokerSyncError, match="LIVE/DEMO"):
+            await prov.fetch_positions()
+
+    async def test_403_raises_scope_hint(self):
+        prov = _t212_provider(_t212_handler(positions_status=403))
+        with pytest.raises(BrokerSyncError, match="permission"):
+            await prov.fetch_positions()
+
+    async def test_429_raises_rate_limit(self):
+        prov = _t212_provider(_t212_handler(positions_status=429))
+        with pytest.raises(BrokerSyncError, match=r"[Rr]ate"):
+            await prov.fetch_positions()
+
+    def test_blob_without_secret_raises(self):
+        from app.services.broker_sync.trading212 import Trading212Provider
+
+        with pytest.raises(BrokerSyncError):
+            Trading212Provider(credentials_blob="no-colon-here")
+
+    def test_dispatch_trading212(self):
+        from app.services.broker_sync.trading212 import Trading212Provider
+
+        prov = dispatch("trading212", token=_T212_BLOB, query_id=None)
+        assert isinstance(prov, Trading212Provider)
+
+
+class TestTrading212Sync:
+    async def test_orchestrator_brokerage_t212(self, db: AsyncSession, monkeypatch):
+        """Brokerage sync with a trading212 connection row + stubbed provider
+        — covers the query_id=None path and source tagging."""
+        from app.services.wallet_sync import orchestrator
+
+        acc = await _make_brokerage_account(db, "T212-Orch")
+        db.add(BrokerConnection(
+            account_id=acc.id,
+            provider="trading212",
+            token_enc=encrypt_str(_T212_BLOB),
+            query_id=None,
+            created_at=_utcnow(),
+            updated_at=_utcnow(),
+        ))
+        await db.commit()
+
+        async def _fetch(self):
+            return [
+                BrokerPosition(
+                    symbol="AAPL", conid="US0378331005", asset_category="",
+                    currency="USD", quantity=Decimal("15.5"),
+                    mark_price=Decimal("185.5"), avg_cost=Decimal("170.25"),
+                    description="Apple Inc", asset_class="us_stock",
+                ),
+                BrokerPosition(
+                    symbol="EUR", conid=None, asset_category="cash",
+                    currency="EUR", quantity=Decimal("3150.5"),
+                    mark_price=Decimal("1"), avg_cost=None,
+                    description="EUR 现金", asset_class="cash",
+                ),
+            ]
+
+        class _StubProvider:
+            provider_id = "trading212"
+            fetch_positions = _fetch
+
+        def _stub_dispatch(provider, *, token, query_id):
+            assert provider == "trading212"
+            assert token == _T212_BLOB
+            assert query_id is None
+            return _StubProvider()
+
+        monkeypatch.setattr(orchestrator, "_dispatch_broker", _stub_dispatch)
+        summary = await orchestrator.sync_account(db, acc.id, alchemy_api_key=None)
+        await db.commit()
+
+        assert summary.account_type == "brokerage"
+        assert summary.total_synced == 2
+        assert summary.total_errors == 0
+
+        # Holdings + price rows are tagged with source='trading212'.
+        holdings = (
+            await db.execute(
+                select(AssetHolding).where(
+                    AssetHolding.account_id == acc.id,
+                    AssetHolding.is_active == True,  # noqa: E712
+                )
+            )
+        ).scalars().all()
+        assert len(holdings) == 2
+        assert all(h.source == "trading212" for h in holdings)
+
+        prices = (
+            await db.execute(
+                select(MarketPrice).where(MarketPrice.source == "trading212")
+            )
+        ).scalars().all()
+        assert len(prices) == 2

@@ -237,6 +237,17 @@ PDF 之外的来源走 CSV。和 PDF 一样**没有通用 CSV 格式**——每�
 - **测试**：`test_broker_sync.py` 用 `_FakeTR` monkeypatch `traderepublic._new_api`，覆盖 ISIN 映射 / 持仓映射 / fetch / 过期 session / 登录 round-trip / orchestrator——不连真网。真实登录需用户用真凭据 UAT。
 - **未做**：会话自动续期（过期就提示重连）；instrument_details 富化 asset_class（当前 ISIN 启发式）；交易流水导入。
 
+### Trading 212 同步（2026-10-05 实装，未 UAT）
+
+- **目标**：Trading 212 Invest 账户持仓纳入资产视图。复用 `broker_sync` + `wallet_sync` orchestrator + `broker_connections` 表，与 IBKR/TR 同路径。三个券商里实现最简：官方公开 REST API（beta），无两步轮询（IBKR）、无逆向/playwright（TR）。
+- **API**：base `https://live.trading212.com/api/v0`，HTTP Basic（API Key 为 username、Secret 为 password）。密钥在 T212 App **Settings → API** 生成（**只勾只读 scope**：account data + portfolio；Secret 只显示一次）。仅 Invest/Stocks ISA（无 CFD）；**Invest 与 ISA 是独立账户各需单独 key**；LIVE/DEMO 的 key 不互通（我们只用 LIVE）。限速宽松（positions 1/1s）。
+- **包**：`services/broker_sync/trading212.py`：`Trading212Provider`（可注入 `client` 供 MockTransport 测试）。两个 GET：`/equity/positions`（**instrument + currentPrice 内嵌**，一次拿全：ticker/name/isin/currency/quantity/averagePricePaid）+ `/equity/account/summary`（闲置现金 = availableToTrade+reservedForOrders+inPies，账户币种；**失败不阻塞持仓**）。错误 401/403/429 映射为带提示的 `BrokerSyncError`。
+- **映射**：T212 ticker 形如 `AAPL_US_EQ`/`VUSA_LSE_EQ`/`BTC_CRYPTO` → `_clean_symbol` 剥后缀得 symbol；asset_class：`_CRYPTO` 后缀→crypto，ISIN `US` 前缀或 `_US_` 段→us_stock，有 ISIN→eu_stock，否则 other（**positions 不带 instrument type，ETF 会归入 regional stock 而非 fund**——要分清需 ~5MB `metadata/instruments`（1/50s），本期不做）。`data_source_id` = ISIN（crypto 无 ISIN 用完整 ticker）；价格原币写 `market_prices(source='trading212')`，跳过 CoinGecko（同 IBKR）。
+- **凭据**：复用 `broker_connections`（迁移 `c5d6e7f8a9b0`：provider CHECK 加 `'trading212'`）。`token_enc` = 加密的 `"<api_key>:<api_secret>"`（Basic auth 本身即冒号拼接，key 内不可能有冒号）、`query_id=NULL`。PUT `/accounts/{id}/broker-connection` body：`{provider:"trading212", token:<key>, api_secret:<secret>}`（`BrokerConnectionIn` 的 `query_id` 改 optional、新增 `api_secret`，路由按 provider 校验）。
+- **前端**：`broker-connection-editor.tsx` 加 trading212 分支（API Key + Secret 两输入框）；`account-form.tsx` institution 匹配 `/trading\s*212/i` 预选 provider。
+- **测试**：`test_broker_sync.py` TestTrading212*（11 个）：映射 / MockTransport 抓包验证 Basic 头 / 错误码 / summary 降级 / orchestrator query_id=None 路径 + source 标记。
+- **未做**：ETF→fund 精分（metadata 端点）；Stocks ISA 多账户（= 再建一个 brokerage 账户各自绑 key，天然支持）；股息/交易流水导入。
+
 ### MCP Server 与后端的关系
 
 - `mcp-server/run.sh` 把 `backend/` 加入 `PYTHONPATH`，所以 MCP server 直接 `from app.models import ...` 复用同一份 ORM 模型与服务。

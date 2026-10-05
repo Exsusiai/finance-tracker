@@ -684,6 +684,7 @@ class BrokerConnection(Base):
     #   - ibkr: the Flex Web Service token (a single string)
     #   - traderepublic: the serialized web-login session cookies (Netscape
     #     cookie-jar text) obtained after the 2-step 4-digit-code login
+    #   - trading212: "<api_key>:<api_secret>" (HTTP Basic pair)
     token_enc: Mapped[str] = mapped_column(Text, nullable=False)
     # Flex Query ID (not a secret) — identifies which configured query to run.
     # Only used by IBKR; nullable because Trade Republic has no query concept.
@@ -697,7 +698,7 @@ class BrokerConnection(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('ibkr','traderepublic')",
+            "provider IN ('ibkr','traderepublic','trading212')",
             name="ck_broker_conn_provider",
         ),
         # A 0-length encrypted blob is always a bug (decrypt would fail).

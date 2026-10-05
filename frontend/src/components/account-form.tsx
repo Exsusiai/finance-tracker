@@ -494,7 +494,7 @@ export function AccountForm({
               {CRYPTO_TYPES.has(type)
                 ? "现在添加链上地址或 API 凭据后点「完成」。"
                 : type === "brokerage"
-                  ? `现在填入${institution === "Trade Republic" ? " Trade Republic" : " IBKR Flex"}凭据后点「完成」。`
+                  ? `现在填入${institution === "Trade Republic" ? " Trade Republic" : /trading\s*212/i.test(institution ?? "") ? " Trading 212" : " IBKR Flex"}凭据后点「完成」。`
                   : ""}
             </div>
           )}
@@ -519,14 +519,15 @@ export function AccountForm({
              : created?.type === "brokerage") && (() => {
             const brokerInstitution = (initial ?? created)?.institution ?? institution;
             const isTR = brokerInstitution === "Trade Republic";
+            const isT212 = /trading\s*212/i.test(brokerInstitution ?? "");
             return (
               <div className="pt-3 border-t border-border">
                 <h3 className="text-sm font-semibold mb-2">
-                  {isTR ? "Trade Republic 凭据" : "IBKR Flex 凭据"}
+                  {isTR ? "Trade Republic 凭据" : isT212 ? "Trading 212 凭据" : "IBKR Flex 凭据"}
                 </h3>
                 <BrokerConnectionEditor
                   accountId={(initial ?? created)!.id}
-                  initialProvider={isTR ? "traderepublic" : "ibkr"}
+                  initialProvider={isTR ? "traderepublic" : isT212 ? "trading212" : "ibkr"}
                 />
               </div>
             );

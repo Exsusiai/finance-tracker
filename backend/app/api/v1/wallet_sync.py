@@ -272,7 +272,7 @@ async def delete_exchange_connection(account_id: int, db: _db_dep):
 # ─── Broker connection (brokerage) ─────────────────────────────────────────
 
 
-_SUPPORTED_BROKERS = ("ibkr",)
+_SUPPORTED_BROKERS = ("ibkr", "trading212")
 
 
 def _broker_conn_to_out(row: BrokerConnection) -> BrokerConnectionOut:
@@ -320,6 +320,22 @@ async def upsert_broker_connection(
             status.HTTP_400_BAD_REQUEST, f"Unsupported broker {body.provider!r}"
         )
 
+    # Per-provider credential shapes → one encrypted blob in token_enc.
+    if provider == "ibkr":
+        if not (body.query_id or "").strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "query_id is required for IBKR"
+            )
+        blob = body.token
+        query_id = (body.query_id or "").strip()
+    else:  # trading212: Basic-auth pair joined as "<key>:<secret>"
+        if not (body.api_secret or "").strip():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "api_secret is required for Trading 212"
+            )
+        blob = f"{body.token.strip()}:{(body.api_secret or '').strip()}"
+        query_id = None
+
     existing = (
         await db.execute(
             select(BrokerConnection).where(BrokerConnection.account_id == account_id)
@@ -328,7 +344,7 @@ async def upsert_broker_connection(
 
     now = _utcnow_str()
     try:
-        token_enc = encrypt_str(body.token)
+        token_enc = encrypt_str(blob)
     except RuntimeError as exc:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -341,7 +357,7 @@ async def upsert_broker_connection(
             account_id=account_id,
             provider=provider,
             token_enc=token_enc,
-            query_id=body.query_id.strip(),
+            query_id=query_id,
             created_at=now,
             updated_at=now,
         )
@@ -350,7 +366,7 @@ async def upsert_broker_connection(
         row = existing
         row.provider = provider
         row.token_enc = token_enc
-        row.query_id = body.query_id.strip()
+        row.query_id = query_id
         # Reset sync state on rotation — a prior error refers to the old token.
         row.last_sync_status = None
         row.last_sync_error = None

@@ -1325,7 +1325,7 @@ export async function deleteExchangeConnection(
   });
 }
 
-export type BrokerProvider = "ibkr" | "traderepublic";
+export type BrokerProvider = "ibkr" | "traderepublic" | "trading212";
 
 export interface BrokerConnectionOut {
   id: number;
@@ -1340,11 +1340,10 @@ export interface BrokerConnectionOut {
   last_sync_error: string | null;
 }
 
-export interface BrokerConnectionInput {
-  provider: "ibkr";
-  token: string;
-  query_id: string;
-}
+export type BrokerConnectionInput =
+  | { provider: "ibkr"; token: string; query_id: string }
+  /** trading212: token = API Key (ID), api_secret = API Secret. */
+  | { provider: "trading212"; token: string; api_secret: string };
 
 // ─── Trade Republic 2-step web login ───────────────────────────────────────
 

@@ -890,11 +890,15 @@ class ExchangeConnectionOut(BaseModel):
 
 class BrokerConnectionIn(BaseModel):
     provider: str = Field(min_length=1, max_length=50)
-    # Flex Web Service token. Capped like exchange secrets; real tokens are
-    # ~40-char numeric strings.
+    # ibkr: Flex Web Service token (~40-char numeric string).
+    # trading212: the API Key (ID). Capped like exchange secrets.
     token: str = Field(min_length=1, max_length=512)
     # Flex Query ID — not a secret, identifies which configured query to run.
-    query_id: str = Field(min_length=1, max_length=64)
+    # Required for ibkr (validated in the route); unused by trading212.
+    query_id: str | None = Field(default=None, max_length=64)
+    # Trading 212 API Secret — required for trading212 (validated in the
+    # route); unused by ibkr.
+    api_secret: str | None = Field(default=None, max_length=512)
 
 
 class BrokerConnectionOut(BaseModel):

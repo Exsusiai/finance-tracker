@@ -97,7 +97,7 @@ def _dispatch_exchange(exchange: str):
     return _exchange_dispatch(exchange)
 
 
-def _dispatch_broker(provider: str, *, token: str, query_id: str):
+def _dispatch_broker(provider: str, *, token: str, query_id: str | None):
     return _broker_dispatch(provider, token=token, query_id=query_id)
 
 

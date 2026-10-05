@@ -118,7 +118,7 @@ def map_asset_class(asset_category: str, currency: str) -> str:
 # ─── Dispatcher ──────────────────────────────────────────────────────────────
 
 
-def dispatch(provider: str, *, token: str, query_id: str) -> BrokerProvider:
+def dispatch(provider: str, *, token: str, query_id: str | None) -> BrokerProvider:
     """Return the right provider for a broker id.
 
     Lazy-imports so the optional ``ibflex`` dependency is only required when
@@ -134,6 +134,11 @@ def dispatch(provider: str, *, token: str, query_id: str) -> BrokerProvider:
 
         # For Trade Republic the "token" is the serialized web-login cookies.
         return TradeRepublicProvider(cookies_blob=token)
+    if key == "trading212":
+        from app.services.broker_sync.trading212 import Trading212Provider
+
+        # For Trading 212 the "token" is "<api_key>:<api_secret>".
+        return Trading212Provider(credentials_blob=token)
     raise ValueError(f"Unsupported broker provider {provider!r}.")
 
 
