@@ -85,11 +85,14 @@ fi
 # Union all three detectors; any one seeing the port is enough.
 _port_pids() {
   local port="$1"
+  # Each detector is followed by an `echo`: fuser prints pids with NO trailing
+  # newline, so without the separator two detectors' pids concatenate into one
+  # bogus number ("134762134762") that kill can't hit.
   {
-    lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
-    fuser "${port}/tcp" 2>/dev/null | tr -s ' \t' '\n' || true
+    lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true; echo
+    fuser "${port}/tcp" 2>/dev/null || true; echo
     ss -tlnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 || true
-  } | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true
+  } | tr -s ' \t' '\n' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true
 }
 
 _free_port() {
