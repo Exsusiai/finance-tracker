@@ -89,7 +89,7 @@ _port_pids() {
     lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
     fuser "${port}/tcp" 2>/dev/null | tr -s ' \t' '\n' || true
     ss -tlnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 || true
-  } | grep -E '^[0-9]+$' | sort -u | tr '\n' ' '
+  } | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true
 }
 
 _free_port() {
