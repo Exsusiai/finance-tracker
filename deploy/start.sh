@@ -79,16 +79,29 @@ fi
 # new server die on EADDRINUSE while the health check below passes against the
 # WRONG process — the orphan then serves an in-memory build manifest that no
 # longer matches .next on disk (chunk 400s, "Application error" on every page).
+# lsof alone is NOT reliable: on legion (Ubuntu, 2026-10-16) lsof was blind to
+# a listening next-server that ss/fuser both saw, so the stale-listener guard
+# silently passed and an orphan kept serving a deleted build (chunk 400s).
+# Union all three detectors; any one seeing the port is enough.
+_port_pids() {
+  local port="$1"
+  {
+    lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+    fuser "${port}/tcp" 2>/dev/null | tr -s ' \t' '\n' || true
+    ss -tlnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 || true
+  } | grep -E '^[0-9]+$' | sort -u | tr '\n' ' '
+}
+
 _free_port() {
   local port="$1" pids
-  pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
-  if [ -n "$pids" ]; then
-    echo "[start] WARN: port ${port} still held by pid(s) ${pids} — killing stale listener(s)"
+  pids=$(_port_pids "$port")
+  if [ -n "${pids// /}" ]; then
+    echo "[start] WARN: port ${port} still held by pid(s) ${pids}— killing stale listener(s)"
     kill $pids 2>/dev/null || true
     sleep 2
-    pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-      echo "[start] ERROR: port ${port} still occupied by pid(s) ${pids} after kill; aborting." >&2
+    pids=$(_port_pids "$port")
+    if [ -n "${pids// /}" ]; then
+      echo "[start] ERROR: port ${port} still occupied by pid(s) ${pids}after kill; aborting." >&2
       exit 1
     fi
   fi
