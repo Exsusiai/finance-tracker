@@ -83,6 +83,7 @@ const EXCHANGE_INSTITUTIONS: Array<{ value: string; label: string }> = [
 const BROKER_INSTITUTIONS: Array<{ value: string; label: string }> = [
   { value: "Interactive Brokers", label: "Interactive Brokers (Flex)" },
   { value: "Trade Republic", label: "Trade Republic" },
+  { value: "Trading 212", label: "Trading 212" },
 ];
 
 
