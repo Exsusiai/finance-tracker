@@ -219,3 +219,52 @@ def test_real_pdf_round_trip(bank: str, filename: str) -> None:
             assert float(tx.get("amount", 0)) >= 0, (
                 f"{bank}: tx {tx} has negative amount; parsers must store ABS"
             )
+
+
+def _w(text: str, x0: float, top: float) -> dict:
+    return {"text": text, "x0": x0, "x1": x0 + 30, "top": top, "bottom": top + 10}
+
+
+def test_revolut_columns_german_layout() -> None:
+    """Revolut statements switched (2026-11) to German locale: dates as
+    DD.MM.YYYY and amounts as '3.500,00€' (suffix €, comma decimal). Columns
+    stay at the same x positions (Geldausgang ≈335 / Geldeingang ≈417)."""
+    from app.services.pdf_parser.engine import _detect_period, _parse_revolut_columns
+
+    page = [
+        # Summary row — must be ignored (no leading date)
+        _w("Konto", 42, 313), _w("(Girokonto)", 70, 313), _w("28,58€", 253, 313),
+        _w("3.530,99€", 335, 313), _w("3.505,00€", 417, 313), _w("2,59€", 535, 313),
+        _w("05.10.2026", 42, 475), _w("Chatgpt", 124, 475),
+        _w("23,00€", 335, 475), _w("5,58€", 535, 475),
+        _w("17.10.2026", 42, 542), _w("Von", 124, 542), _w("Tagesgeld", 145, 542),
+        _w("3.500,00€", 417, 542), _w("3.502,59€", 519, 542),
+        _w("Referenz:", 124, 552), _w("Funding", 170, 552),
+        # Zero-amount interest row → skipped
+        _w("20.10.2026", 42, 600), _w("Net", 124, 600), _w("interest", 145, 600),
+        _w("0,00€", 417, 600), _w("166,73€", 519, 600),
+    ]
+    txs = _parse_revolut_columns([page])
+    got = [(t["occurred_at"][:10], t["description"], t["amount"], t["type"]) for t in txs]
+
+    assert got == [
+        ("2026-10-05", "Chatgpt", "23.00", "expense"),
+        ("2026-10-17", "Von Tagesgeld", "3500.00", "income"),
+    ]
+    assert "Referenz: Funding" in txs[1]["raw_description"]
+
+    assert _detect_period(
+        "Kontotransaktionen von 1. Oktober 2026 bis 31. Oktober 2026"
+    ) == "2026-10"
+
+
+def test_revolut_columns_english_layout_still_parses() -> None:
+    from app.services.pdf_parser.engine import _parse_revolut_columns
+
+    page = [
+        _w("Oct", 42, 475), _w("5,", 60, 475), _w("2026", 72, 475), _w("Chatgpt", 124, 475),
+        _w("€1,023.00", 335, 475), _w("€5.58", 535, 475),
+    ]
+    txs = _parse_revolut_columns([page])
+    assert len(txs) == 1
+    assert txs[0]["amount"] == "1023.00" and txs[0]["type"] == "expense"

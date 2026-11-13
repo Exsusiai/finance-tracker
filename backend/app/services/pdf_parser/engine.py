@@ -240,6 +240,12 @@ def _detect_period(text: str) -> str | None:
         mon = _MONTH_ABBR_EN.get(m.group(1)[:3].title())
         if mon:
             return f"{m.group(2)}-{mon:02d}"
+    # Revolut German "von 1. Oktober 2026 bis 31. Oktober 2026"
+    m = re.search(r"von\s+\d{1,2}\.\s*([A-Za-zä]+)\s+(\d{4})\s+bis", text)
+    if m:
+        mon = _MONTH_NAME_DE.get(m.group(1).lower())
+        if mon:
+            return f"{m.group(2)}-{mon:02d}"
     # N26 "01.04.2026 until 30.04.2026"
     m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s+until", text)
     if m:
@@ -253,6 +259,12 @@ def _detect_period(text: str) -> str | None:
 _MONTH_ABBR_EN = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
     "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+_MONTH_NAME_DE = {
+    "januar": 1, "februar": 2, "märz": 3, "april": 4, "mai": 5, "juni": 6,
+    "juli": 7, "august": 8, "september": 9, "oktober": 10, "november": 11, "dezember": 12,
 }
 
 
@@ -763,6 +775,40 @@ _REVOLUT_COL_IN_X0 = (405.0, 475.0)
 _REVOLUT_COL_BAL_X0 = (480.0, 580.0)
 
 
+_REVOLUT_DATE_EN = re.compile(r"^(\w{3})\s+(\d{1,2}),\s+(\d{4})\s+\S")  # "Oct 5, 2026 …"
+_REVOLUT_DATE_DE = re.compile(r"^(\d{2})\.(\d{2})\.(\d{4})\s+\S")  # "05.10.2026 …"
+_REVOLUT_AMT_EN = re.compile(r"^€([\d,]+\.\d{2})$")  # "€1,234.56"
+_REVOLUT_AMT_DE = re.compile(r"^([\d.]+,\d{2})€$")  # "1.234,56€"
+
+
+def _revolut_row_date(row_text: str) -> tuple[str, int] | None:
+    """Leading row date → (ISO timestamp, number of words it spans).
+
+    Revolut has shipped both an English layout ("Oct 5, 2026", 3 words) and,
+    since 2026-11, a German one ("05.10.2026", 1 word).
+    """
+    m = _REVOLUT_DATE_DE.match(row_text)
+    if m:
+        day, month, year = m.groups()
+        return f"{year}-{month}-{day}T00:00:00Z", 1
+    m = _REVOLUT_DATE_EN.match(row_text)
+    if m and m.group(1) in _MONTH_ABBR_EN:
+        mon, day, year = m.groups()
+        return f"{year}-{_MONTH_ABBR_EN[mon]:02d}-{int(day):02d}T00:00:00Z", 3
+    return None
+
+
+def _revolut_eur_amount(text: str) -> Decimal | None:
+    """Parse a Revolut € amount word in either locale; None if not one."""
+    m = _REVOLUT_AMT_EN.match(text)
+    if m:
+        return Decimal(m.group(1).replace(",", ""))
+    m = _REVOLUT_AMT_DE.match(text)
+    if m:
+        return _de_amount(m.group(1))
+    return None
+
+
 def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
     """Column-aware Revolut parser using word x-coordinates.
 
@@ -787,7 +833,10 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
     # Continuation lines starting with these tokens carry counterparty IBAN /
     # routing context that we want appended to the previous transaction's
     # description, so the transfer matcher can find the IBAN later.
-    _CONTINUATION_PREFIXES = ("Reference:", "From:", "To:", "IBAN", "BIC")
+    _CONTINUATION_PREFIXES = (
+        "Reference:", "From:", "To:", "IBAN", "BIC",
+        "Referenz:", "Von:", "An:",  # German layout
+    )
 
     for words in pages_words:
         # Bucket words by rounded `top` (y-position of the line)
@@ -801,28 +850,22 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
             row = sorted(rows[top], key=lambda w: w["x0"])
             row_text = " ".join(w["text"] for w in row)
 
-            # Match leading date "Mon DD, YYYY"
-            m = re.match(r"^(\w{3})\s+(\d{1,2}),\s+(\d{4})\s+(.+)", row_text)
-            if not m:
+            parsed_date = _revolut_row_date(row_text)
+            if parsed_date is None:
                 # Possible continuation line: append to last_tx.raw_description
                 if last_tx is not None and any(
                     row_text.lstrip().startswith(p) for p in _CONTINUATION_PREFIXES
                 ):
                     last_tx["raw_description"] = (last_tx.get("raw_description") or "") + " | " + row_text.strip()
                 continue
-            mon, day, year, _rest = m.groups()
-            if mon not in _MONTH_ABBR_EN:
-                continue
+            date_iso, date_word_count = parsed_date
 
             # Pick € amounts whose x0 lies in money-out / money-in column bands
             money_out: Decimal | None = None
             money_in: Decimal | None = None
             for w in row:
-                if not w["text"].startswith("€"):
-                    continue
-                try:
-                    amt = Decimal(w["text"][1:].replace(",", ""))
-                except Exception:
+                amt = _revolut_eur_amount(w["text"])
+                if amt is None:
                     continue
                 if _REVOLUT_COL_OUT_X0[0] <= w["x0"] <= _REVOLUT_COL_OUT_X0[1]:
                     money_out = amt
@@ -837,10 +880,9 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
                 continue
 
             # Description = words between date and the first € amount
-            date_word_count = 3  # Mon, DD,, YYYY
             desc_words: list[str] = []
             for w in row[date_word_count:]:
-                if w["text"].startswith("€"):
+                if _revolut_eur_amount(w["text"]) is not None:
                     break
                 desc_words.append(w["text"])
             description = " ".join(desc_words).strip()
@@ -856,10 +898,6 @@ def _parse_revolut_columns(pages_words: list[list[dict]]) -> list[dict]:
             if amount is None or amount == 0:
                 continue
 
-            try:
-                date_iso = f"{int(year)}-{_MONTH_ABBR_EN[mon]:02d}-{int(day):02d}T00:00:00Z"
-            except Exception:
-                continue
             seq += 1
             tx = _make_tx(
                 date_iso=date_iso, amount=amount, tx_type=tx_type,
